@@ -132,7 +132,9 @@ async def check_isolation(h: Harness) -> None:
     assert (await w_alice.append([event("a1")], "c-alice")).outcome == "accepted"
 
     # bob 的 scope 存在但为空 —— 他的 journal 是独立的流
-    assert (await j.head(make_scope("u2", "s1"))) == Head(seq=0, state_version=0, owner_epoch=0)
+    assert await j.head(bob, make_scope("u2", "s1")) == Head(
+        seq=0, state_version=0, owner_epoch=0
+    )
     assert await read_all(j, bob, make_scope("u2", "s1")) == ()
 
     # bob 有自己的权限，却读不了 alice 的 scope ——
@@ -147,6 +149,10 @@ async def check_isolation(h: Harness) -> None:
     # 越权写
     with pytest.raises(ScopeViolation):
         writer_for(j, alice, make_scope("u2", "s1"))
+
+    # 越权读计数器 —— head 也是这个 scope 的信息，一样要带 principal
+    with pytest.raises(ScopeViolation):
+        await j.head(bob, make_scope("u1", "s1"))
 
 
 # ---------- 2. seq 分配 ----------
@@ -208,14 +214,14 @@ async def check_no_seq_gap_after_failure(h: Harness) -> None:
     s = make_scope()
     w = writer_for(j, p, s)
 
-    head_before = await j.head(s)
+    head_before = await j.head(p, s)
 
     bad = event("b2")
     object.__setattr__(bad, "payload", {"obj": object()})  # 绕过 __post_init__ 造脏数据
     with pytest.raises(ValidationError):
         await w.append([event("b1"), bad, event("b3")], "c-bad")
 
-    assert await j.head(s) == head_before, "被拒的批次不能改变 head"
+    assert await j.head(p, s) == head_before, "被拒的批次不能改变 head"
     assert await read_all(j, p, s) == (), "被拒的批次不能留下任何记录"
 
     receipt = await w.append([event("ok")], "c-ok")
@@ -239,7 +245,7 @@ async def check_commit_idempotency(h: Harness) -> None:
     assert second.outcome == "duplicate"
     assert second.first_seq == first.first_seq
     assert second.checksum == first.checksum
-    assert await j.head(s) == Head(seq=2, state_version=0, owner_epoch=0)
+    assert await j.head(p, s) == Head(seq=2, state_version=0, owner_epoch=0)
     assert len(await read_all(j, p, s)) == 2
 
 
@@ -332,7 +338,7 @@ async def check_state_cas_and_fencing(h: Harness) -> None:
 
     # 只有两次成功的提交消耗了 seq —— 失败路径不能留痕。
     # 这条断言专门盯住「CAS 判定是否在 seq 分配之前」：反过来会让 seq 变成 4。
-    assert await j.head(s) == Head(seq=2, state_version=2, owner_epoch=new_epoch)
+    assert await j.head(p, s) == Head(seq=2, state_version=2, owner_epoch=new_epoch)
 
 
 # ---------- 8. observation 不推 state_version ★★ ----------
@@ -354,13 +360,13 @@ async def check_observation_does_not_bump_state_version(h: Harness) -> None:
 
     await sw.commit_state([state("base")], "c-base",
                           expected_state_version=0, owner_epoch=epoch)
-    after_state = await j.head(s)
+    after_state = await j.head(p, s)
 
     for i in range(50):
         receipt = await w.append([observation(f"o{i}")], f"co{i}")
         assert receipt.outcome == "accepted"
 
-    after_obs = await j.head(s)
+    after_obs = await j.head(p, s)
     assert after_obs.state_version == after_state.state_version, (
         "observation 推进了 state_version —— owner 的 expected_state_version 会失效"
     )
@@ -391,7 +397,7 @@ async def check_state_version_advances_once_per_commit(h: Harness) -> None:
 
     receipt = await sw.commit_state([state(f"s{i}") for i in range(3)], "c3",
                                     expected_state_version=0, owner_epoch=epoch)
-    head = await j.head(s)
+    head = await j.head(p, s)
     assert receipt.state_version == 1, "一次提交是一个原子决定，state_version 只 +1"
     assert head.state_version == 1
     assert head.seq == 3, "全部记录都可见 —— 批次是原子的"
@@ -402,7 +408,7 @@ async def check_state_version_advances_once_per_commit(h: Harness) -> None:
             [state("s3"), observation("o0")], "c-mixed",
             expected_state_version=1, owner_epoch=epoch,
         )
-    assert await j.head(s) == head, "被拒的 state commit 不能留下痕迹"
+    assert await j.head(p, s) == head, "被拒的 state commit 不能留下痕迹"
 
 
 # ---------- 9. writer capability ★ ----------
@@ -625,7 +631,7 @@ async def check_over_limit_rejected(h: Harness) -> None:
     with pytest.raises((LimitExceeded, ValidationError)):
         await w.append(too_many, "c-big")
 
-    assert await j.head(s) == Head(seq=0, state_version=0, owner_epoch=0), (
+    assert await j.head(p, s) == Head(seq=0, state_version=0, owner_epoch=0), (
         "超限批次不能留下部分记录"
     )
 
@@ -687,7 +693,7 @@ async def check_reopen_durability(h: Harness) -> None:
                           expected_state_version=0, owner_epoch=epoch)
 
     before_items = await read_all(j, p, s)
-    before_head = await j.head(s)
+    before_head = await j.head(p, s)
 
     j.close()
     reopened = reopen()
@@ -695,7 +701,7 @@ async def check_reopen_durability(h: Harness) -> None:
         after_items = await read_all(reopened, p, s)
         assert [r.record_id for r in after_items] == [r.record_id for r in before_items]
         assert [r.payload for r in after_items] == [r.payload for r in before_items]
-        head = await reopened.head(s)
+        head = await reopened.head(p, s)
         assert head.seq == before_head.seq
         assert head.state_version == before_head.state_version
         assert head.owner_epoch == before_head.owner_epoch
@@ -717,7 +723,7 @@ async def check_crash_atomicity(h: Harness) -> None:
     j = h.journal
     p = make_principal()
     s = make_scope()
-    head_before = await j.head(s)
+    head_before = await j.head(p, s)
 
     crash = getattr(j, "crash_on_next_commit", None)
     assert crash is not None, "声明了 simulate_crash 能力就必须提供崩溃注入钩子"
@@ -730,7 +736,7 @@ async def check_crash_atomicity(h: Harness) -> None:
     with pytest.raises(BaseException):  # noqa: B017 - 见上方理由
         await w.append([event("x"), event("y")], "c-crash")
 
-    assert await j.head(s) == head_before
+    assert await j.head(p, s) == head_before
     assert await read_all(j, p, s) == (), "崩溃时整批必须不可见，不能只写一半"
 
 

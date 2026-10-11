@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from core.errors import LogCorrupt
 from core.journal import (
     JsonlJournal,
     Principal,
@@ -124,7 +125,7 @@ async def test_sigkill_preserves_acked_commits(tmp_path: pathlib.Path) -> None:
         assert [r.seq for r in items] == list(range(1, len(items) + 1)), (
             "seq 必须连续 —— 崩溃不能留下空洞"
         )
-        head = await journal.head(scope)
+        head = await journal.head(make_principal(unrestricted=True), scope)
         assert head.seq == len(items)
     finally:
         journal.close()
@@ -162,7 +163,7 @@ async def test_half_written_last_line_is_dropped_on_reopen(tmp_path: pathlib.Pat
         assert all(r.record_id != "halfwritten" for r in items), (
             "只写了一半的那次提交不能出现在日志里"
         )
-        head_before = await journal.head(scope)
+        head_before = await journal.head(principal, scope)
     finally:
         journal.close()
 
@@ -180,7 +181,7 @@ async def test_half_written_last_line_is_dropped_on_reopen(tmp_path: pathlib.Pat
         assert receipt.outcome == "accepted"
         items_after = await read_all(reopened, principal, scope)
         assert [r.record_id for r in items_after][-1] == "after"
-        assert (await reopened.head(scope)).seq == head_before.seq + 1
+        assert (await reopened.head(principal, scope)).seq == head_before.seq + 1
     finally:
         reopened.close()
 
@@ -243,9 +244,59 @@ async def test_batch_cut_in_half_leaves_nothing_visible(tmp_path: pathlib.Path) 
             "这一批里已经落盘的前几条也不能被看见"
         )
         assert [r.seq for r in items] == list(range(1, len(items) + 1)), "seq 不能有空洞"
-        assert (await journal.head(scope)).seq == len(items)
+        assert (await journal.head(make_principal(unrestricted=True), scope)).seq == len(items)
     finally:
         journal.close()
+
+
+# ---------- 5. 中间一行损坏 ----------
+
+async def test_corrupt_middle_line_is_reported_not_truncated(
+    tmp_path: pathlib.Path,
+) -> None:
+    """中间一整行解析不出来 → 报 LogCorrupt，且一个字都不许截掉。
+
+    这条防的是静默丢数据：把「解析失败」一律当成「末尾那半行」，就会把损坏点之后
+    还完好的提交一起 truncate 掉，而且没有任何声音。日志不可原位修改，丢掉的记录
+    再也回不来。
+
+    另外要求重复调用都报错 —— 只报一次就等于「重试一下就好了」，那还是静默。
+    """
+    root = tmp_path / "journal"
+    scope = Scope(user_id=USER, session_id=SESSION)
+    principal = make_principal(unrestricted=True)
+
+    journal = JsonlJournal(root=root)
+    try:
+        writer = journal.bind(principal, scope, "core")
+        for i in range(4):
+            await writer.append([event_draft(f"r{i}")], f"c{i}")
+    finally:
+        journal.close()
+
+    (path,) = journal_files(root)
+    lines = path.read_bytes().split(b"\n")
+    assert len(lines) == 5, "4 行提交 + 末尾空串"
+    lines[2] = b'{"v":1,"kind":"commit","garbage":true' + b" " * 40
+    path.write_bytes(b"\n".join(lines))
+    size_before = path.stat().st_size
+
+    reopened = JsonlJournal(root=root)
+    try:
+        for _ in range(2):
+            with pytest.raises(LogCorrupt):
+                await read_all(reopened, principal, scope)
+            with pytest.raises(LogCorrupt):
+                await reopened.head(principal, scope)
+    finally:
+        reopened.close()
+
+    assert path.stat().st_size == size_before, "损坏点之后的字节被截掉了"
+    # r2 那一行就是我们弄坏的那行，它没了是应该的。关键是 r3 —— 它排在损坏点
+    # 后面，而「把解析失败当成末尾半行」的写法会把它一起截掉。
+    raw = path.read_bytes()
+    for record_id in (b'"r0"', b'"r1"', b'"r3"'):
+        assert record_id in raw, f"{record_id!r} 被截掉了 —— 它本来还在文件里"
 
 
 def _parses(line: bytes) -> bool:

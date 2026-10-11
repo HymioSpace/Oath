@@ -146,7 +146,13 @@ class Journal(Protocol):
 
     async def read(self, request: ReadRequest) -> ReadPage: ...
 
-    async def head(self, scope: Scope) -> Head: ...
+    async def head(self, principal: Principal, scope: Scope) -> Head:
+        """一个 scope 当前写到哪了。越权时抛 ScopeViolation。
+
+        计数器也属于这个 scope 的信息，所以和 bind / read 一样要带 principal ——
+        授权在 journal 层做，不靠调用方自觉。
+        """
+        ...
 
     def unseal_cursor(self, token: str, request: ReadRequest) -> Cursor:
         """解出 cursor 并校验它适用于当前请求。"""

@@ -131,19 +131,29 @@ class _ScopeFile:
         self.good_bytes = os.fstat(self._fd).st_size
 
     def read_all_lines(self) -> list[tuple[int, dict[str, Any]]]:
-        """重放用。返回 [(行起始偏移, 解析后的对象)]。只处理完整行。"""
+        """重放用。返回 [(行起始偏移, 解析后的对象)]。
+
+        只有末尾那行允许不完整 —— 进程写到一半就没了。按行迭代天然分得清：一个
+        不以换行结尾的分块只可能是最后一个分块。
+
+        完整的一行解析不出来就是真损坏，抛 LogCorrupt。不能在这里停下来了事：
+        调用方据此把文件截到「已知完整前缀」，等于把后面还完好的提交一起丢掉，
+        而且丢得没有声音。
+        """
         entries: list[tuple[int, dict[str, Any]]] = []
         offset = 0
         good = 0
         with open(self.path, "rb") as fh:
             for raw in fh:
                 if not raw.endswith(b"\n"):
-                    # 最后一行没写完：进程写到一半就没了。这种情况只可能出现在末尾。
+                    # 末尾的半行：写到一半进程就没了。丢掉它，不算一次提交。
                     break
                 try:
                     obj = json.loads(raw)
-                except json.JSONDecodeError:
-                    break
+                except json.JSONDecodeError as exc:
+                    raise LogCorrupt(
+                        f"{self.path} 偏移 {offset} 处的完整行解析失败: {exc}"
+                    ) from exc
                 entries.append((offset, obj))
                 offset += len(raw)
                 good = offset
@@ -297,9 +307,18 @@ class JsonlJournal(Journal):
         if stream is not None:
             return stream
         stream = _Stream(scope=scope)
+        handle = _ScopeFile(self._root, scope)
         self._streams[key] = stream
-        self._files[key] = _ScopeFile(self._root, scope)
-        self._replay(stream)
+        self._files[key] = handle
+        try:
+            self._replay(stream)
+        except BaseException:
+            # 重放失败不能把半成品留在缓存里：下一次调用会直接拿到它，把损坏当成
+            # 一个正常的空流用，于是只在第一次调用时报错。
+            del self._streams[key]
+            del self._files[key]
+            handle.close()
+            raise
         return stream
 
     def _existing_stream(self, scope: Scope) -> _Stream | None:
@@ -628,7 +647,8 @@ class JsonlJournal(Journal):
                 next_cursor=self._cursors.seal(cursor) if cursor is not None else None,
             )
 
-    async def head(self, scope: Scope) -> Head:
+    async def head(self, principal: Principal, scope: Scope) -> Head:
+        _authorize(principal, scope)
         async with self._lock:
             stream = self._existing_stream(scope)
             if stream is None:
