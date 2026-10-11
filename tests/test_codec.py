@@ -1,4 +1,4 @@
-"""codec 与 clock 的单元测试。
+"""codec 的单元测试。
 
 覆盖点：
 - canonical JSON 与字典序无关（同样的键顺序不同的 dict 得到同样的字节）
@@ -13,8 +13,15 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from core.clock import ManualClock, SystemClock, from_iso, to_iso
-from core.codec import assert_json_safe, canonical_bytes, canonical_json, checksum_of, hash_json
+from core.codec import (
+    assert_json_safe,
+    canonical_bytes,
+    canonical_json,
+    checksum_of,
+    from_iso,
+    hash_json,
+    to_iso,
+)
 from core.errors import ValidationError
 
 
@@ -109,36 +116,6 @@ class TestIsoTimestamps:
         with pytest.raises(ValidationError):
             to_iso(datetime(2026, 10, 11, 3, 4, 5))
 
-
-class TestClocks:
-    def test_system_clock_is_aware(self) -> None:
-        now = SystemClock().now()
-        assert now.tzinfo is not None
-
-    def test_manual_clock_advances(self) -> None:
-        clock = ManualClock()
-        first = clock.now()
-        clock.advance(5)
-        assert (clock.now() - first).total_seconds() == 5
-
-    def test_manual_clock_advance_supports_milliseconds(self) -> None:
-        clock = ManualClock()
-        first = clock.now()
-        clock.advance(milliseconds=250)
-        assert (clock.now() - first).total_seconds() == 0.25
-
-    def test_manual_clock_is_frozen(self) -> None:
-        # 不自动流逝是硬约定 —— 确定性重放要求时间只在测试显式推动时变化。
-        clock = ManualClock()
-        assert clock.now() == clock.now()
-
-    def test_manual_clock_set_can_move_backwards(self) -> None:
-        # 允许回拨：feature02 要测「deadline 尚未到达」这类边界，必须能造出过去的时间。
-        clock = ManualClock()
-        first = clock.now()
-        clock.set(first - timedelta(hours=1))
-        assert clock.now() < first
-
-    def test_manual_clock_rejects_naive_start(self) -> None:
+    def test_from_iso_rejects_naive_input(self) -> None:
         with pytest.raises(ValueError):
-            ManualClock(start=datetime(2026, 1, 1))
+            from_iso("2026-10-11T03:04:05")

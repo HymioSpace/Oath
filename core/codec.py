@@ -1,4 +1,4 @@
-"""canonical JSON 与哈希 —— 全项目唯一的序列化约定。
+"""canonical JSON、哈希与时间戳 —— 全项目唯一的序列化约定。
 
 幂等重试依赖「同样的内容算出同样的字节」。只要有地方绕开这里直接
 `json.dumps`，字典键顺序就会让 checksum 变化，重试被误判成内容冲突。
@@ -8,12 +8,16 @@
 - `ensure_ascii=False`：中文不转义
 - `separators=(",", ":")`：无多余空白
 - 不接受 float，见 `assert_json_safe`
+- 时间一律 `to_iso` 成 UTC 字符串，见文件末尾
 """
 from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from typing import Any
+
+from core.errors import ValidationError
 
 #: payload 里允许出现的类型。刻意保守：bytes / datetime / float 都要求先转成
 #: 明确的表示，因为它们在 JSON 里的编码不是无损且跨实现稳定的。
@@ -73,3 +77,25 @@ def checksum_of(parts: dict[str, Any]) -> str:
     一旦算进 checksum，重试必然被判成「同键不同内容」。
     """
     return hash_json(parts)
+
+
+def to_iso(moment: datetime) -> str:
+    """时间的序列化格式。一律转成 UTC 再去掉时区后缀。
+
+    `+08:00` 和 `Z` 是同一时刻但字节不同，而 checksum、payload_hash、cursor
+    都要求字节级稳定。
+
+    naive datetime 直接拒绝：`astimezone()` 会静默套用本机时区，
+    同一时刻在 CI（UTC）和开发机（+08:00）上会算出不同的字符串。
+    """
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValidationError(f"to_iso 需要 tz-aware datetime，收到 naive 值: {moment!r}")
+    return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def from_iso(text: str) -> datetime:
+    """`to_iso` 的逆操作。解析失败抛 ValueError（属于调用方契约违反）。"""
+    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"时间戳缺少时区信息: {text}")
+    return parsed.astimezone(UTC)

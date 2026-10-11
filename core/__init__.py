@@ -8,5 +8,5 @@ core 只包含：事件消费与状态机、agent step、工具生命周期、jo
 
 core 不禁止第三方库 —— 需要什么就 import 什么，装在 `pyproject.toml` 里。
 
-各模块直接 `from core.clock import ...` 这样引用，这里不做汇总 re-export。
+各模块直接 `from core.codec import ...` 这样引用，这里不做汇总 re-export。
 """

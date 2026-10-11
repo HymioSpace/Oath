@@ -23,10 +23,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from core.clock import ManualClock
 from core.journal import JsonlJournal, Principal, RecordDraft, Scope
-
-FIXED = ManualClock()
 
 
 def event(record_id: str) -> RecordDraft:
@@ -43,7 +40,7 @@ def event(record_id: str) -> RecordDraft:
 
 async def main(root: str, user: str, session: str, ack_path: str,
                n_commits: int, mode: str) -> None:
-    journal = JsonlJournal(root=root, clock=FIXED)
+    journal = JsonlJournal(root=root)
     scope = Scope(user_id=user, session_id=session)
     principal = Principal.unrestricted("child")
     writer = journal.bind(principal, scope, "child")

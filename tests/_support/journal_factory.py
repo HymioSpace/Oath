@@ -11,12 +11,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
-from core.clock import ManualClock
 from core.journal import (
-    FileBlobStore,
+    BlobStore,
+    Journal,
     JournalLimits,
     JsonlJournal,
-    JsonlLease,
+    Lease,
     Principal,
     Scope,
 )
@@ -24,15 +24,18 @@ from core.journal import (
 
 @dataclass(frozen=True, slots=True)
 class Harness:
-    """一个被测 adapter 的全部外部可见部件。"""
+    """一个被测 adapter 的全部外部可见部件。
 
-    journal: JsonlJournal
-    lease: JsonlLease
-    blobs: FileBlobStore
+    类型写接口而不是 Jsonl* —— 这一处赋值就是 mypy 核对实现是否满足接口的地方。
+    """
+
+    journal: Journal
+    lease: Lease
+    blobs: BlobStore
 
 
 def _jsonl(tmp_path: Any) -> Iterator[Harness]:
-    journal = JsonlJournal(root=tmp_path, clock=ManualClock(), limits=JournalLimits())
+    journal = JsonlJournal(root=tmp_path, limits=JournalLimits())
     try:
         yield Harness(
             journal=journal,

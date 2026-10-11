@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from core.clock import from_iso, to_iso
+from core.codec import from_iso, to_iso
 from core.primitives import (
     SCHEMA_VERSION,
     AppendOutcome,

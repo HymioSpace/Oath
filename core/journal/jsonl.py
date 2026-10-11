@@ -21,10 +21,10 @@ import json
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any
 
-from core.clock import Clock, SystemClock, from_iso, to_iso
-from core.codec import canonical_json, checksum_of, sha256_hex
+from core.codec import canonical_json, checksum_of, from_iso, sha256_hex, to_iso
 from core.errors import (
     FencedOut,
     InjectedCrash,
@@ -33,7 +33,16 @@ from core.errors import (
     StateVersionConflict,
     ValidationError,
 )
-from core.journal.capabilities import BLOB_STORE, REOPEN, SIMULATE_CRASH
+from core.journal.api import (
+    BLOB_STORE,
+    REOPEN,
+    SIMULATE_CRASH,
+    BlobStore,
+    Journal,
+    Lease,
+    StateWriter,
+    Writer,
+)
 from core.journal.cursor import Cursor, CursorCodec, check_page_limit
 from core.journal.records import (
     CommitBatch,
@@ -74,7 +83,7 @@ class _StoredCommit:
     checksum: str
     first_seq: int
     record_count: int
-    committed_at: Any
+    committed_at: datetime
     state_version: int | None = None
     owner_epoch: int | None = None
 
@@ -179,7 +188,7 @@ class _ScopeFile:
             os.close(self._fd)
 
 
-class FileBlobStore:
+class FileBlobStore(BlobStore):
     """内容寻址的 blob 存储：一个 hash 一个文件。"""
 
     def __init__(self, root: str) -> None:
@@ -223,18 +232,16 @@ class FileBlobStore:
             return False
 
 
-class JsonlJournal:
+class JsonlJournal(Journal):
     """JSONL journal。Oath 的默认存储：只用标准库，装上就持久化。"""
 
     def __init__(
         self,
         root: str | os.PathLike[str],
-        clock: Clock | None = None,
         limits: JournalLimits | None = None,
     ) -> None:
         self._root = os.fspath(root)
         os.makedirs(self._root, exist_ok=True)
-        self._clock = clock if clock is not None else SystemClock()
         self._limits = limits if limits is not None else JournalLimits()
         self._cursors = CursorCodec()
         self._blobs = FileBlobStore(self._root)
@@ -271,7 +278,7 @@ class JsonlJournal:
 
     def reopen(self) -> JsonlJournal:
         """在同一个目录上开一个新实例。close() 之后调用。"""
-        return JsonlJournal(self._root, clock=self._clock, limits=self._limits)
+        return JsonlJournal(self._root, limits=self._limits)
 
     def crash_on_next_commit(self) -> None:
         """让下一次 commit 写到一半崩溃（feature07 的崩溃注入钩子）。
@@ -486,7 +493,7 @@ class JsonlJournal:
 
             # (4) 分配 seq 与时间戳。
             first_seq = stream.head_seq + 1
-            committed_at = self._clock.now()
+            committed_at = datetime.now(UTC)
             new_state_version = stream.state_version + 1 if is_state else None
 
             written = [
@@ -567,7 +574,7 @@ class JsonlJournal:
 
     # ---------- 租约 ----------
 
-    def _append_lease(self, stream: _Stream, epoch: int, holder: str, at: Any) -> None:
+    def _append_lease(self, stream: _Stream, epoch: int, holder: str, at: datetime) -> None:
         self._files[stream.scope.key()].append_line({
             "v": LINE_VERSION,
             "kind": "lease",
@@ -612,7 +619,7 @@ class JsonlJournal:
             cursor: Cursor | None = None
             if scanned < stream.head_seq:
                 cursor = Cursor.from_request(
-                    request, through_seq=scanned, issued_at=self._clock.now(),
+                    request, through_seq=scanned, issued_at=datetime.now(UTC),
                 )
             return ReadPage(
                 items=tuple(items),
@@ -640,7 +647,7 @@ class JsonlJournal:
         self._streams.clear()
 
 
-class JsonlWriter:
+class JsonlWriter(Writer):
     """普通模块的追加能力。构造即固定 scope / producer / 白名单。"""
 
     def __init__(self, journal: JsonlJournal, principal: Principal, scope: Scope,
@@ -669,7 +676,7 @@ class JsonlWriter:
         )
 
 
-class JsonlStateWriter:
+class JsonlStateWriter(StateWriter):
     """执行状态提交能力。epoch 在构造时固定 —— writer 本身就是一张 fencing 凭证。
 
     只能写 category=state。诊断记录搭执行状态提交的便车会让「哪些记录参与恢复」
@@ -704,7 +711,7 @@ class JsonlStateWriter:
         )
 
 
-class JsonlLease:
+class JsonlLease(Lease):
     """租约。epoch 递增本身是一条日志行，所以重启后仍单调。"""
 
     def __init__(self, journal: JsonlJournal) -> None:
@@ -714,8 +721,7 @@ class JsonlLease:
         async with self._journal._lock:
             stream = self._journal._stream(scope)
             epoch = stream.owner_epoch + 1
-            now = self._journal._clock.now()
-            self._journal._append_lease(stream, epoch, holder, now)
+            self._journal._append_lease(stream, epoch, holder, datetime.now(UTC))
             stream.owner_epoch = epoch
             stream.holder = holder
             return epoch

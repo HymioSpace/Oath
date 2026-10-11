@@ -17,8 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from core.clock import from_iso, to_iso
-from core.codec import hash_json
+from core.codec import from_iso, hash_json, to_iso
 from core.errors import CursorInvalid, LimitExceeded
 from core.journal.records import ReadRequest, RecordFilter
 

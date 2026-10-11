@@ -33,12 +33,15 @@ from core.journal import (
     SIMULATE_CRASH,
     BlobRef,
     Head,
+    Journal,
     JournalRecord,
     Principal,
+    ReadPage,
     ReadRequest,
     RecordDraft,
     RecordFilter,
     Scope,
+    Writer,
 )
 from tests._support.journal_factory import ADAPTERS, Harness, make_principal, make_scope
 
@@ -92,9 +95,9 @@ def state(record_id: str, *, type_: str = "session.state", payload: dict[str, An
     )
 
 
-async def read_all(journal: Any, principal: Principal, scope: Scope, *,
+async def read_all(journal: Journal, principal: Principal, scope: Scope, *,
                    limit: int = 100, record_filter: RecordFilter | None = None,
-                   after_seq: int = 0) -> tuple[Any, ...]:
+                   after_seq: int = 0) -> tuple[JournalRecord, ...]:
     """反复翻页直到读完。
 
     故意用循环而不是一次 limit=100：只有走真实分页，才能发现「过滤流在空页处
@@ -112,8 +115,8 @@ async def read_all(journal: Any, principal: Principal, scope: Scope, *,
         after_seq = page.through_seq
 
 
-def writer_for(journal: Any, principal: Principal, scope: Scope, producer: str = "test",
-               **kwargs: Any) -> Any:
+def writer_for(journal: Journal, principal: Principal, scope: Scope, producer: str = "test",
+               **kwargs: Any) -> Writer:
     return journal.bind(principal, scope, producer, **kwargs)
 
 
@@ -497,20 +500,19 @@ async def check_cursor_binding(h: Harness) -> None:
     assert page.next_cursor is not None
     token = page.next_cursor
 
-    if hasattr(j, "unseal_cursor"):
-        # 换 principal
-        other = make_principal("mallory", user="u1", session="s1")
-        with pytest.raises(CursorInvalid):
-            j.unseal_cursor(token, ReadRequest(principal=other, scope=s, limit=3))
+    # 换 principal
+    other = make_principal("mallory", user="u1", session="s1")
+    with pytest.raises(CursorInvalid):
+        j.unseal_cursor(token, ReadRequest(principal=other, scope=s, limit=3))
 
-        # 换 limit —— 换分页大小就换了边界，不是「尽力而为」
-        with pytest.raises(CursorInvalid):
-            j.unseal_cursor(token, ReadRequest(principal=p, scope=s, limit=5))
+    # 换 limit —— 换分页大小就换了边界，不是「尽力而为」
+    with pytest.raises(CursorInvalid):
+        j.unseal_cursor(token, ReadRequest(principal=p, scope=s, limit=5))
 
-        # 换过滤条件
-        with pytest.raises(CursorInvalid):
-            j.unseal_cursor(token, ReadRequest(principal=p, scope=s, limit=3,
-                                                filter=RecordFilter(types=frozenset({"x"}))))
+    # 换过滤条件
+    with pytest.raises(CursorInvalid):
+        j.unseal_cursor(token, ReadRequest(principal=p, scope=s, limit=3,
+                                            filter=RecordFilter(types=frozenset({"x"}))))
 
     # 这里没有「篡改 token 必须被拒」这一条：cursor 里只有位置，改掉它不会读到
     # 不该读的东西，因为能不能读某个 scope 由 Principal 决定。断言篡改必须失败
@@ -521,9 +523,9 @@ async def check_cursor_binding(h: Harness) -> None:
         await _read_with_cursor(j, token, p, make_scope("u2", "s2"), 3)
 
 
-async def _read_with_cursor(journal: Any, token: str, principal: Principal,
-                            scope: Scope, limit: int) -> Any:
-    """按 cursor 语义读取。adapter 需要提供 `unseal_cursor`。"""
+async def _read_with_cursor(journal: Journal, token: str, principal: Principal,
+                            scope: Scope, limit: int) -> ReadPage:
+    """按 cursor 语义读取。"""
     request = ReadRequest(principal=principal, scope=scope, limit=limit)
     cursor = journal.unseal_cursor(token, request)
     return await journal.read(ReadRequest(principal=principal, scope=scope,
@@ -664,7 +666,11 @@ async def check_read_stability(h: Harness) -> None:
 # ---------- 17. 持久化（需要 REOPEN 能力） ----------
 
 async def check_reopen_durability(h: Harness) -> None:
-    """重开 journal 后，已提交内容全部可读，计数器不回退。"""
+    """重开 journal 后，已提交内容全部可读，计数器不回退。
+
+    `reopen` 不在 Journal 接口里 —— 它是 REOPEN 能力，不是每种存储都有。
+    所以这里用 getattr 取，取不到就是能力声明与实现不符。
+    """
     j = h.journal
     reopen = getattr(j, "reopen", None)
     assert reopen is not None, "声明了 reopen 能力就必须提供 reopen()"
@@ -704,7 +710,10 @@ async def check_reopen_durability(h: Harness) -> None:
 # ---------- 18. 崩溃原子性（需要 SIMULATE_CRASH 能力） ----------
 
 async def check_crash_atomicity(h: Harness) -> None:
-    """事务中途崩溃 → 整批不可见，计数器不变。"""
+    """事务中途崩溃 → 整批不可见，计数器不变。
+
+    崩溃注入同样不在接口里 —— 它是 SIMULATE_CRASH 能力，只有测试用的存储会做。
+    """
     j = h.journal
     p = make_principal()
     s = make_scope()
@@ -766,7 +775,7 @@ async def test_conformance(check: Check, adapter_name: str, tmp_path: Any) -> No
         if check.required_capability and check.required_capability not in capabilities:
             pytest.skip(
                 f"adapter {adapter_name!r} 未声明 {check.required_capability} 能力。"
-                f"能力名见 core/journal/capabilities.py；skip 数上升即 capabilities 声明有漏。"
+                f"能力名见 core/journal/api.py；skip 数上升即 capabilities 声明有漏。"
             )
         await check.run(harness)
     finally:

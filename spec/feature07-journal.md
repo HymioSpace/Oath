@@ -35,18 +35,26 @@ producer 是模块/版本标识；seq 和 committed_at 由 Journal 分配。payl
 
 事件派发状态通过 durable receipt 维护。直接 append 事件必须经过该类型的身份/schema 校验；不能只记录一行“tool succeeded”就视为已产生合法终态。读取日志的一方不能把它自己写入的记录再读回来处理，否则会形成回环。
 
-## 接口草案
+## 接口
+
+接口在 `core/journal/api.py`，是四个 Protocol。存储实现显式继承它们，mypy 逐个核对
+签名 —— 换实现时要满足的是这里，不是 jsonl.py。
 
 ```text
-writer = journal.bind(principal, user_id, session_id, producer, allowed_types)
-writer.append(records, commit_id) -> receipt
-stateWriter.commitState(records, commit_id, expected_state_version, owner_epoch) -> receipt
-journal.read(scope, after_seq, limit, filters) -> page
-journal.subscribe(scope, after_seq, filters) -> committed batches
-journal.head(scope) -> {seq, state_version}
+Journal       lease() / bind(...) -> Writer / bind_state(...) -> StateWriter
+              read(request) / head(scope) / unseal_cursor(token, request) / close()
+              capabilities / limits / blobs
+Writer        append(records, commit_id) -> receipt
+StateWriter   commit_state(records, commit_id, expected_state_version, owner_epoch) -> receipt
+Lease         acquire(scope, holder) / renew(scope, owner_epoch)
+BlobStore     put(data) / get(blob_id) / verify(blob_id, hash)
 ```
 
-append 允许多个模块并发，持久化成功后才返回 receipt，整批记录原子提交并分配连续 seq。相同 scope/commit_id/内容返回原 receipt；同键不同内容拒绝。记录大小、批次大小和类型白名单由部署限制，满载显式背压，不静默丢记录。
+`reopen()` 和 `crash_on_next_commit()` 不在接口里：它们分别是 `reopen`、
+`simulate_crash` 能力，不是每种存储都提供。构造参数同样不在接口里。
+JSONL 是其中一种实现（`core/journal/jsonl.py`）。
+
+append 允许多个模块并发，持久化成功后才返回 receipt，整批记录原子提交并分配连续 seq。相同 scope/commit_id/内容返回原 receipt；同键不同内容拒绝。记录大小、批次大小和类型白名单由部署限制，超限显式拒绝，不静默丢记录。
 
 commitState 仅允许当前 owner；检查 epoch 和 expected_state_version 后原子写入并推进 state_version。普通 observation/event 追加只推进 seq，不改变执行状态版本，因此不因高频 trace 写入让状态提交不断冲突。State owner 消费哪些输入必须显式记录，不能仅以当前日志尾部推测已消费范围。
 
@@ -84,7 +92,7 @@ trace 和事件全局有序范围只到 user/session，不要求跨所有用户�
 
 ### 实际改动
 
-`core/journal/jsonl.py` 是唯一实现，只用标准库。
+接口在 `core/journal/api.py`，`core/journal/jsonl.py` 是唯一实现，只用标准库。
 
 一行一次 commit，不是一行一条记录。批次全有或全无因此等于「这一行要么完整要么不存在」；
 最后一行只写了一半，重开时被丢掉。若一行一条记录，批次原子性要靠额外的 begin/end 标记
@@ -114,7 +122,7 @@ conformance 套件 21 项，0 跳过。
 - `commits` / `dedup` 两个索引在内存里，随日志长度增长；重开时全量重扫重建。
 - 每次 append 都 `fsync`，正确优先于吞吐。
 - 单写者。多进程 owner failover 要等 SQLite adapter（`sqlite3` 也是标准库，
-  所以在 core/journal/ 下再加一个实现即可）。
+  所以在 core/journal/ 下再加一个满足 `api.py` 的实现即可）。
 - 没有 subscribe。轮询交付留给事件运行时（feature01）需要时再写，那时才有真实调用方
   和测试。
 - blob store 是同目录下的内容寻址文件，没有清理机制。
