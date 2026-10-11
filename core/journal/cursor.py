@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from core.codec import from_iso, hash_json, to_iso
+from core.codec import canonical_bytes, from_iso, hash_json, to_iso
 from core.errors import CursorInvalid, LimitExceeded
 from core.journal.records import ReadRequest, RecordFilter
 
@@ -124,8 +124,7 @@ class CursorCodec:
     """
 
     def seal(self, cursor: Cursor) -> str:
-        body = json.dumps(cursor.to_json(), sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return _b64(body)
+        return _b64(canonical_bytes(cursor.to_json()))
 
     def unseal(self, token: str, request: ReadRequest) -> Cursor:
         """解出 cursor 并校验它适用于当前请求。出错一律抛 CursorInvalid。"""

@@ -23,12 +23,17 @@ QueueName: TypeAlias = Literal["user", "tool", "system"]
 QUEUE_NAMES: tuple[str, ...] = ("user", "tool", "system")
 
 # ---------- 提交结果 ----------
+#
+# accepted  本批已落盘
+# duplicate 同 commit_id 或同 event_id 的内容已经提交过，返回原来那份 receipt
+# conflict  同一个键提交了不同内容，拒绝且不覆盖
+#
+# 超限和写不进去是异常（LimitExceeded / OathError），不是 outcome 取值 ——
+# 调用方必须处理，不能靠读 outcome 分支来决定要不要重试。
 AppendOutcome: TypeAlias = Literal[
     "accepted",
     "duplicate",
     "conflict",
-    "backpressure",
-    "unavailable",
 ]
 
 #: 记录内容的版本。与「怎么折叠这些记录」的 reducer 版本是两回事，各自演进。

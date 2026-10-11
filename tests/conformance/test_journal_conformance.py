@@ -614,7 +614,7 @@ async def check_payload_ref(h: Harness) -> None:
 
 # ---------- 15. 超过上限 ----------
 
-async def check_backpressure_never_silent(h: Harness) -> None:
+async def check_over_limit_rejected(h: Harness) -> None:
     """超限是显式失败，绝不静默截断或丢弃。"""
     j = h.journal
     p = make_principal()
@@ -754,7 +754,7 @@ CHECKS: tuple[Check, ...] = (
     Check("storage_assigned_fields", check_storage_assigned_fields),
     Check("checksum_ignores_storage_fields", check_checksum_ignores_storage_fields),
     Check("payload_ref", check_payload_ref),
-    Check("backpressure_never_silent", check_backpressure_never_silent),
+    Check("over_limit_rejected", check_over_limit_rejected),
     Check("read_stability", check_read_stability),
     Check("reopen_durability", check_reopen_durability, REOPEN),
     Check("crash_atomicity", check_crash_atomicity, SIMULATE_CRASH),
