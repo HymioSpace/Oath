@@ -137,9 +137,17 @@ agent state 快照，**独立的追加日志**，不混在事件流里。
 
 `payload` 是**全量 KV 快照**，不是 delta。
 
-`cursor_start` 取自 `AgentState.cursor_start`，v1 调用方一般留 `None`
-（表示「从日志开头覆盖」）。字段先占位：将来若改增量快照，schema 不用动，
-语义变的是 `cursor_start` 不再为 null。`cursor_end` 取自 `AgentState.cursor_end`。
+前五个字段都是 `AgentState` 的成员，不是 `commit_state` 的入参：`user_id` /
+`session_id` 是 `state.scope`，`payload` 是 `state.payload`，`payload_schema_version`
+是 `state.payload_schema_version`，`cursor_start` / `cursor_end` 是
+`state.cursor_start` / `state.cursor_end`。交回去的状态和拿回来的状态说的是同一份
+内容、同一个版本、同一个区间、同一个 scope，调用方把它们写岔不了。
+
+`id` 与 `commit_dt` 是记录层的字段，不在 `AgentState` 上：`commit_dt` 由实现盖章，
+经 `StateRef.commit_dt` 返回给调用方。
+
+`cursor_start` v1 一般留 `None`（表示「从日志开头覆盖」）。字段先占位：
+将来若改增量快照，schema 不用动，语义变的是 `cursor_start` 不再为 null。
 
 状态日志与事件日志分开的理由：恢复时状态日志只需读**尾部**（最后一条完整记录），
 不需要全量扫描；事件日志则必须全量扫。混在一起会让快照参与每轮消息投影。
@@ -182,7 +190,7 @@ class Journal(Protocol):
     def append(
         self, scope, type, payload, *, payload_schema_version, idempotency_key, occur_dt=None
     ) -> AppendResult: ...
-    def commit_state(self, scope, state: AgentState, *, payload_schema_version) -> StateRef: ...
+    def commit_state(self, state: AgentState) -> StateRef: ...
     def recover(self, scope) -> Recovery: ...
     def read_range(self, scope, cursor, *, limit=None) -> Iterator[Record]: ...
 ```
@@ -195,10 +203,24 @@ class Journal(Protocol):
 给 trace 视图、审计、Supervisor 扫描用。`limit` 不给则读到日志末尾。
 
 `commit_state` 收 `AgentState` 而不是裸字典，`recover()` 也返回 `AgentState` ——
-journal 不解释 `values` 里的内容，只保证原样存下、原样取回。
+journal 不解释 `payload` 里的内容，只保证原样存下、原样取回。
 
-覆盖区间是 `AgentState` 的成员（`cursor_start` / `cursor_end`），不是 `commit_state`
-的入参：交回去的状态和拿回来的状态说的是同一个区间，调用方没法把两者写岔。
+`AgentState` 是 agent state 的完整身份，贯穿所有模块，成员就是这份状态的描述本身：
+
+```python
+@dataclass(frozen=True, slots=True)
+class AgentState:
+    scope: Scope  # 它属于谁
+    cursor_start: Cursor | None  # 它覆盖的日志区间
+    cursor_end: Cursor
+    payload: JsonObject  # 它是什么内容
+    payload_schema_version: int = 1
+```
+
+全部是成员、没有一个是 `commit_state` 的入参，理由是同一个：调用方能拿出去的状态
+和能写回来的状态必然是同一份。传参的话，「提交的 scope」和「状态自己的 scope」、
+「声明的版本」和「内容的实际版本」都能被写成两回事，而这两处写岔都不会报错，只会在
+恢复时悄悄给出另一份状态。
 
 `commit_state` **不要求幂等键**。快照是自描述的（自带 cursor 区间），
 重复提交只是多写一份快照，不会破坏任何东西。调用方在崩溃后想知道上次提交成没成功，
@@ -222,9 +244,9 @@ journal 不解释 `values` 里的内容，只保证原样存下、原样取回�
 
 `Recovery{state, messages, pending}`：
 
-- `state` —— 最后一条完整状态记录，产出的 `AgentState`；覆盖区间在
-  `state.cursor_start` / `state.cursor_end` 上，`values` 是 `payload`。从未提交过
-  快照时 `cursor_end` 为 0、`values` 为空。
+- `state` —— 最后一条完整状态记录，产出的 `AgentState`：`scope` 是被恢复的
+  session，覆盖区间在 `cursor_start` / `cursor_end` 上，`payload` 是状态内容。
+  从未提交过快照时 `cursor_end` 为 0、`payload` 为空。
 - `messages` —— 按游标顺序投影出的 LLM 消息数组，
   **只含 `cursor <= state.cursor_end` 的记录**。
 - `pending` —— `state.cursor_end` 之后的全部事件记录，按游标升序。
@@ -369,6 +391,8 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 9. fold 是纯函数：无外部副作用，不重放工具调用，不调用模型。
 10. 未知的 `payload_schema_version` 抛 `PayloadVersionError`，不静默丢弃。
 11. 正确性不依赖任何时间戳。`occur_dt` / `commit_dt` 只用于展示与排查。
+12. `AgentState` 自描述：scope、覆盖区间、内容与版本都是它的成员，不是
+    `commit_state` 的入参。写出去的版本和读回来的版本必是同一个。
 
 ### 已知限制（写在这里，不假装没有）
 
@@ -414,7 +438,8 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 
 - 连续 append N 条后重开，`recover()` 返回的 messages 顺序与写入顺序一致。
 - 同一幂等键重复 append，返回 `idempotent_hit=True` 且日志行数不变。
-- commit_state 后重开，`state` 是同一个 `AgentState`，`pending` 为空。
+- commit_state 后重开，`state` 是同一个 `AgentState`（含 scope / 区间 / payload /
+  版本），`pending` 为空。
 - commit_state 后再 append，重开时这些记录出现在 `pending`，`messages` 不含它们
   （与 state 对齐）。
 
@@ -425,7 +450,8 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 - `user_id = "../../etc"` → 构造 `Scope` 时就抛 `ScopeError`，journal 拿不到 scope，
   拼路径那一步不会发生（`test_scope_validation_is_what_prevents_escaping_root`）。
 - 同幂等键不同 payload → 抛 `IdempotencyKeyConflict`。
-- 未知 `payload_schema_version` → 抛 `PayloadVersionError`。
+- 未知 `payload_schema_version` → 抛 `PayloadVersionError`（`append` 与
+  `commit_state` 两条路径都验）。
 - 写进程在 append 中途被 SIGKILL（真实进程，slow）→ 已确认返回成功的 append
   一条不少，重开后无损坏；连续两次崩溃后重放仍命中幂等。
 
@@ -466,8 +492,8 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 - **验证证据**（本地实跑，非推断）：
 
   ```text
-  $ uv run pytest tests/ -q          53 passed, 3 deselected in 0.06s
-  $ uv run pytest tests/ -m "" -q    56 passed in 1.87s
+  $ uv run pytest tests/ -q          55 passed, 3 deselected in 0.05s
+  $ uv run pytest tests/ -m "" -q    58 passed in 1.83s
   $ uv run ruff check .              All checks passed!
   $ uv run ruff format --check .     33 files already formatted
   $ uv run mypy .                    Success: no issues found in 28 source files
@@ -478,8 +504,9 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
   再补 1 条 system.*，重开进程恢复得到：
 
   ```text
-  state   : AgentState(cursor_start=None, cursor_end=Cursor(kind='line', value=5),
-                       values={'topic': '恢复语义', 'turn': 1})
+  state   : AgentState(scope=Scope(user_id='u1', session_id='s1'), cursor_start=None,
+                       cursor_end=Cursor(kind='line', value=5),
+                       payload={'topic': '恢复语义', 'turn': 1}, payload_schema_version=1)
     user     | 帮我查下 Oath 的恢复语义  | {}
     assistant| 先看 spec  | {'reasoning': '恢复靠水位线，不是时间戳', 'tool_calls': [...]}
     tool     | 命中 12 处  | {'tool_call_id': 'inv-1', 'outcome': 'succeeded'}

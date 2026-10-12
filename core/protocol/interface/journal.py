@@ -51,17 +51,12 @@ class Journal(Protocol):
         """
         ...
 
-    def commit_state(
-        self,
-        scope: Scope,
-        state: AgentState,
-        *,
-        payload_schema_version: int,
-    ) -> StateRef:
+    def commit_state(self, state: AgentState) -> StateRef:
         """提交一份 agent state 全量快照。
 
-        覆盖区间是 `state` 自己的字段，不是入参：交回去的状态和拿回来的状态
-        说的是同一个区间，调用方没法把两者写岔。
+        `scope`、覆盖区间、`payload` 和 `payload_schema_version` 全都是 `state`
+        自己的成员，不是入参：交回去的状态和拿回来的状态说的是同一份内容、
+        同一个版本、同一个区间、同一个 scope，调用方没法把它们写岔。
 
         不要求幂等键：快照是自描述的（自带 cursor 区间），重复提交只是多写
         一份快照，不破坏任何东西。调用方在崩溃后想知道上次提交成没成功，

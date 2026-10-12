@@ -43,7 +43,7 @@ from core.utils.encoding import JsonObject
 
 def snapshot_through(journal: Journal, scope: Scope, cursor: Cursor) -> None:
     """提交一份覆盖到 `cursor` 的快照。"""
-    journal.commit_state(scope, AgentState.covering(cursor, {"ok": True}), payload_schema_version=1)
+    journal.commit_state(AgentState.covering(scope, cursor, {"ok": True}))
 
 
 def full_history(journal: Journal, scope: Scope) -> list[str]:
@@ -127,7 +127,7 @@ def test_append_returns_increasing_cursors(journal: Journal, scope: Scope) -> No
 def test_recover_without_snapshot_returns_empty_state(journal: Journal, scope: Scope) -> None:
     user_msg(journal, scope, 1)
     recovery = journal.recover(scope)
-    assert recovery.state == AgentState.covering(Cursor(CursorKind.LINE, 0))
+    assert recovery.state == AgentState.covering(scope, Cursor(CursorKind.LINE, 0))
     # 没有快照就没有水位线，messages 必然为空，全部记录落在 pending。
     # 这不是缺陷：state 与 messages 对齐同一 cursor，宁可都退回起点，
     # 也不能给出一个「state 是空的但模型记得刚才说过什么」的组合。
@@ -160,12 +160,12 @@ def test_messages_follow_append_order_not_timestamps(journal: Journal, scope: Sc
 def test_snapshot_cuts_state_and_messages_at_same_cursor(journal: Journal, scope: Scope) -> None:
     first = user_msg(journal, scope, 1)
     assistant_msg(journal, scope, "a1")
-    journal.commit_state(scope, AgentState.covering(first, {"turn": 1}), payload_schema_version=1)
+    journal.commit_state(AgentState.covering(scope, first, {"turn": 1}))
 
     user_msg(journal, scope, 2)
 
     recovery = journal.recover(scope)
-    assert recovery.state == AgentState.covering(first, {"turn": 1})
+    assert recovery.state == AgentState.covering(scope, first, {"turn": 1})
     assert recovery.state.cursor_end == first
     # state 与 messages 对齐同一水位线：第 2 条只在 pending 里，不进 messages。
     assert [m.content for m in recovery.messages] == ["第 1 条"]
@@ -391,11 +391,8 @@ def test_invalid_outcome_raises(journal: Journal, scope: Scope) -> None:
 
 def test_unknown_cursor_kind_is_rejected(journal: Journal, scope: Scope) -> None:
     with pytest.raises(CursorError):
-        journal.commit_state(
-            scope,
-            AgentState.covering(Cursor(CursorKind.ID, 3), {"a": 1}),  # MySQL 的游标，JSONL 不认
-            payload_schema_version=1,
-        )
+        # MySQL 的游标，JSONL 不认
+        journal.commit_state(AgentState.covering(scope, Cursor(CursorKind.ID, 3), {"a": 1}))
     with pytest.raises(CursorError):
         list(journal.read_range(scope, Cursor(CursorKind.ID, 1)))
 
@@ -403,12 +400,23 @@ def test_unknown_cursor_kind_is_rejected(journal: Journal, scope: Scope) -> None
 def test_cursor_start_after_cursor_end_is_rejected(journal: Journal, scope: Scope) -> None:
     with pytest.raises(CursorError):
         journal.commit_state(
-            scope,
             AgentState.covering(
-                Cursor(CursorKind.LINE, 2), {"a": 1}, cursor_start=Cursor(CursorKind.LINE, 5)
-            ),
-            payload_schema_version=1,
+                scope,
+                Cursor(CursorKind.LINE, 2),
+                {"a": 1},
+                cursor_start=Cursor(CursorKind.LINE, 5),
+            )
         )
+
+
+def test_state_carries_its_own_version(journal: Journal, scope: Scope) -> None:
+    """版本是状态的成员：写进去什么版本，读回来就是什么版本。"""
+    cursor = user_msg(journal, scope, 1)
+    journal.commit_state(AgentState.covering(scope, cursor, {"a": 1}, payload_schema_version=1))
+    assert journal.recover(scope).state.payload_schema_version == 1
+
+    with pytest.raises(PayloadVersionError):
+        journal.commit_state(AgentState.covering(scope, cursor, {"a": 1}, payload_schema_version=9))
 
 
 def test_unknown_event_type_is_rejected(journal: Journal, scope: Scope) -> None:
@@ -439,10 +447,8 @@ def test_every_journal_failure_is_a_journal_error() -> None:
 def test_state_survives_repeated_commits(journal: Journal, scope: Scope) -> None:
     cursor = user_msg(journal, scope, 1)
     for turn in (1, 2, 3):
-        journal.commit_state(
-            scope, AgentState.covering(cursor, {"turn": turn}), payload_schema_version=1
-        )
-    assert journal.recover(scope).state == AgentState.covering(cursor, {"turn": 3})
+        journal.commit_state(AgentState.covering(scope, cursor, {"turn": turn}))
+    assert journal.recover(scope).state == AgentState.covering(scope, cursor, {"turn": 3})
 
 
 def test_close_is_idempotent(root: Path, scope: Scope) -> None:

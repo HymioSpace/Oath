@@ -338,15 +338,11 @@ class FileJournal:
             handle.note_idempotent(idempotency_key, fingerprint, cursor)
             return AppendResult(cursor=cursor, record_id=None, idempotent_hit=False)
 
-    def commit_state(
-        self,
-        scope: Scope,
-        state: AgentState,
-        *,
-        payload_schema_version: int,
-    ) -> StateRef:
+    def commit_state(self, state: AgentState) -> StateRef:
+        scope = state.scope
         payload = state.to_json()
-        validate_state_payload(payload_schema_version, require_object(payload, "payload"))
+        version = state.payload_schema_version
+        validate_state_payload(version, require_object(payload, "payload"))
         check_kind(state.cursor_end, _SUPPORTED_CURSOR_KINDS)
         cursor_start = state.cursor_start
         if cursor_start is not None:
@@ -362,7 +358,7 @@ class FileJournal:
             user_id=scope.user_id,
             session_id=scope.session_id,
             commit_dt=commit_dt,
-            payload_schema_version=payload_schema_version,
+            payload_schema_version=version,
             payload=payload,
             cursor_start=cursor_start.to_json() if cursor_start else None,
             cursor_end=state.cursor_end.to_json(),
@@ -377,15 +373,17 @@ class FileJournal:
             handle = self._handle(scope)
             snapshot = handle.last_state
             if snapshot is None:
-                state = AgentState.covering(beginning(CursorKind.LINE))
+                state = AgentState.covering(scope, beginning(CursorKind.LINE))
             else:
                 cursor_start = snapshot["cursor_start"]
                 state = AgentState.from_record(
+                    scope,
                     snapshot["payload"],
                     parse_cursor(cursor_start, supported=_SUPPORTED_CURSOR_KINDS)
                     if cursor_start is not None
                     else None,
                     parse_cursor(snapshot["cursor_end"], supported=_SUPPORTED_CURSOR_KINDS),
+                    snapshot["payload_schema_version"],
                 )
 
             records = list(handle.iter_records(beginning(CursorKind.LINE)))

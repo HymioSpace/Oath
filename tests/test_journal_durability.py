@@ -110,8 +110,8 @@ def test_torn_trailing_snapshot_is_ignored_last_complete_one_wins(
             payload_schema_version=1,
             idempotency_key="k",
         ).cursor
-        j.commit_state(scope, AgentState.covering(cursor, {"turn": 1}), payload_schema_version=1)
-        j.commit_state(scope, AgentState.covering(cursor, {"turn": 2}), payload_schema_version=1)
+        j.commit_state(AgentState.covering(scope, cursor, {"turn": 1}))
+        j.commit_state(AgentState.covering(scope, cursor, {"turn": 2}))
 
     # 第三次提交崩在半路。turn 2 是完整 fsync 过的，不该被牵连。
     path = _state_path(root, scope)
@@ -120,7 +120,7 @@ def test_torn_trailing_snapshot_is_ignored_last_complete_one_wins(
 
     with FileJournal(root) as j:
         recovery = j.recover(scope)
-    assert recovery.state == AgentState.covering(cursor, {"turn": 2})
+    assert recovery.state == AgentState.covering(scope, cursor, {"turn": 2})
 
 
 def test_state_log_with_only_a_torn_snapshot_reads_as_no_snapshot(
@@ -135,14 +135,14 @@ def test_state_log_with_only_a_torn_snapshot_reads_as_no_snapshot(
             payload_schema_version=1,
             idempotency_key="k",
         ).cursor
-        j.commit_state(scope, AgentState.covering(cursor, {"turn": 1}), payload_schema_version=1)
+        j.commit_state(AgentState.covering(scope, cursor, {"turn": 1}))
 
     _state_path(root, scope).write_bytes(b'{"user_id":"u1","sessi')
 
     with FileJournal(root) as j:
         recovery = j.recover(scope)
     # 第一份快照就没写完：没有水位线，全部记录重新处理。
-    assert recovery.state == AgentState.covering(Cursor(CursorKind.LINE, 0))
+    assert recovery.state == AgentState.covering(scope, Cursor(CursorKind.LINE, 0))
     assert recovery.messages == []
     assert len(recovery.pending) == 1
 
