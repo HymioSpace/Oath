@@ -3,8 +3,9 @@ name = "oath-core"
 version = "0.1.0"
 description = "A durable, event-driven agent runtime."
 requires-python = ">=3.11"
-# 用到第三方库时在这里加，用哪个加哪个。目前 journal 只需要标准库，所以这行是空的。
-dependencies = []
+# 用到第三方库时在这里加，用哪个加哪个。journal 只需要标准库；工具系统用
+# jsonschema 校验入参 —— 同一份 JSON Schema 既给模型看结构，又做服务端校验。
+dependencies = ["jsonschema>=4.23"]
 
 [dependency-groups]
 dev = [
@@ -12,6 +13,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "mypy>=1.13",
+    "types-jsonschema>=4.23",
 ]
 
 [build-system]

@@ -107,8 +107,8 @@ MySQL 等实现将来落在 `core/journal/impl/`，替换 v1 时 `core/protocol`
 | --- | --- | --- |
 | `user.message` | `{content: string, ...}` | 用户输入 |
 | `assistant.message` | `{content, reasoning?, tool_calls?}` | 模型返回的 assistant 轮 |
-| `tool.call` | `{invocation_id, tool, arguments}` | 发起一次逻辑工具调用 |
-| `tool.result` | `{invocation_id, attempt_id, outcome, ...}` | 一次 attempt 的终态 |
+| `tool.call` | `{tool_call_id, invocation_id, tool, arguments}` | 发起一次逻辑工具调用 |
+| `tool.result` | `{tool_call_id, invocation_id, outcome, ...}` | 这次调用的终态 |
 | `system.agent_step` | `{step_id, phase}` | step 生命周期审计 |
 
 v1 的闭合集合，加新成员按破坏性变更处理：先定 payload 字段，再升协议版本走双读。
@@ -300,8 +300,12 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 
 一条 `tool.call` 先占一个位置，对应的 `tool.result` 到达时填进去。因此：
 
-- **重试只留最后一条终态。** 同一 `invocation_id` 的多次 attempt 产出多条 result 时，
-  它们填同一个位置，最后一条赢。对话里不会堆出多条 tool 消息。
+- **`tool_call_id` 与 `invocation_id` 是两个标识，不是一对别名。** 前者由模型 API
+  返回、原样透传；后者是 Oath 自己的调用 id。配对（call ↔ result、多次结果之间挑
+  终态）走 `invocation_id`，填进 tool 消息的 `tool_call_id` 取自对应的 `tool.call`
+  记录 —— 模型只认后者，它必须与 assistant 轮 `tool_calls[i].id` 逐字节相同。
+- **同一调用多次出结果只留最后一条。** 它们填同一个位置，最后一条赢。对话里不会堆出
+  多条 tool 消息。
 - **未完成的 `tool.call` 产出一条 `unresolved: true` 的 tool 消息**（`content` 为空串）。 丢掉它会产出
   一个「assistant 轮带着 `tool_calls` 却没有对应结果」的数组，交给任何 provider 都是
   坏的，所以宁可显式标出来。

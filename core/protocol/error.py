@@ -50,14 +50,70 @@ class CorruptRecordError(JournalError):
     """记录结构损坏，或记录 scope 与所在文件代表的 scope 不一致。"""
 
 
+class ToolError(ProtocolError):
+    """工具系统的全部失败。与 `JournalError` 平级，各自一把抓。"""
+
+
+class ToolRegistrationError(ToolError):
+    """工具定义不合法，或同名工具重复注册。
+
+    注册期就抛：配错了工具要早暴露，远好过在模型第一次点名时才失败。
+    """
+
+
+class ToolNotFoundError(ToolError):
+    """按名取工具但注册表里没有。"""
+
+
+class ToolRequestError(ToolError):
+    """整批派发请求本身不合法（空批次等），不针对某个具体的项。"""
+
+
+class ArgumentValidationError(ToolError):
+    """入参不符合工具定义的 `input_schema`。"""
+
+
+class PermissionDeniedError(ToolError):
+    """权限这一步没能得出结论。
+
+    **不是**「策略判定为拒绝」—— 那是一个正常返回值 `PermissionVerdict.DENY`，
+    不是异常。抛这个说明策略实现自己出了问题（读不到配置、连不上策略服务）。
+    core 按 fail closed 处理：当成拒绝，不放行。宁可误杀不可误放。
+    """
+
+
+class PermissionError(ProtocolError):
+    """权限系统的全部失败。与 `ToolError` 平级，各自一把抓。"""
+
+
+class PermissionStoreError(PermissionError):
+    """权限存储坏了或被写坏了（重复的待审批键、损坏的行、scope 对不上）。"""
+
+
+class ToolExecutionError(ToolError):
+    """扩展抛的：工具的业务失败。
+
+    工具正常返回就等于成功；要表示失败就抛这个。core 把它记成 `FAILED`。
+    """
+
+
 __all__ = [
+    "ArgumentValidationError",
     "CorruptRecordError",
     "CursorError",
     "IdempotencyKeyConflict",
     "JournalError",
     "PayloadSchemaError",
     "PayloadVersionError",
+    "PermissionDeniedError",
+    "PermissionError",
+    "PermissionStoreError",
     "ProtocolError",
     "ScopeError",
+    "ToolError",
+    "ToolExecutionError",
+    "ToolNotFoundError",
+    "ToolRegistrationError",
+    "ToolRequestError",
     "ValidationError",
 ]
