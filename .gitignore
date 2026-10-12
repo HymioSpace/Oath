@@ -1,0 +1,75 @@
+# Local agent instructions and assistant state
+AGENTS.md
+AGENT.md
+CLAUDE.md
+.agents/
+.codex/
+.claude/
+.cursor/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+credentials.json
+secrets.local.*
+*.local
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Dependencies, builds and caches
+node_modules/
+dist/
+build/
+target/
+.next/
+.nuxt/
+.turbo/
+.cache/
+coverage/
+.nyc_output/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.build/
+DerivedData/
+xcuserdata/
+.swiftpm/
+
+# Local runtime data (not source schemas or fixtures)
+/data/
+/runtime-data/
+/logs/
+/traces/
+/snapshots/
+/tmp/
+/temp/
+/private/
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+
+# Keep dependency lockfiles, migrations, fixtures and spec/ tracked.

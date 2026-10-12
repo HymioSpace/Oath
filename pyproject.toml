@@ -1,0 +1,57 @@
+[project]
+name = "oath-core"
+version = "0.1.0"
+description = "A durable, event-driven agent runtime."
+requires-python = ">=3.11"
+# 用到第三方库时在这里加，用哪个加哪个。目前 journal 只需要标准库，所以这行是空的。
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+# 默认跳过慢测试（crash matrix / 真实进程 kill / live model）。
+# 全跑用 `pytest -m ""`，只跑慢的用 `pytest -m slow`。
+addopts = "-m 'not slow'"
+pythonpath = ["."]
+markers = [
+    "slow: crash injection / real process kill / live model call; skipped by default",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    # 本仓库的注释与文档字符串是中文，RUF001/2/3 会把全角标点
+    # （，。：；！？）逐个报成 ambiguous unicode —— 596 条纯噪音，
+    # 会让真正的告警淹在里面。全角标点在中英文混排里是正确的。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # `__all__` 按来源分组（值对象 / 校验 / adapter）而不是字母序，
+    # 分组能直接读出「这个符号从哪个模块来」，字母序不能。
+    "RUF022",
+]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["core"]
