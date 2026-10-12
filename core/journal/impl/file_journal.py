@@ -50,6 +50,7 @@ from core.protocol.datatype import (
     StateRef,
 )
 from core.protocol.error import CursorError, IdempotencyKeyConflict
+from core.protocol.interface import Journal
 from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 
 _READ_BLOCK = 1 << 16
@@ -251,7 +252,7 @@ class _ScopeHandle:
                 yield Record.of(cursor, parse_event_record(raw.decode("utf-8"), self.scope))
 
 
-class FileJournal:
+class FileJournal(Journal):
     """JSONL 实现的 journal。"""
 
     def __init__(

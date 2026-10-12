@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from typing import Protocol
 
 from core.protocol.datatype import (
     AgentState,
@@ -21,13 +21,14 @@ from core.protocol.datatype import (
 from core.utils.encoding import JsonObject
 
 
-class Journal(Protocol):
+class Journal(ABC):
     """统一追加日志。
 
     agent、工具、队列、Supervisor、biz 和扩展都在自己的流程里直接写记录，
     无需经主 agent 转发。
     """
 
+    @abstractmethod
     def append(
         self,
         scope: Scope,
@@ -51,6 +52,7 @@ class Journal(Protocol):
         """
         ...
 
+    @abstractmethod
     def commit_state(self, state: AgentState) -> StateRef:
         """提交一份 agent state 全量快照。
 
@@ -64,6 +66,7 @@ class Journal(Protocol):
         """
         ...
 
+    @abstractmethod
     def recover(self, scope: Scope) -> Recovery:
         """读回自洽的 `(state, messages)` 与待处理尾部。
 
@@ -72,6 +75,7 @@ class Journal(Protocol):
         """
         ...
 
+    @abstractmethod
     def read_range(
         self, scope: Scope, cursor: Cursor, *, limit: int | None = None
     ) -> Iterator[Record]:

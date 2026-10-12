@@ -188,14 +188,21 @@ agent state 快照，**独立的追加日志**，不混在事件流里。
 ### API
 
 ```python
-class Journal(Protocol):
+class Journal(ABC):
+    @abstractmethod
     def append(
         self, scope, type, payload, *, payload_schema_version, idempotency_key, occur_dt=None
     ) -> AppendResult: ...
+    @abstractmethod
     def commit_state(self, state: AgentState) -> StateRef: ...
+    @abstractmethod
     def recover(self, scope) -> Recovery: ...
+    @abstractmethod
     def read_range(self, scope, cursor, *, limit=None) -> Iterator[Record]: ...
 ```
+
+实现继承它（`class FileJournal(Journal)`），缺任何一个方法都在实例化时就被 ABC
+挡下，类型上漏掉也在 mypy 处暴露。
 
 `append` 返回 `AppendResult{record_id, idempotent_hit, cursor}`。
 `commit_state` 返回 `StateRef{covered_through, commit_dt}`——`covered_through` 是这份快照
