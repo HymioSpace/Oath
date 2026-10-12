@@ -49,7 +49,7 @@ uv run pytest tests/ -m ""     # 含 slow（真实进程 SIGKILL）
 ## 设计文档
 
 - [整体架构](spec/overview.md)
-- [feature 清单](spec/README.md)
+- [feature 模板](spec/feature-template.md)
 - [Journal：追加日志、状态存储与恢复](spec/feature-journal.md)
 
 Oath 服务于 [Hymio](https://github.com/HymioSpace/Hymio)。

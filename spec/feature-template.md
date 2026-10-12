@@ -1,6 +1,7 @@
 # Feature — 名称
 
 文件名用 `feature-<short-name>.md`，不带编号前缀。状态行必填。
+状态流转 Draft → Accepted → Implementing → Implemented；未验证前不能标 Implemented。
 
 状态：Draft
 
