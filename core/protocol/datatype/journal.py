@@ -1,7 +1,7 @@
 """journal 专属的数据类型。
 
 分两半：落盘的记录格式（`EventRecord` / `StateRecord` / `EventType` /
-`ToolOutcome` / payload schema / 行编码常量）与接口返回值（`Cursor` / `Record` /
+`ToolOutcome` / payload schema / 行编码常量）与接口返回值（`Record` /
 `AppendResult` / `StateRef` / `Recovery`）。前者是跨仓库协议，字段变更按破坏性
 变更处理；后者可以在不破坏契约的前提下变。
 
@@ -27,7 +27,7 @@ class EventType:
     """事件日志的记录类型。
 
     v1 的闭合集合，加新成员按破坏性变更处理。`system.` 只是个命名约定，不是
-    特殊类别 —— 和 `user.message` 一样是一种 type，长度一样，约束一样。
+    特殊类别 —— 和 `user.message` 一样是一种 type，一样的登记流程，一样的字段约束。
     """
 
     USER_MESSAGE: Final = "user.message"
@@ -36,11 +36,13 @@ class EventType:
     TOOL_RESULT: Final = "tool.result"
     SYSTEM_AGENT_STEP: Final = "system.agent_step"
 
-    #: 参与 messages 投影的类型。其余只进日志，不进对话历史。
-    MESSAGE_TYPES: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT})
-
     #: 全部合法的 type。
-    ALL: Final = MESSAGE_TYPES | {SYSTEM_AGENT_STEP}
+    ALL: Final = frozenset(
+        {USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT, SYSTEM_AGENT_STEP}
+    )
+
+    #: 参与 messages 投影的子集。其余只进日志，不进对话历史。
+    MESSAGE_TYPES: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT})
 
 
 class ToolOutcome:
@@ -193,7 +195,7 @@ class AppendResult:
 class StateRef:
     """`commit_state` 的结果。
 
-    `covered_through` 是这份快照覆盖到的事件日志位置（= 传入的 `cursor_end`），
+    `covered_through` 是这份快照覆盖到的事件日志位置（= `state.cursor_end`），
     不是状态日志里的行号 —— 调用方要的是「从这儿往后才是新的」。
     """
 
@@ -215,7 +217,7 @@ class Recovery:
 
         journal.recover(scope)                    →  自洽的 (state, messages) + pending
         runtime: fold(state, pending)             →  最新 state（纯函数，无副作用）
-        journal.commit_state(scope, new_state, …) →  落盘，下次 recover 更快
+        journal.commit_state(new_state)               →  落盘，下次 recover 更快
     """
 
     state: AgentState
