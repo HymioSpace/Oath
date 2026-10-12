@@ -344,6 +344,35 @@ def test_system_records_do_not_enter_messages(journal: Journal, scope: Scope) ->
 
 # --------------------------------------------------------------------------
 # 校验
+def test_system_types_are_validated_like_every_other_type(journal: Journal, scope: Scope) -> None:
+    """`system.` 只是命名约定，约束不比任何 type 松。"""
+    with pytest.raises(PayloadSchemaError):
+        journal.append(
+            scope,
+            EventType.SYSTEM_AGENT_STEP,
+            {"step_id": "s1"},
+            payload_schema_version=1,
+            idempotency_key="step-1",
+        )
+    with pytest.raises(PayloadSchemaError):
+        journal.append(
+            scope,
+            EventType.SYSTEM_AGENT_STEP,
+            {"step_id": "s1", "phase": "begin", "extra": 1},
+            payload_schema_version=1,
+            idempotency_key="step-2",
+        )
+    # 没登记过的 type 不是「先放行再说」，是未知。
+    with pytest.raises(ValidationError):
+        journal.append(
+            scope,
+            "system.压缩标记",
+            {"step_id": "s1"},
+            payload_schema_version=1,
+            idempotency_key="step-3",
+        )
+
+
 # --------------------------------------------------------------------------
 
 

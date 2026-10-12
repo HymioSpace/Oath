@@ -35,7 +35,7 @@ def project(records: list[Record], cursor_end: Cursor | None = None) -> list[Mes
     - 到了 `cursor_end` 仍未收到 result 的 `tool.call`（快照提交在飞行中途）
       产出一条 `unresolved` 的 tool 消息。**不静默丢掉** —— 丢掉会让 assistant
       轮带着 `tool_calls` 却没有对应结果，这个数组交给任何 provider 都是坏的。
-    - `system.*` 与其余记录不投影，只留在日志里。
+    - 其余 type（`system.agent_step`）不投影，只留在日志里。
     """
     slots: list[Message | None] = []
     call_slot: dict[str, int] = {}

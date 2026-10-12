@@ -22,7 +22,6 @@ from core.protocol.datatype.journal import (
     StateRecord,
     StateRef,
     ToolOutcome,
-    is_open_family,
 )
 from core.protocol.datatype.message import Message
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
@@ -47,6 +46,5 @@ __all__ = [
     "StateRecord",
     "StateRef",
     "ToolOutcome",
-    "is_open_family",
     "is_valid_scope_id",
 ]

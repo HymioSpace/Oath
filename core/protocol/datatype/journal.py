@@ -26,25 +26,21 @@ from core.utils.encoding import JsonObject, JsonValue
 class EventType:
     """事件日志的记录类型。
 
-    `user.*` / `assistant.*` / `tool.*` 是 v1 的闭合集合，加新成员按破坏性
-    变更处理。`system.*` 是开放族：新增 `system.<name>` 不需要升协议版本，
-    也不需要改 journal 代码。
+    v1 的闭合集合，加新成员按破坏性变更处理。`system.` 只是个命名约定，不是
+    特殊类别 —— 和 `user.message` 一样是一种 type，长度一样，约束一样。
     """
 
     USER_MESSAGE: Final = "user.message"
     ASSISTANT_MESSAGE: Final = "assistant.message"
     TOOL_CALL: Final = "tool.call"
     TOOL_RESULT: Final = "tool.result"
+    SYSTEM_AGENT_STEP: Final = "system.agent_step"
 
-    SYSTEM_PREFIX: Final = "system."
-
-    #: 参与 messages 投影的类型。其余（`system.*`）只进日志，不进对话历史。
+    #: 参与 messages 投影的类型。其余只进日志，不进对话历史。
     MESSAGE_TYPES: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT})
 
-
-def is_open_family(type_: str) -> bool:
-    """是否是开放族类型（`system.*`）。"""
-    return type_.startswith(EventType.SYSTEM_PREFIX) and len(type_) > len(EventType.SYSTEM_PREFIX)
+    #: 全部合法的 type。
+    ALL: Final = MESSAGE_TYPES | {SYSTEM_AGENT_STEP}
 
 
 class ToolOutcome:
@@ -124,8 +120,7 @@ class PayloadSchema:
 
 
 #: v1 的 payload schema。键是 `(type, version)`，版本从 1 开始。
-#:
-#: `system.*` 不在这里 —— 开放族没有统一形状，journal 不解释它的内容。
+#: 每种 type 都有 schema，没有例外。
 PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
     (EventType.USER_MESSAGE, 1): PayloadSchema(required=frozenset({"content"})),
     # `reasoning` 必填但可为 null：模型的思维链原样落盘，不加工。
@@ -141,6 +136,7 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
         required=frozenset({"invocation_id", "attempt_id", "outcome"}),
         optional=frozenset({"content", "error"}),
     ),
+    (EventType.SYSTEM_AGENT_STEP, 1): PayloadSchema(required=frozenset({"step_id", "phase"})),
 }
 
 #: 状态快照的 payload 是一个 KV 对象，形状由 agent runtime 决定，
@@ -241,5 +237,4 @@ __all__ = [
     "StateRecord",
     "StateRef",
     "ToolOutcome",
-    "is_open_family",
 ]

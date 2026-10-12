@@ -111,9 +111,11 @@ MySQL 等实现将来落在 `core/journal/impl/`，替换 v1 时 `core/protocol`
 | `tool.result` | `{invocation_id, attempt_id, outcome, ...}` | 一次 attempt 的终态 |
 | `system.agent_step` | `{step_id, phase}` | step 生命周期审计 |
 
-`system.*` 是开放族：新增 `system.<name>` 不需要升协议版本、不需要改 journal 代码，
-只在消费者侧注册处理。`user.*` / `assistant.*` / `tool.*` 是 v1 的闭合集合，
-要加新成员按破坏性变更处理。
+v1 的闭合集合，加新成员按破坏性变更处理：先定 payload 字段，再升协议版本走双读。
+
+`system.` 只是命名约定，不是特殊类别。`system.agent_step` 和 `user.message` 一样是
+一种 type，有一样的字段约束。以后出现新的 runtime 场景（比如压缩标记）就登记一个新的
+`system.<name>`，走同一套校验，不存在「system 前缀的 type 免检」这条路。
 
 **`assistant.message` 的 payload 至少包含 `reasoning`**，即使本次没有也写 `null`——
 字段存在但为 null 与字段不存在，在跨版本读取时行为不同，显式写出来更省事。
@@ -281,7 +283,7 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 
 ### messages 投影规则
 
-只有消息类记录进 messages，其余（`system.*`、纯审计记录）不进。
+只有 `EventType.MESSAGE_TYPES` 里的四种进 messages，其余（`system.agent_step`）不进。
 
 | 记录 | 投影出的消息 |
 | --- | --- |
@@ -492,8 +494,8 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 - **验证证据**（本地实跑，非推断）：
 
   ```text
-  $ uv run pytest tests/ -q          55 passed, 3 deselected in 0.05s
-  $ uv run pytest tests/ -m "" -q    58 passed in 1.83s
+  $ uv run pytest tests/ -q          56 passed, 3 deselected in 0.06s
+  $ uv run pytest tests/ -m "" -q    59 passed in 1.87s
   $ uv run ruff check .              All checks passed!
   $ uv run ruff format --check .     33 files already formatted
   $ uv run mypy .                    Success: no issues found in 28 source files
@@ -501,7 +503,7 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 
   手工 e2e：写入 1 条 user.message + 1 条 assistant.message（带 reasoning 与
   tool_calls）+ 1 组 tool.call/tool.result + 1 条 assistant.message，提交快照，
-  再补 1 条 system.*，重开进程恢复得到：
+  再补 1 条 `system.agent_step`，重开进程恢复得到：
 
   ```text
   state   : AgentState(scope=Scope(user_id='u1', session_id='s1'), cursor_start=None,
@@ -522,21 +524,16 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
   - 幂等索引常驻内存，与事件条数线性相关。
   - 不做日志裁剪，`events.jsonl` 无限增长。
   - payload schema **拒绝未知字段**。这是刻意选的严格方向：拼错字段名会被当场
-    抓住，代价是将来加字段必须先升 `payload_schema_version`。`system.*` 开放族
-    不做字段校验。
+    抓住，代价是将来加字段必须先升 `payload_schema_version`。每种 type 一视同仁。
 
-- **实现中发现并修掉的坑**：
-
-  - `system.*` 开放族被当成了有固定 schema，导致任何 `system.*` payload 都被
-    判为「含未知字段」。开放族应当完全跳过字段约束。
-  - 状态记录曾经被写到事件日志的 fd 上（两个 fd 共用一个）。现在事件与状态
-    各有各的 fd 与行号。
+- **实现中发现并修掉的坑**：状态记录曾经被写到事件日志的 fd 上（两个 fd 共用一个）。
+  现在事件与状态各有各的 fd 与行号。
 
 ## 待决事项与参考
 
 - **未决**：MySQL 实现的具体表结构与事务边界；`idempotency_key` 的全局唯一性还是
   scope 内唯一（本方案取后者）；消息裁剪 / token 预算策略；`assistant.message.reasoning`
   重放给模型时的 provider 策略。
-- **未决**：是否需要 `system.*` 的注册表机制，让消费者显式声明认识的 type。
+- **未决**：消费者要不要显式声明自己认识的 type（不认识的不投影，还是直接报错）。
   目前是「不认识就不投影」，不报错。
 - **背景来源**：durable + event-driven 两条约束见 [overview](overview.md)。

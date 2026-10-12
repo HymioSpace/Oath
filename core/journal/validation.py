@@ -22,7 +22,6 @@ from core.protocol.datatype import (
     Scope,
     StateRecord,
     ToolOutcome,
-    is_open_family,
 )
 from core.protocol.error import (
     CorruptRecordError,
@@ -60,22 +59,11 @@ _STATE_FIELDS = frozenset(
 )
 
 
-def _schema_for(type_: str, version: int) -> PayloadSchema | None:
-    """取 payload schema。开放族返回 None —— 它没有统一形状，不做字段约束。"""
-    if is_open_family(type_):
-        return None
-    return PAYLOAD_SCHEMAS.get((type_, version))
-
-
 def validate_payload(type_: str, version: int, payload: JsonObject) -> None:
     """校验 payload 结构。版本不认识就直接抛 —— 不降级成跳过。"""
     if not isinstance(version, int) or isinstance(version, bool) or version < 1:
         raise PayloadVersionError(f"payload_schema_version 必须是从 1 开始的整数，得到 {version!r}")
-    if is_open_family(type_):
-        # `system.*` 是开放族：journal 不解释它的内容，形状由消费者各自定义。
-        # 只要求 payload 是对象、版本从 1 开始。
-        return
-    schema = _schema_for(type_, version)
+    schema = PAYLOAD_SCHEMAS.get((type_, version))
     if schema is None:
         raise PayloadVersionError(f"未知的 (type, payload_schema_version)=({type_!r}, {version})")
     _check_shape(payload, schema, f"{type_}@v{version}")
@@ -131,11 +119,7 @@ def validate_occur_dt(occur_dt: str | None) -> None:
 
 
 def validate_event_type(type_: str) -> None:
-    if not isinstance(type_, str) or not type_:
-        raise ValidationError("type 不能为空")
-    if is_open_family(type_):
-        return
-    if not any(t == type_ for t in EventType.MESSAGE_TYPES):
+    if type_ not in EventType.ALL:
         raise ValidationError(f"未知 type: {type_!r}")
 
 
