@@ -24,7 +24,7 @@ from core.protocol.datatype.tool import ToolCallRequest
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.journal import Journal
-from core.protocol.interface.llm import ModelProvider
+from core.protocol.interface.llm import DeltaSink, ModelProvider
 from core.protocol.interface.tool import ToolSystem
 from core.utils.encoding import JsonObject, utc_now_iso
 
@@ -108,7 +108,8 @@ class AgentBrain(Brain):
                 max_output_tokens=self._config.max_output_tokens,
                 temperature=self._config.temperature,
                 extra_params=self._config.provider.extra_params,
-            )
+            ),
+            on_delta=self._delta_sink(scope, step_id),
         )
         refs = tuple(
             ToolCallRef(id=c.tool_call_id, name=c.tool, arguments=c.arguments)
@@ -119,6 +120,37 @@ class AgentBrain(Brain):
         )
         if refs:
             self._tools.execute(scope, self._append_tool_calls(scope, refs))
+
+    def _delta_sink(self, scope: Scope, step_id: str) -> DeltaSink:
+        """把一段增量变成一条 `assistant.delta` 事件。
+
+        **不落盘。** 一段增量在 journal 里是一句半话，append 它等于让记录说谎。
+        重放时靠完整的 `assistant.message` 兜底 —— 它才是那一轮真正说过的话。
+
+        幂等键带自增序号而不是内容：delta 不参与幂等（同一次调用重跑，靠
+        `msg:<step_id>` 去重就够了），但它要能说明「这是这一轮的第几段」，
+        排查时对得上。
+        """
+        counter = itertools.count(1)
+
+        def on_delta(channel: str, text: str) -> None:
+            seq = next(counter)
+            self._emit(
+                MessageEvent(
+                    type=MessageEventType.DELTA,
+                    scope=scope,
+                    payload={
+                        "step_id": step_id,
+                        "channel": channel,
+                        "text": text,
+                        "seq": seq,
+                    },
+                    idempotency_key=f"delta:{step_id}:{seq}",
+                    occur_dt=utc_now_iso(),
+                )
+            )
+
+        return on_delta
 
     # -- 落盘 --------------------------------------------------------------
 

@@ -52,13 +52,17 @@ class MessageEventType:
     """消息事件的类型。与 journal 的 `EventType` 用同一套字符串。
 
     `TOOL_CALL` 也从这里走：它也是模型说的话的一部分，客户端要靠它显示「正在调什么」。
+
+    `DELTA` 是唯一**不落盘**的一个：它是一段增量文本，收到就往界面上追加，重放时靠
+    完整的 `ASSISTANT_MESSAGE` 兜底。落盘它等于让 journal 里出现半句话。
     """
 
     USER_MESSAGE: Final = "user.message"
     ASSISTANT_MESSAGE: Final = "assistant.message"
     TOOL_CALL: Final = "tool.call"
+    DELTA: Final = "assistant.delta"
 
-    ALL: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL})
+    ALL: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, DELTA})
 
 
 @dataclass(frozen=True, slots=True)

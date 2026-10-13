@@ -11,7 +11,6 @@
 | 上下文 | 一步内的调用闸 | `max_step_tokens` 在配置里，没有东西读它 —— 模型与工具互相踢皮时没有闸 |
 | 上下文 | tool result 来不齐 | 组下一次模型请求时，缺结果的 tool call 怎么补 |
 | LLM | 重试与 fallback | 模型调用失败就抛 `LlmError`，队列里那条已经出队，不会自动重试。`outcome_unknown` 在工具侧有，模型侧还没有 |
-| LLM | streaming | 逐 token 推给客户端要新的 frame type 与 sink 语义（一条消息拆成多帧） |
 | LLM | 多 provider | 配置里只有一个 provider，也没有按工具选模型的位置 |
 | 对外投递 | 客户端漏收事件 | 投递是活的，断线期间的事件不补发。补发要么从 journal 重放，要么加一条「当前状态」查询 |
 | 审批 | 审批事件进 journal | 审批事件现在只在 `permissions.jsonl`，agent 看不到它们 |

@@ -18,7 +18,7 @@ from core.protocol.datatype.tool import (
     ToolExecution,
 )
 from core.protocol.error import LlmError
-from core.protocol.interface import AgentEventSink, Journal, ModelProvider, ToolSystem
+from core.protocol.interface import AgentEventSink, DeltaSink, Journal, ModelProvider, ToolSystem
 
 # --------------------------------------------------------------------------
 # 替身
@@ -26,23 +26,35 @@ from core.protocol.interface import AgentEventSink, Journal, ModelProvider, Tool
 
 
 class _Scripted(ModelProvider):
-    """按脚本回话的 provider，顺带记下每次收到什么。"""
+    """按脚本回话的 provider，顺带记下每次收到什么。
 
-    def __init__(self, *responses: LlmResponse) -> None:
+    `deltas` 给了就每次调用都先发这几段增量 —— 不给就一次不发，
+    「有没有 delta 不改变其他行为」这条才验得到。
+    """
+
+    def __init__(
+        self,
+        *responses: LlmResponse,
+        deltas: Sequence[tuple[str, str]] | None = None,
+    ) -> None:
         self._responses = list(responses)
+        self._deltas = list(deltas or [])
         self.requests: list[LlmRequest] = []
 
-    def complete(self, request: LlmRequest) -> LlmResponse:
+    def complete(self, request: LlmRequest, *, on_delta: DeltaSink | None = None) -> LlmResponse:
         self.requests.append(request)
         if not self._responses:
             raise LlmError("脚本里没有下一句了")
+        if on_delta is not None:
+            for channel, text in self._deltas:
+                on_delta(channel, text)
         return self._responses.pop(0)
 
 
 class _Broken(ModelProvider):
     """每次调用都失败。"""
 
-    def complete(self, request: LlmRequest) -> LlmResponse:
+    def complete(self, request: LlmRequest, *, on_delta: DeltaSink | None = None) -> LlmResponse:
         raise LlmError("模型挂了")
 
 
@@ -364,3 +376,121 @@ def test_a_failed_model_call_dispatches_nothing(journal: Journal, scope: Scope) 
         _brain(journal, _Broken(), tools, _Sink()).step(scope, _ask(journal, scope))
 
     assert tools.batches == []
+
+
+# --------------------------------------------------------------------------
+# 流式
+# --------------------------------------------------------------------------
+
+
+def _streaming(deltas: Sequence[tuple[str, str]], *responses: LlmResponse) -> _Scripted:
+    return _Scripted(*responses, deltas=deltas)
+
+
+def test_deltas_reach_the_client(journal: Journal, scope: Scope) -> None:
+    sink = _Sink()
+    provider = _streaming([("content", "晴"), ("content", "天")], LlmResponse(content="晴天"))
+
+    _brain(journal, provider, _Tools(), sink).step(scope, _ask(journal, scope))
+
+    assert [e.payload["text"] for e in sink.events if e.type == "assistant.delta"] == ["晴", "天"]
+
+
+def test_the_channel_is_carried_through(journal: Journal, scope: Scope) -> None:
+    """客户端要靠它把「正在想」和「正在答」分开显示。"""
+    sink = _Sink()
+    provider = _streaming([("reasoning", "先想"), ("content", "后答")], LlmResponse(content="后答"))
+
+    _brain(journal, provider, _Tools(), sink).step(scope, _ask(journal, scope))
+
+    channels = [e.payload["channel"] for e in sink.events if e.type == "assistant.delta"]
+    assert channels == ["reasoning", "content"]
+
+
+def test_deltas_never_reach_the_journal(journal: Journal, scope: Scope) -> None:
+    """一段增量在 journal 里是一句半话 —— append 它等于让记录说谎。"""
+    provider = _streaming([("content", "晴")], LlmResponse(content="晴天"))
+
+    _brain(journal, provider, _Tools(), _Sink()).step(scope, _ask(journal, scope))
+
+    assert _types(journal, scope) == [
+        EventType.USER_MESSAGE,
+        EventType.SYSTEM_AGENT_STEP,
+        EventType.ASSISTANT_MESSAGE,
+        EventType.SYSTEM_AGENT_STEP,
+    ]
+
+
+def test_the_full_message_still_arrives_after_the_deltas(journal: Journal, scope: Scope) -> None:
+    """断线重连靠它兜底 —— 它才是这一轮真正说过的话。"""
+    sink = _Sink()
+    provider = _streaming([("content", "晴")], LlmResponse(content="晴天"))
+
+    _brain(journal, provider, _Tools(), sink).step(scope, _ask(journal, scope))
+
+    assert [e.type for e in sink.events] == ["assistant.delta", "assistant.message"]
+    assert sink.events[-1].payload["content"] == "晴天"
+
+
+def test_deltas_carry_the_step_id(journal: Journal, scope: Scope) -> None:
+    """并行几个 step 时靠它知道哪几段属于同一轮。"""
+    sink = _Sink()
+    provider = _streaming([("content", "晴")], LlmResponse(content="晴天"))
+
+    _brain(journal, provider, _Tools(), sink).step(scope, _ask(journal, scope))
+
+    delta = next(e for e in sink.events if e.type == "assistant.delta")
+    step = next(r for r in _records(journal, scope) if r.type == EventType.SYSTEM_AGENT_STEP)
+    assert delta.payload["step_id"] == step.payload["step_id"]
+
+
+def test_delta_sequence_numbers_increase(journal: Journal, scope: Scope) -> None:
+    sink = _Sink()
+    provider = _streaming(
+        [("content", "a"), ("content", "b"), ("content", "c")], LlmResponse(content="abc")
+    )
+
+    _brain(journal, provider, _Tools(), sink).step(scope, _ask(journal, scope))
+
+    seqs = [e.payload["seq"] for e in sink.events if e.type == "assistant.delta"]
+    assert seqs == [1, 2, 3]
+
+
+def test_no_deltas_means_no_delta_events(journal: Journal, scope: Scope) -> None:
+    """provider 一个增量都不给时，事件流与从前完全一样。"""
+    sink = _Sink()
+
+    _brain(journal, _Scripted(LlmResponse(content="晴")), _Tools(), sink).step(
+        scope, _ask(journal, scope)
+    )
+
+    assert [e.type for e in sink.events] == ["assistant.message"]
+
+
+def test_a_failing_sink_does_not_break_a_streaming_step(journal: Journal, scope: Scope) -> None:
+    """送不出去的一段增量不是模型调用失败 —— 这一步照样跑完、照样落盘。"""
+    provider = _streaming([("content", "晴")], LlmResponse(content="晴天"))
+
+    _brain(journal, provider, _Tools(), _Sink(fail=True)).step(scope, _ask(journal, scope))
+
+    assert _types(journal, scope) == [
+        EventType.USER_MESSAGE,
+        EventType.SYSTEM_AGENT_STEP,
+        EventType.ASSISTANT_MESSAGE,
+        EventType.SYSTEM_AGENT_STEP,
+    ]
+
+
+def test_deltas_are_emitted_before_the_tool_call(journal: Journal, scope: Scope) -> None:
+    """顺序反了，界面上会先看见「要调工具」，再看见它为什么。"""
+    sink = _Sink()
+    call = LlmToolCall(tool="echo", arguments={"text": "晴"}, tool_call_id="t-1")
+    provider = _streaming([("content", "我查一下")], _answer(call))
+
+    _brain(journal, provider, _Tools(ECHO), sink).step(scope, _ask(journal, scope))
+
+    assert [e.type for e in sink.events] == [
+        "assistant.delta",
+        "assistant.message",
+        "tool.call",
+    ]

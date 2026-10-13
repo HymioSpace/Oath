@@ -13,7 +13,7 @@ from core.protocol.interface.intake import (
     SessionIdentity,
 )
 from core.protocol.interface.journal import Journal
-from core.protocol.interface.llm import ModelProvider
+from core.protocol.interface.llm import DeltaChannel, DeltaSink, ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.queue import EventQueue
 from core.protocol.interface.tool import Tool, ToolSystem
@@ -27,6 +27,8 @@ __all__ = [
     "EventRouter",
     "Intake",
     "Journal",
+    "DeltaChannel",
+    "DeltaSink",
     "ModelProvider",
     "OutboundTransport",
     "PermissionPolicy",

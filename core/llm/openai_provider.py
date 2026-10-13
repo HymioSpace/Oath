@@ -1,9 +1,14 @@
-"""`OpenAICompatibleProvider` —— OpenAI 兼容接口的非流式实现。
+"""`OpenAICompatibleProvider` —— OpenAI 兼容接口的实现。
 
 翻译两件事：core 的 provider 无关消息 → 请求体，请求体 → core 的 `LlmResponse`。
 `ToolCallRef` 的扁平 `{id, name, arguments}` 在这里被包成 OpenAI 要的
 `{id, type, function:{name, arguments}}`，`arguments` 从对象序列化成字符串 ——
 反过来进 core 时再解析成对象。
+
+**流式与不流式是两条路，返回值一样。** `on_delta` 给了就把 SSE 逐块攒起来，
+`content` 与 `reasoning` 边攒边交给回调，`tool_calls` 攒完整再解析；攒完返回一个
+和 `stream=false` 形状完全一致的 `LlmResponse`。所以调用方拿到之后做的事 —— 落盘、
+派发工具、收尾 —— 两种模式下是同一段代码，没有分叉。
 
 **只支持 OpenAI 兼容这一种 wire。** 别的厂家要么提供兼容端点，要么自己写一个
 `ModelProvider` 实现。core 不为某一个厂家开分支。
@@ -11,8 +16,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -25,11 +32,15 @@ from core.protocol.datatype.llm import (
 )
 from core.protocol.datatype.message import Message
 from core.protocol.error import LlmError
-from core.protocol.interface.llm import ModelProvider
+from core.protocol.interface.llm import DeltaChannel, DeltaSink, ModelProvider
 from core.utils.encoding import JsonObject, JsonValue
 
 #: 端点后缀。`api_base` 可以写到完整 endpoint，写到 base 也认。
 _CHAT_SUFFIX = "/chat/completions"
+
+#: SSE 的行前缀与结束哨兵。
+_SSE_PREFIX = "data:"
+_SSE_DONE = "[DONE]"
 
 #: 请求/响应里那些名字各家不一样的字段 → core 的名字。
 _REASONING_KEYS = ("reasoning_content", "reasoning")
@@ -106,16 +117,18 @@ def to_wire_tools(request: LlmRequest) -> list[JsonValue] | None:
     return tools
 
 
-def build_payload(request: LlmRequest, model: str) -> JsonObject:
+def build_payload(request: LlmRequest, model: str, *, stream: bool = False) -> JsonObject:
     """整个请求体。
 
     合并顺序（后者覆盖前者）：provider 透传参数 → 请求自带参数 → 调用点显式给的
     两个（model / max_tokens / temperature）。显式给的赢 —— 那是最具体的一次决定。
+
+    `stream` 放在 `extra_params` **之前**：provider 透传参数里写 `stream = true` 不应该
+    把调用点的选择顶掉 —— 要流式是调用点的决定。
     """
     payload: JsonObject = {
         "model": model or request.model,
         "messages": [to_wire_message(m) for m in request.messages],
-        "stream": False,
         "max_tokens": request.max_output_tokens,
     }
     if request.temperature is not None:
@@ -124,6 +137,7 @@ def build_payload(request: LlmRequest, model: str) -> JsonObject:
     if tools is not None:
         payload["tools"] = tools
     payload.update(request.extra_params)
+    payload["stream"] = stream
     return payload
 
 
@@ -216,13 +230,134 @@ def _parse_arguments(raw: JsonValue) -> JsonObject:
     return parsed
 
 
+@dataclass(slots=True)
+class _PartialCall:
+    """一个还在攒的 tool call。
+
+    `arguments` 存**片段**而不是拼好的字符串：一边收一边拼的话，某一轮里收到
+    非字符串（null、对象）就会把整个缓冲区弄成坏类型，错误还会留到最后才暴露。
+    """
+
+    tool_call_id: str = ""
+    name: str = ""
+    fragments: list[str] = field(default_factory=list)
+
+
+class _StreamAccumulator:
+    """把一串 SSE chunk 攒成一个 `LlmResponse`。
+
+    **`tool_calls` 按 `index` 归并。** 各家切得不一样：OpenAI 会把一个调用的
+    `function.arguments` 切成好几段慢慢发，MiniMax 一个 chunk 整段发完。两种都要收成
+    一个调用 —— 所以靠 `index` 认谁是谁，不靠顺序，也不靠「上一条还没结束」这种推断。
+    """
+
+    def __init__(self, on_delta: DeltaSink | None) -> None:
+        self._on_delta = on_delta
+        self._content: list[str] = []
+        self._reasoning: list[str] = []
+        self._calls: dict[int, _PartialCall] = {}
+        self._order: list[int] = []
+        self._finish = LlmFinishReason.STOP
+        self._usage: JsonObject = {}
+
+    def feed(self, chunk: JsonValue) -> None:
+        if not isinstance(chunk, dict):
+            raise LlmError(f"chunk 必须是对象，得到 {type(chunk).__name__}")
+        usage = chunk.get("usage")
+        if isinstance(usage, dict):
+            self._usage = usage
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            # usage-only 的 chunk 是各家都发的，不能当错。
+            return
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise LlmError("choices[0] 必须是对象")
+        finish = choice.get("finish_reason")
+        if isinstance(finish, str) and finish in _FINISH_REASONS:
+            self._finish = _FINISH_REASONS[finish]
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            return
+        self._take_text(delta, "content", self._content, DeltaChannel.CONTENT)
+        for key in _REASONING_KEYS:
+            if key in delta:
+                self._take_text(delta, key, self._reasoning, DeltaChannel.REASONING)
+                break
+        self._take_calls(delta.get("tool_calls"))
+
+    def result(self) -> LlmResponse:
+        return LlmResponse(
+            content="".join(self._content),
+            # 「一截都没有」与「有一段但是空串」在 journal 里长得一样，所以
+            # 一段都没有就报 None，与非流式路径保持一致。
+            reasoning="".join(self._reasoning) or None,
+            tool_calls=self._calls_in_order(),
+            finish_reason=self._finish,
+            usage=dict(self._usage),
+        )
+
+    # -- 内部 ---------------------------------------------------------------
+
+    def _take_text(self, delta: JsonObject, key: str, bucket: list[str], channel: str) -> None:
+        text = _as_text(delta.get(key))
+        if not text:
+            return
+        bucket.append(text)
+        self._emit(channel, text)
+
+    def _take_calls(self, raw: JsonValue) -> None:
+        if not isinstance(raw, list):
+            return
+        for item in raw:
+            if not isinstance(item, dict):
+                raise LlmError(f"tool_calls 里的项必须是对象，得到 {type(item).__name__}")
+            # 没有 index 就只有一个调用 —— 一条流里没有第二处可归。
+            index = item.get("index")
+            if not isinstance(index, int):
+                index = 0
+            entry = self._calls.get(index)
+            if entry is None:
+                entry = _PartialCall()
+                self._calls[index] = entry
+                self._order.append(index)
+            # id 与 name 只在第一段里给；后来的段只有 arguments。
+            # 用「非空才覆盖」而不是「有就覆盖」：有的厂家每段都重复带一遍。
+            call_id = item.get("id")
+            if isinstance(call_id, str) and call_id:
+                entry.tool_call_id = call_id
+            function = item.get("function")
+            if isinstance(function, dict):
+                name = function.get("name")
+                if isinstance(name, str) and name:
+                    entry.name = name
+                entry.fragments.append(_as_text(function.get("arguments")))
+
+    def _calls_in_order(self) -> tuple[LlmToolCall, ...]:
+        return tuple(
+            LlmToolCall(
+                tool=self._calls[i].name,
+                arguments=_parse_arguments("".join(self._calls[i].fragments)),
+                tool_call_id=self._calls[i].tool_call_id,
+            )
+            for i in self._order
+        )
+
+    def _emit(self, channel: str, text: str) -> None:
+        if self._on_delta is None:
+            return
+        # 送不出去的一段增量不是模型调用失败 —— 返回值仍然是完整的那一份。
+        with contextlib.suppress(Exception):
+            self._on_delta(channel, text)
+
+
 class OpenAICompatibleProvider(ModelProvider):
-    """一次同步的 chat/completions 调用。"""
+    """一次 chat/completions 调用。`on_delta` 给了就走流式。"""
 
     def __init__(self, config: ModelProviderConfig) -> None:
         self._config = config
 
-    def complete(self, request: LlmRequest) -> LlmResponse:
+    def complete(self, request: LlmRequest, *, on_delta: DeltaSink | None = None) -> LlmResponse:
         key = _api_key(self._config)
         if not key:
             raise LlmError(f"环境变量 {self._config.api_key_env} 没设置，取不到 api key")
@@ -232,14 +367,22 @@ class OpenAICompatibleProvider(ModelProvider):
         if not base:
             raise LlmError("api_base 为空")
 
+        payload = build_payload(request, self._config.model, stream=on_delta is not None)
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         timeout = httpx.Timeout(self._config.timeout_seconds, connect=10.0)
+        if on_delta is None:
+            return self._complete_once(f"{base}{_CHAT_SUFFIX}", payload, headers, timeout)
+        return self._complete_streamed(f"{base}{_CHAT_SUFFIX}", payload, headers, timeout, on_delta)
+
+    def _complete_once(
+        self,
+        url: str,
+        payload: JsonObject,
+        headers: dict[str, str],
+        timeout: httpx.Timeout,
+    ) -> LlmResponse:
         try:
-            response = httpx.post(
-                f"{base}{_CHAT_SUFFIX}",
-                json=build_payload(request, self._config.model),
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                timeout=timeout,
-            )
+            response = httpx.post(url, json=payload, headers=headers, timeout=timeout)
         except httpx.HTTPError as exc:
             raise LlmError(f"请求失败: {exc}") from exc
 
@@ -250,6 +393,36 @@ class OpenAICompatibleProvider(ModelProvider):
         except ValueError as exc:
             raise LlmError(f"响应不是 JSON: {exc}") from exc
         return parse_response(body)
+
+    def _complete_streamed(
+        self,
+        url: str,
+        payload: JsonObject,
+        headers: dict[str, str],
+        timeout: httpx.Timeout,
+        on_delta: DeltaSink,
+    ) -> LlmResponse:
+        accumulator = _StreamAccumulator(on_delta)
+        try:
+            with httpx.stream("POST", url, json=payload, headers=headers, timeout=timeout) as resp:
+                if resp.status_code >= 400:
+                    raise LlmError(f"模型返回 {resp.status_code}: {resp.read()[:500]!r}")
+                for line in resp.iter_lines():
+                    if not line.startswith(_SSE_PREFIX):
+                        continue
+                    data = line[len(_SSE_PREFIX) :].strip()
+                    if data == _SSE_DONE:
+                        break
+                    if not data:
+                        continue
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise LlmError(f"chunk 不是合法 JSON: {exc}") from exc
+                    accumulator.feed(chunk)
+        except httpx.HTTPError as exc:
+            raise LlmError(f"请求失败: {exc}") from exc
+        return accumulator.result()
 
 
 __all__ = [
