@@ -37,6 +37,7 @@ from core.protocol.datatype.permission import (
     PermissionVerdict,
     expired,
 )
+from core.protocol.datatype.queue import INPUT_QUEUE, QueueName, queue_of
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
@@ -58,13 +59,24 @@ from core.protocol.datatype.tool import (
     is_valid_invocation_id,
     is_valid_tool_name,
 )
+from core.protocol.datatype.wire import (
+    COMMAND_SCHEMAS,
+    CloseReason,
+    Command,
+    CommandType,
+    EventFrame,
+    FrameType,
+    WireVersion,
+)
 
 __all__ = [
     "MAX_IDEMPOTENCY_KEY_LENGTH",
     "PERMISSION_REQUESTED_KEY_PREFIX",
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "MAX_INVOCATION_ID_LENGTH",
+    "COMMAND_SCHEMAS",
     "PAYLOAD_SCHEMAS",
+    "INPUT_QUEUE",
     "RESULT_KEY_PREFIX",
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
@@ -74,9 +86,15 @@ __all__ = [
     "AppendResult",
     "BatchExecution",
     "Cursor",
+    "CloseReason",
+    "Command",
+    "CommandType",
     "CursorKind",
+    "EventFrame",
     "EventRecord",
     "EventType",
+    "QueueName",
+    "FrameType",
     "Message",
     "PayloadSchema",
     "PermissionEvent",
@@ -105,6 +123,8 @@ __all__ = [
     "ToolOutcome",
     "ToolResult",
     "ToolStatus",
+    "WireVersion",
+    "queue_of",
     "expired",
     "is_valid_invocation_id",
     "is_valid_scope_id",

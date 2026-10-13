@@ -20,6 +20,7 @@ core/journal/    独立追加日志模块，供所有模块统一写入和读取
 core/journal/impl/  存储后端（v1 为 JSONL）
 core/tool/       工具系统：注册表、批量并行派发、执行状态、终态事件
 core/tool/impl/  执行后端（v1 为线程池）
+core/queue/      三条内部队列（user / tool / system）
 extensions/      业务扩展：业务 tool、业务 skill、额外 context 来源
 extensions/tools/  业务工具实现（`Tool` 接口的参考实现）
 bootstrap/       装配与入口：读配置、实例化、注入 CoreRuntime
@@ -35,7 +36,7 @@ core 自带落盘 journal，所以这条判据对 durability 没有任何让步�
 
 core 不禁止第三方库：需要什么就 import 什么，装在 `pyproject.toml` 里。
 
-目前 journal 与工具系统有代码，其余目录等有对应实现再填。
+目前 journal、工具系统与队列有代码，其余目录等有对应实现再填。
 
 ## 运行链路
 
@@ -53,7 +54,7 @@ flowchart TD
     Workers --> Inbox
     Log --> Supervisor[Independent Supervisor]
     Supervisor --> Inbox
-    Log --> Views[Runtime / trace projections]
+    Log --> Views[Brain / trace projections]
     Views --> Biz[Management API]
 ```
 
@@ -84,14 +85,20 @@ flowchart TD
 
 ## 工具系统
 
-[core/tool](../core/tool/) 收集 core 与 extensions 的工具定义交给 context，把模型点名的调用派发出去。派发接口**只收批次、一定并行、立即返回执行 id**：同一批里的调用互不依赖，模型线程不能被工具拖住，真正的执行在后台线程池里跑。每个调用跑完或超时，落一条终态事件（`tool.result` payload），事件投递由注入的 sink 完成 —— 队列与消费语义是下一步 feature。
+[core/tool](../core/tool/) 收集 core 与 extensions 的工具定义交给 context，把模型点名的调用派发出去。派发接口**只收批次、一定并行、立即返回执行 id**：同一批里的调用互不依赖，模型线程不能被工具拖住，真正的执行在后台线程池里跑。每个调用跑完或超时，落一条终态事件（`tool.result` payload），事件投递由注入的 sink 完成 —— 产生事件的一方自己往 journal 追加（agent 要它当输入），同时 emit 给 sink 直推客户端。
 
 超时是「core 不再等待」而不是「终止线程」：线程跑到哪儿算哪儿，迟到的结果一律丢弃、不改写已发的终态。因此 `TIMEOUT` 的含义是「core 此刻不知道这个工具有没有生效」，能不能重试由上层判断，工具系统不替它决定。执行状态表是内存里的 derived 设施，重启即丢，真相始终是 journal 的记录。详见 [feature-tool-system](feature-tool-system.md)。
+
+## 事件通路
+
+三条内部队列（`user` / `tool` / `system`）是同一个东西的三种用法，只有 type 过滤不同，所以只有一个 `EventQueue` 加一张映射表。命令先落 journal 再入队，取出时才决定走规则还是走 agent。**队列只装输入，不装输出** —— `assistant.message`、`tool.call` 进 journal 但不进任何队列。
+
+对外投递**不是队列，也不经过 journal**：`AgentEventSink` 在事件产生时直推客户端，断了不补发。落 journal 是 Oath 的状态（agent 当输入用），推客户端是通知 —— 两次独立调用。对外是一条双向 WebSocket，`user_id` 由服务端从 credential 推导，客户端不能自称。详见 [feature-event-runtime](feature-event-runtime.md)。
 
 ## 三个核心约束
 
 1. **事件驱动**：用户输入、模型返回、工具返回、timeout、cancel、恢复命令统一进入事件处理。不是每条事件都调用 LLM；进度、重复或过期结果只更新审计/视图。
-2. **Durable**：影响后续行为的输入、决定、effect intent、结果与状态迁移追加持久化。先落盘再 ACK / 派发 / 呈现；持久化失败时停止接收新工作。重放只重建状态，不重做外部副作用。
+2. **Durable**：影响后续行为的输入、决定、effect intent、结果与状态迁移追加持久化。先落盘再派发 / 呈现；持久化失败时停止接收新工作。重放只重建状态，不重做外部副作用。
 3. **Supervisor**：独立进程订阅日志、租约和心跳，产生可审计恢复命令。规则优先，未来可用 agent 提议优化；修改 prompt / 架构必须经过版本化评估与发布流程。
 
 这些约束不提供跨第三方系统的 exactly-once。对于执行过但结果丢失的调用，必须允许 `outcome_unknown`，不可一律重试。
