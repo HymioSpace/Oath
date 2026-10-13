@@ -2,157 +2,149 @@
 
 状态：Implemented
 
-编号约定：本方案不使用 `NN-` 前缀。后续 feature 沿用同一命名风格（`feature-<short-name>.md`），
-已废弃的旧编号 01–08 不复用。
-
 ## 背景与目标
 
-Oath 是长期运行的 agent runtime，两个最硬的约束是 **durable** 与 **event-driven**：
-影响后续行为的输入、决定、effect intent、结果与状态迁移必须先落盘再 ACK；
-恢复时只重建状态，不重做外部副作用。
+Oath 长期运行，两条硬约束：**durable** 与 **event-driven**。影响后续行为的输入、决定、
+effect intent、结果与状态迁移必须先落盘再 ACK；恢复时只重建状态，不重做外部副作用。
 
-这两条都压在一个模块上：**journal 是唯一状态来源**。broker、快照、索引、trace 视图都是
-可从它恢复的派生设施。agent、工具、队列、Supervisor、biz、扩展都在自己的流程里直接写
-journal，不必经主 agent 转发。
+两条都压在一个模块上：**journal 是唯一状态来源**。broker、快照、索引、trace 视图都是
+可从它恢复的派生设施。agent、工具、队列、Supervisor、biz、扩展各自直接写 journal，
+不经主 agent 转发。
 
-本 feature 定义三件事：
+本 feature 定义：追加日志的**记录格式**（跨仓库 wire 契约，语言无关）、agent state 的
+**存储记录格式**、journal 对上提供的 **API**，以及恢复正确性凭什么成立。
 
-1. 追加日志（append-only log）的**记录格式** —— 跨仓库的 wire 契约，语言无关。
-2. agent state 的**存储记录格式**。
-3. journal 对上提供的 **API**（append / commit_state / recovery / read_range），
-   以及恢复正确性**凭什么成立**。
+不包含：事件运行时（消费记录、驱动 agent step）、工具生命周期与终态、Supervisor、
+biz 查询 API、日志裁剪、多机高可用。
 
-**不包含**：事件运行时（消费记录、驱动 agent step）、工具生命周期与终态、
-Supervisor、biz 查询 API、日志裁剪与压缩、多机高可用。这些是后续 feature。
+**JSONL 实现只保证单机单进程。** 不加文件锁，不假装支持多写者。
 
-**明确不做**：JSONL 实现只保证单机单进程。不要把它称为高可用。
+## 前置依赖
 
-## 前置依赖与影响范围
+无前置 feature，journal 是其他所有 feature 的地基。所有层都可以依赖 `core/journal/`，
+journal 不反向依赖任何层。
 
-- 无前置 feature。journal 是其他所有 feature 的地基。
-- 依赖方向：所有层都可以依赖 `core/journal/`；journal 不反向依赖任何层。
-- 跨仓库影响：`Hymio`（biz 查询、Kit）、`Nostalgia`（context 契约）、客户端 trace 视图
-  都会读 journal 记录。**记录字段与 type 枚举属于跨仓库协议**，改动是破坏性变更，
-  需要通过 `payload_schema_version` 双读过渡。
+`core/protocol/` 放契约（datatype + interface，纯数据无 I/O），`core/journal/` 放机制
+（校验、幂等、游标、投影，业务无知），`impl/` 放存储后端，`core/utils/` 放编码工具。
+判据：承诺进 protocol，手段进 utils。异常集中在 `core/protocol/error.py`，消费方一把
+`except JournalError` 接住全部失败。
 
-## 目录与边界
+## 总览
 
-```text
-core/protocol/          契约层：只放 datatype 和 interface，纯数据无 I/O
-  datatype/             数据类型
-    scope.py            Scope（隔离键）与其字符集校验
-    message.py          Message（对话历史里的一条消息）
-    agent_state.py      AgentState（agent 的可恢复状态 + 它覆盖的游标区间）
-    cursor.py           Cursor（在 scope 内定位一条记录）
-    journal.py          journal 专属：落盘记录格式 / 接口返回值
-  interface/            接口，按模块分文件
-    journal.py          Journal
-  error.py              契约层的全部异常
-core/utils/             与 protocol 同级的工具层，不构成任何契约
-  encoding.py           JsonValue / JsonObject / canonical_json / 时间戳
-core/journal/           机制层：校验、幂等语义、游标运算、messages 投影。业务无知。
-core/journal/impl/      存储后端。v1 只有 file_journal.py（JSONL，标准库）。
+一句话：**写进去的记录 fsync 之后必可读；恢复按游标水位线切出「已知状态」与「待处理
+事件」，重放是纯函数，不重做副作用。**
+
+```mermaid
+flowchart TD
+    W[append: 校验 → 幂等 → canonical JSON] --> F[write + flush + fsync]
+    F -->|成功| IDX[更新幂等索引，返回游标]
+    F -->|失败| ERR[抛错，上层不 ACK]
+
+    R[recover: 全量扫描 events + 读 state 尾部] --> C[水位线 = state.cursor_end]
+    C --> M[messages: cursor ≤ 水位线的投影]
+    C --> P[pending: 水位线之后的记录]
+    M --> X[调用方: fold(state, pending) → 最新 state<br/>纯函数，无副作用]
+    P --> X
 ```
 
-判据：数据类型和接口是承诺，进 `core/protocol/`；编码只是手段，进 `core/utils/`。
-`datatype/` 顶层放跨模块通用的类型（`scope` / `message` / `agent_state` / `cursor`），
-journal 专属的集中在 `journal.py`。
-异常集中在一个 `error.py`，消费方一把 `except JournalError` 接住全部失败。
+五条贯穿全文的规则：
 
-`core/journal/__init__.py` 与 `core/protocol/__init__.py` 都**不重导出任何符号** ——
-多一条 import 路径就多一种拿法。契约层的 import 走 `core.protocol.datatype` /
-`core.protocol.error` / `core.protocol.interface` 三个包入口，不碰子模块。
+1. **只追加，不改不删。** 失效的东西追加新记录说明它失效了。
+2. **水位线是游标，不是时间戳。** 墙钟会回拨、会撞精度，做水位线会静默丢数据。
+   `occur_dt` / `commit_dt` 只用于展示与排查。
+3. **`append` 返回成功 ⇒ 已 fsync。** 这是唯一的耐久性承诺，也是全部其他保证的根。
+4. **journal 不解释业务语义。** fold 是调用方的纯函数：不调工具、不调 LLM、不产生
+   外部副作用。快照是优化，不是正确性来源。
+5. **损坏不静默跳过。** 抛错。跳过的正是「谁在什么时候做了什么」。
 
-MySQL 等实现将来落在 `core/journal/impl/`，替换 v1 时 `core/protocol` 与 `core/journal`
-不动。**不预先写第二份实现**——只有一个实现和一个使用者时，多写一层抽象是负债；
-分目录是为了将来替换时改动面收敛，不是为了现在就支持多后端。
+不变量：
+
+| # | 不变量 |
+| --- | --- |
+| 1 | journal 不解释 `type` 与 `payload` 的含义 |
+| 2 | 同一 `(user_id, session_id)` 内记录严格有序，顺序即 append 顺序 |
+| 3 | 游标单调递增；`recover` / `read_range` 拒绝本实现不支持的 kind |
+| 4 | 幂等键在 scope 内唯一；同键同指纹返回原记录，同键异指纹抛错 |
+| 5 | `append` 返回成功后记录已持久化，重启必可读 |
+| 6 | `Recovery` 的 `state.cursor_end` 与 `messages` 对齐同一个水位线，不重复一份 |
+| 7 | scope 校验先于任何文件路径拼接 |
+| 8 | 记录内的 `user_id` / `session_id` 必须与所在文件代表的 scope 一致 |
+| 9 | fold 是纯函数，无外部副作用 |
+| 10 | 未知的 `payload_schema_version` 抛错，不静默丢弃 |
 
 ## 接口与数据
 
-### 命名约定
-
-字段名统一 snake_case。`user_id` / `session_id` 用下划线分隔（不用 `userid`），
-与项目内其余 Python 标识符一致。`occur_dt` / `commit_dt` 沿用「dt 表示时刻」的写法，
-时间值一律 RFC 3339 UTC 字符串（如 `2026-10-12T08:31:04.123456Z`），不用裸 epoch 数值
-——epoch 数值丢失可读性，且浮点秒在跨语言比较里有精度陷阱。
+字段名统一 snake_case。时间值一律 RFC 3339 UTC 字符串（如 `2026-10-12T08:31:04Z`），不用
+裸 epoch 数值 —— 浮点秒在跨语言比较里有精度陷阱。
 
 ### 记录：事件日志（events）
 
-追加日志，每行一条，字段如下：
+追加日志，每行一条：
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
 | `user_id` | string | 是 | 第一层隔离。`^[A-Za-z0-9_-]{1,64}$` |
 | `session_id` | string | 是 | 第二层隔离与串行化边界。同上字符集 |
-| `id` | integer | 否 | 自增。**MySQL 实现必填；JSONL 实现不写**（见「游标」） |
+| `id` | integer | 否 | 自增。**MySQL 实现必填；JSONL 实现不写** |
 | `type` | string | 是 | 见下方 type 集合 |
 | `payload` | object | 是 | 结构由 `type` + `payload_schema_version` 决定 |
 | `payload_schema_version` | integer | 是 | 从 1 开始，同一 `type` 内单调递增 |
 | `idempotency_key` | string | 是 | 在 `(user_id, session_id)` 内唯一 |
 | `occur_dt` | string \| null | 否 | 业务发生时间。调用方提供，不保证单调 |
-| `commit_dt` | string | 是 | 落库时间。由 journal 实现盖章，不接受调用方指定 |
+| `commit_dt` | string | 是 | 落库时间。由实现盖章，不接受调用方指定 |
 
-`user_id` / `session_id` 在每行里冗余存在，即使文件已经按 scope 分目录。理由是
-不变量 8：读的时候校验「记录里的 scope == 文件路径代表的 scope」，不一致就报错。
-这是一道冗余防线——分文件写错了、文件被手工搬过、并发下路径拼接出错，
-都会被挡住，而不是变成静默的越权读。
+`user_id` / `session_id` 在每行里冗余存在，即使文件已按 scope 分目录 —— 不变量 8 靠它
+成立：分文件写错、文件被手工搬过、路径拼接出错，都会被挡住，而不是变成静默的越权读。
 
-**行编码**：每行是 canonical JSON——键按字典序、无多余空白、UTF-8 编码、非 ASCII 字符
-不转义、`\n` 结尾。跨语言要能生成逐字节一致的记录（幂等指纹要哈希 payload），
-所以编码必须钉死。
+**行编码**必须钉死：键按字典序、无多余空白、UTF-8、非 ASCII 不转义、`\n` 结尾。幂等
+指纹要哈希 payload，跨语言必须能生成逐字节一致的记录。
 
 ### type 集合（v1）
 
-| type | payload 内容 | 来源 |
+| type | payload | 来源 |
 | --- | --- | --- |
 | `user.message` | `{content: string, ...}` | 用户输入 |
-| `assistant.message` | `{content, reasoning?, tool_calls?}` | 模型返回的 assistant 轮 |
-| `tool.call` | `{tool_call_id, invocation_id, tool, arguments}` | 发起一次逻辑工具调用 |
+| `assistant.message` | `{content, reasoning, tool_calls?}` | 模型返回的 assistant 轮 |
+| `tool.call` | `{tool_call_id, invocation_id, tool, arguments}` | 发起一次工具调用 |
 | `tool.result` | `{tool_call_id, invocation_id, outcome, ...}` | 这次调用的终态 |
 | `system.agent_step` | `{step_id, phase}` | step 生命周期审计 |
 
-v1 的闭合集合，加新成员按破坏性变更处理：先定 payload 字段，再升协议版本走双读。
+闭合集合，加新成员按破坏性变更处理：先定 payload 字段，再升协议版本走双读。
 
-`system.` 只是命名约定，不是特殊类别。`system.agent_step` 和 `user.message` 一样是
-一种 type，有一样的字段约束。以后出现新的 runtime 场景（比如压缩标记）就登记一个新的
-`system.<name>`，走同一套校验，不存在「system 前缀的 type 免检」这条路。
+`system.` 只是命名约定，不是特殊类别 —— 和 `user.message` 一样是一种 type，有一样的字段
+约束，不存在「system 前缀免检」这条路。
 
-**`assistant.message` 的 payload 至少包含 `reasoning`**，即使本次没有也写 `null`——
-字段存在但为 null 与字段不存在，在跨版本读取时行为不同，显式写出来更省事。
-`reasoning` 的内容是模型的思维链，原样落盘不加工。它是否在重放时回传给模型，
-由模型供应商策略决定（部分 provider 拒绝接受历史 reasoning）——这是 provider 适配层的事，
-journal 只负责存得下。
+`assistant.message` 的 `reasoning` 即使没有也写 `null`：字段存在但为 null 与字段不存在
+在跨版本读取时行为不同。是否重放给模型由 provider 适配层决定，journal 只负责存得下。
+
+**payload schema 拒绝未知字段**，每种 type 一视同仁：拼错字段名当场被抓住，代价是加字段
+必须先升 `payload_schema_version`。
 
 ### 记录：状态日志（state）
 
-agent state 快照，**独立的追加日志**，不混在事件流里。
+agent state 快照，**独立的追加日志**，不混在事件流里。落盘形态就是 `AgentState` 序列化，
+加 `id` 与 `commit_dt` 两个记录层字段（后者由实现盖章，经 `StateRef.commit_dt` 返回）。
+`AgentState` 的成员**不是 `commit_state` 的入参**：
 
-| 字段 | 类型 | 必填 | 说明 |
-| --- | --- | --- | --- |
-| `user_id` / `session_id` | string | 是 | 同事件记录 |
-| `id` | integer | 否 | 自增，同上可选 |
-| `commit_dt` | string | 是 | 落库时间，由实现盖章 |
-| `payload_schema_version` | integer | 是 | payload KV 的版本，从 1 开始 |
-| `payload` | object | 是 | agent state 的 KV 快照 |
-| `cursor_start` | cursor \| null | 是 | 本快照覆盖的日志区间起点 |
-| `cursor_end` | cursor | 是 | 本快照覆盖的日志区间终点 |
+```python
+@dataclass(frozen=True, slots=True)
+class AgentState:
+    scope: Scope  # 它属于谁
+    cursor_start: Cursor | None  # 它覆盖的区间起点
+    cursor_end: Cursor  # 它覆盖的区间终点
+    payload: JsonObject  # 它是什么内容
+    payload_schema_version: int = 1
+```
 
-`payload` 是**全量 KV 快照**，不是 delta。
+理由是同一个：传参的话「提交的 scope」和「状态自己的 scope」、「声明的版本」和「内容的
+实际版本」都能被写成两件事，而这两处写岔都不会报错，只会在恢复时悄悄给出另一份状态。
+`id` 与 `commit_dt` 是记录层的字段，不在 `AgentState` 上。
 
-前五个字段都是 `AgentState` 的成员，不是 `commit_state` 的入参：`user_id` /
-`session_id` 是 `state.scope`，`payload` 是 `state.payload`，`payload_schema_version`
-是 `state.payload_schema_version`，`cursor_start` / `cursor_end` 是
-`state.cursor_start` / `state.cursor_end`。交回去的状态和拿回来的状态说的是同一份
-内容、同一个版本、同一个区间、同一个 scope，调用方把它们写岔不了。
+`payload` 是**全量 KV 快照**，不是 delta。`cursor_start` 一般留 `None`（表示「从日志开头
+覆盖」）：字段先占位，将来改增量快照不用动 schema。
 
-`id` 与 `commit_dt` 是记录层的字段，不在 `AgentState` 上：`commit_dt` 由实现盖章，
-经 `StateRef.commit_dt` 返回给调用方。
-
-`cursor_start` v1 一般留 `None`（表示「从日志开头覆盖」）。字段先占位：
-将来若改增量快照，schema 不用动，语义变的是 `cursor_start` 不再为 null。
-
-状态日志与事件日志分开的理由：恢复时状态日志只需读**尾部**（最后一条完整记录），
-不需要全量扫描；事件日志则必须全量扫。混在一起会让快照参与每轮消息投影。
+状态日志与事件日志分开的理由：恢复时状态日志只需读**尾部**（最后一条完整记录），事件
+日志必须全量扫。混在一起会让快照参与每轮消息投影。
 
 ### 游标（cursor）
 
@@ -161,166 +153,103 @@ agent state 快照，**独立的追加日志**，不混在事件流里。
 {"kind": "id",   "value": 9001}
 ```
 
-一个游标 = 「在某个 scope 的日志里，定位到某条记录的位置」。`kind` 标明由哪种实现盖章：
+一个游标 =「在某个 scope 的日志里定位到某条记录的位置」，`kind` 标明由哪种实现盖章：
+`line` 是物理行号（1-based，`value=0` 是合法值，表示「第一条记录之前」，空日志的水位线
+就是它），`id` 是自增 id。不同后端的游标不可互换，`kind` 的生成与解析归实现。
 
-- `line` —— JSONL 实现使用。物理行号（1-based，每行都是一条记录）。`value=0` 是合法值，
-  表示「第一条记录之前」，空日志的水位线就是它。
-- `id` —— MySQL 实现使用。该 scope 内的自增 `id`。
-
-不同后端的游标不可互换。`core/journal/cursor.py` 提供 kind 校验与解析（`check_kind` /
-`parse_cursor`），支持的 kind 集合由实现自己给出——JSONL 只支持 `line`，它是实现的
-私有常量。kind 的生成与解析归实现。
-
-**游标单调递增，`recovery` 拒绝 kind 不受支持的游标。**
-
-### 为什么不用 commit_dt 做水位线
-
-一个直觉方案是：state 记 `commit_dt`，恢复时取 `commit_dt > state.commit_dt` 的记录。
-这个方案有三个会**静默丢数据**的路径：
-
-1. 两条记录落在同一时间戳精度内 → 边界那条被漏掉或重复折叠。
-2. NTP 校正让墙钟倒退 → 后写的记录 `commit_dt` 小于快照的 `commit_dt` → 永久丢失。
-3. 「写快照」和「写事件」是两次独立 append，中间崩溃 → 两者相对顺序不确定。
-
-所以水位线是 `cursor_end`，`commit_dt` 退回**纯审计字段**：可用于展示、按时间粗排、
-排查问题，但任何正确性判断都不依赖它。同理 `occur_dt` 由调用方提供，也不可信。
+**为什么不用 `commit_dt` 做水位线。** 「取 `commit_dt > state.commit_dt` 的记录」有三条
+静默丢数据的路径：同一时间戳精度内的边界那条被漏掉或重复折叠；NTP 校正让墙钟倒退 →
+后写的记录比快照还小 → 永久丢失；「写快照」与「写事件」是两次独立 append，中间崩溃 →
+两者相对顺序不确定。
 
 ### API
 
 ```python
 class Journal(ABC):
-    @abstractmethod
     def append(
         self, scope, type, payload, *, payload_schema_version, idempotency_key, occur_dt=None
     ) -> AppendResult: ...
-    @abstractmethod
     def commit_state(self, state: AgentState) -> StateRef: ...
-    @abstractmethod
     def recover(self, scope) -> Recovery: ...
-    @abstractmethod
     def read_range(self, scope, cursor, *, limit=None) -> Iterator[Record]: ...
 ```
 
-实现继承它（`class FileJournal(Journal)`），缺任何一个方法都在实例化时就被 ABC
-挡下，类型上漏掉也在 mypy 处暴露。
+`append` 返回 `AppendResult{record_id, idempotent_hit, cursor}`。`commit_state` 返回
+`StateRef{covered_through, commit_dt}` —— `covered_through` 是快照覆盖到的事件日志位置，
+不是状态日志里的行号：调用方要的是「从这儿往后才是新的」。`read_range` 从 `cursor`
+**之后**（不含）向后顺序读原始记录，不重建状态，给 trace 视图、审计、Supervisor 扫描用。
 
-`append` 返回 `AppendResult{record_id, idempotent_hit, cursor}`。
-`commit_state` 返回 `StateRef{covered_through, commit_dt}`——`covered_through` 是这份快照
-覆盖到的事件日志位置（= `state.cursor_end`），不是状态日志里的行号。调用方要的
-是「从这儿往后才是新的」，不是「快照写在第几行」。
-`read_range` 从 `cursor` **之后**（不含该位置）向后顺序读原始记录，不重建状态——
-给 trace 视图、审计、Supervisor 扫描用。`limit` 不给则读到日志末尾。
-
-`commit_state` 收 `AgentState` 而不是裸字典，`recover()` 也返回 `AgentState` ——
-journal 不解释 `payload` 里的内容，只保证原样存下、原样取回。
-
-`AgentState` 是 agent state 的完整身份，贯穿所有模块，成员就是这份状态的描述本身：
-
-```python
-@dataclass(frozen=True, slots=True)
-class AgentState:
-    scope: Scope  # 它属于谁
-    cursor_start: Cursor | None  # 它覆盖的日志区间
-    cursor_end: Cursor
-    payload: JsonObject  # 它是什么内容
-    payload_schema_version: int = 1
-```
-
-全部是成员、没有一个是 `commit_state` 的入参，理由是同一个：调用方能拿出去的状态
-和能写回来的状态必然是同一份。传参的话，「提交的 scope」和「状态自己的 scope」、
-「声明的版本」和「内容的实际版本」都能被写成两回事，而这两处写岔都不会报错，只会在
-恢复时悄悄给出另一份状态。
-
-`commit_state` **不要求幂等键**。快照是自描述的（自带 cursor 区间），
-重复提交只是多写一份快照，不会破坏任何东西。调用方在崩溃后想知道上次提交成没成功，
-读回 `recover()` 即可。
+`commit_state` **不要求幂等键**：快照自描述，重复提交只是多写一份。调用方在崩溃后想
+知道上次提交成没成功，读回 `recover()` 即可。
 
 ### 幂等语义
 
-幂等键在 `(user_id, session_id)` 内唯一。重复 `append` 时比较指纹
-（`type` + `payload_schema_version` + `payload` 的 canonical JSON 的哈希）：
+幂等键在 scope 内唯一。重复 `append` 时比较指纹（`type` + `payload_schema_version` +
+`payload` 的 canonical JSON 的哈希）：
 
-- 指纹**相同** → 认为是重放，返回原记录，`idempotent_hit=True`。不追加新行。
-- 指纹**不同** → 抛 `IdempotencyKeyConflict`。不覆盖、不追加。
+- 指纹**相同** → 认为是重放，返回原记录，`idempotent_hit=True`，不追加新行。
+- 指纹**不同** → 抛 `IdempotencyKeyConflict`，不覆盖不追加。
 
-第二分支是必要的：同一个幂等键配不同内容，是调用方的 bug。如果只按「键存在就返回原记录」
-处理，重放路径会把 bug 变成静默的丢记录——上层以为写进去了，实际上拿到的是旧值。
+第二分支是必要的：同一个键配不同内容是调用方的 bug。只按「键存在就返回原记录」处理，
+重放路径会把 bug 变成静默的丢记录 —— 上层以为写进去了，拿到的其实是旧值。
 
-幂等索引在 JSONL 实现里是打开时重建的内存结构；MySQL 实现靠唯一约束。
-**幂等必须在重启后依然成立**，否则重放会写入重复记录。
+JSONL 实现的幂等索引是打开时从日志重建的内存结构 —— **幂等必须在重启后依然成立**，否则
+重放会写入重复记录。
 
-### 恢复（recovery）
+### 恢复
 
 `Recovery{state, messages, pending}`：
 
-- `state` —— 最后一条完整状态记录，产出的 `AgentState`：`scope` 是被恢复的
-  session，覆盖区间在 `cursor_start` / `cursor_end` 上，`payload` 是状态内容。
-  从未提交过快照时 `cursor_end` 为 0、`payload` 为空。
-- `messages` —— 按游标顺序投影出的 LLM 消息数组，
-  **只含 `cursor <= state.cursor_end` 的记录**。
-- `pending` —— `state.cursor_end` 之后的全部事件记录，按游标升序。
+- `state` —— 最后一条完整状态记录产出的 `AgentState`。从未提交过快照时 `cursor_end` 为 0、
+  `payload` 为空。
+- `messages` —— 按游标顺序投影出的 LLM 消息数组，**只含 `cursor <= state.cursor_end` 的
+  记录**。
+- `pending` —— `state.cursor_end` 之后的全部记录，按游标升序。
 
-水位线只存在于 `state` 上，不重复一份。`state` 与 `messages` 严格对齐
-**同一个** `cursor_end`。这一点是必须的：把一个截至
-快照的 state 和一个截至当前的 messages 配在一起交给模型，会出现「模型记得
-tool.result，但 state 里没有这次调用已经生效」的错位。
+`state` 与 `messages` 严格对齐**同一个** `cursor_end`：把截至快照的 state 和截至当前的
+messages 配起来交给模型，会出现「模型记得 `tool.result`，但 state 里没有这次调用已经
+生效」的错位。
 
-**推论：从未提交过快照时，`cursor_end` 为 0，于是 `messages` 为空、全部记录落在
-`pending`。** 这是设计后果不是缺陷——宁可两者一起退回起点，也不能给出一个「state 是
-空的但模型记得刚才说过什么」的组合。调用方要的完整对话历史是两者相加：
+所以从未提交过快照时 `messages` 为空、全部记录落在 `pending` —— 设计后果不是缺陷：宁可
+两者一起退回起点，也不能给出「state 是空的但模型记得刚才说过什么」。完整历史是两者相加：
 
 ```text
 recovery = journal.recover(scope)
-state    = fold(recovery.state, recovery.pending)     # runtime 负责，纯函数
+state    = fold(recovery.state, recovery.pending)          # 纯函数
 messages = recovery.messages + project_messages(recovery.pending)
+journal.commit_state(state)                                 # 下次 recover 更快
 ```
 
-**journal 不折叠 pending。** fold 需要知道「tool.result 的 outcome 如何改变 agent state」，
-那是 agent runtime 的业务语义，不属于 journal。把 fold 放在 journal 里会让 journal
-不再是业务无知的模块边界。恢复流程因此是两段：
-
-```text
-journal.recover(scope)          →  自洽的 (state, messages) + pending
-runtime: fold(state, pending)   →  最新 state（纯函数，无副作用）
-journal.commit_state(...)       →  落盘，下次 recover 更快
-```
-
-这样调用方拿到的恢复结果**永远是最新的**（B 语义），但 fold 的代码归属清晰。
-不预先做 `Journal.with_reducer(...)` 之类的扩展点——真出现第二个消费者时再抽。
+**journal 不折叠 pending。** fold 需要知道「`tool.result` 的 outcome 如何改变 agent
+state」，那是 agent runtime 的业务语义。
 
 ### messages 投影规则
 
-只有 `EventType.MESSAGE_TYPES` 里的四种进 messages，其余（`system.agent_step`）不进。
+只有 `MESSAGE_TYPES` 里的三种进 messages（`system.agent_step` 不进）：
 
 | 记录 | 投影出的消息 |
 | --- | --- |
 | `user.message` | `{role: "user", content}` |
-| `assistant.message` | `{role: "assistant", content, reasoning?, tool_calls?}` |
+| `assistant.message` | `{role: "assistant", content, reasoning, tool_calls?}` |
 | `tool.call` + `tool.result` | `{role: "tool", content, tool_call_id, outcome}` |
 
 一条 `tool.call` 先占一个位置，对应的 `tool.result` 到达时填进去。因此：
 
-- **`tool_call_id` 与 `invocation_id` 是两个标识，不是一对别名。** 前者由模型 API
-  返回、原样透传；后者是 Oath 自己的调用 id。配对（call ↔ result、多次结果之间挑
-  终态）走 `invocation_id`，填进 tool 消息的 `tool_call_id` 取自对应的 `tool.call`
-  记录 —— 模型只认后者，它必须与 assistant 轮 `tool_calls[i].id` 逐字节相同。
-- **同一调用多次出结果只留最后一条。** 它们填同一个位置，最后一条赢。对话里不会堆出
-  多条 tool 消息。
-- **未完成的 `tool.call` 产出一条 `unresolved: true` 的 tool 消息**（`content` 为空串）。 丢掉它会产出
-  一个「assistant 轮带着 `tool_calls` 却没有对应结果」的数组，交给任何 provider 都是
-  坏的，所以宁可显式标出来。
-- **无对应 `tool.call` 的 `tool.result` 不投影。** 合法的日志里不会出现这种情况；
-  凭空造一条没有 assistant `tool_calls` 配对的 tool 消息比缺一条更糟。
+- **配对走 `invocation_id`，填进 tool 消息的 `tool_call_id` 取自 `tool.call` 记录** ——
+  模型只认后者，它必须与 assistant 轮的 `tool_calls[i].id` 逐字节相同。
+- **同一调用多次出结果只留最后一条。** 对话里不会堆出多条 tool 消息。
+- **未完成的 `tool.call` 产出一条 `unresolved: true` 的 tool 消息**（`content` 为空串）。
+  丢掉它会产出「assistant 轮带着 `tool_calls` 却没有对应结果」的数组，交给任何 provider
+  都是坏的。
+- **无对应 `tool.call` 的 `tool.result` 不投影。** 凭空造一条没有配对的 tool 消息比缺一条
+  更糟。
 
-`project_messages(records, cursor_end=None)` 也可直接调用：`cursor_end` 传 `None`
-表示投影全部，用于把 `pending` 补进完整历史。
-
-投影顺序 = 游标顺序，不看时间戳。
+`project_messages(records, cursor_end=None)` 也可直接调用，`None` 表示投影全部。投影顺序
+= 游标顺序，不看时间戳。
 
 ### 错误
 
-领域不变量违反用异常（符合项目约定：状态字段用于 tool_result / inbound_event 层面，
-不变量违反用异常）。
+领域不变量违反用异常（状态字段用于 tool_result / inbound_event 层面，不变量违反用异常）。
 
 | 异常 | 触发条件 |
 | --- | --- |
@@ -328,223 +257,55 @@ journal.commit_state(...)       →  落盘，下次 recover 更快
 | `IdempotencyKeyConflict` | 幂等键命中但指纹不同 |
 | `PayloadVersionError` | 未知 `payload_schema_version` |
 | `PayloadSchemaError` | payload 不符合该 type + version 的 schema |
-| `CursorError` | 游标 kind 不受本实现支持，或位置越界 |
+| `CursorError` | 游标 kind 不受支持，或位置越界 |
 | `CorruptRecordError` | 记录结构损坏、或记录 scope 与文件 scope 不一致 |
 
-`CorruptRecordError` 有一条例外：**文件最后一行可能被截断**，这是崩溃时正在写的
-那一行，属正常情况，读取时丢弃并可选地把文件截断到这里为止。**中间**的损坏不豁免，
-直接抛错——静默跳过等于丢数据。
+`CorruptRecordError` 有一条例外：**文件最后一行可能被截断** —— 那是崩溃时正在写的那
+一行，属正常情况，读取时丢弃并可选地把文件截断到这里。**中间**的损坏不豁免。
 
 ## 实现方案
 
-### 数据流
-
-```text
-写入方 ──append()──► 校验 scope / payload / 幂等
-                        │
-                        ▼
-                  幂等索引（内存，open 时从日志重建）
-                        │ 命中且指纹同 → 返回原记录，结束
-                        ▼
-                  编码 canonical JSON 行
-                        │
-                        ▼
-                  write() → flush() → fsync()   ← append 返回前必须完成
-                        │
-                        ▼
-                  更新内存索引 + 返回游标
-
-恢复   journal.recover(scope)
-          ① 打开 / 扫描 events → 幂等索引、last_valid_cursor（容忍截断尾行）
-          ② 打开 / 读 state 尾部 → 最后一条完整快照 → cursor_end
-          ③ 按游标序扫描 events 到 cursor_end → 投影 messages
-          ④ 收集 cursor_end 之后的记录 → pending
-          ⑤ 返回 Recovery
-```
-
-### JSONL 布局
+**JSONL 布局** 按 scope 分目录，而不是一个全局文件：
 
 ```text
 <root>/<user_id>/<session_id>/events.jsonl
 <root>/<user_id>/<session_id>/state.jsonl
 ```
 
-按 scope 分目录，而不是一个全局文件：
+隔离落在文件系统层面，删一个 session 就是删一个目录；并发写互不干扰，不需要读侧过滤
+scope；单个 session 可独立归档、单独限额。代价是每个 session 至少两个文件。`user_id` /
+`session_id` **必须先校验再拼路径**（不变量 7）：即便它们来自认证主体而不是调用方，
+未校验就拼进路径等于把目录穿越的口子开在文件系统上。
 
-- 隔离落在文件系统层面，删一个 session 就是删一个目录。
-- 不同 session 并发写互不干扰，不需要读侧过滤 scope。
-- 单个 session 可独立归档、可单独限额。
-
-代价是文件数量多，且每个 session 至少两个文件。
-
-`user_id` / `session_id` **必须先校验再拼路径**（不变量 7）。这两个值来自认证主体或
-授权委托，不接受调用方任意伪造；但即便如此，未校验就拼进路径等于把目录穿越的口子
-直接开在文件系统上。校验不通过的直接抛 `ScopeError`，不落盘、不建目录。
-
-### 崩溃一致性
-
-- `append` 返回成功 ⇒ 记录已 `fsync`，重启必可读。这是唯一的耐久性承诺。
-- `fsync` 失败 / 磁盘满 ⇒ `append` 抛错，不返回成功，上层不 ACK。
-- 崩溃发生在 `write()` 之后、`fsync` 之前 ⇒ 可能留下截断尾行，恢复时丢弃。
-- 崩溃发生在「写事件」与「写快照」之间 ⇒ 事件多出来，落在 `pending` 里被重新处理。
-  重新处理是安全的，因为 **fold 是不变量 9 的纯函数**：不调用工具、不调 LLM、
-  不产生外部副作用。快照只是优化，不是正确性来源。
-
-### 不变量
-
-1. journal 不解释业务语义。`type` 与 `payload` 的含义由上层定义。
-2. 同一 `(user_id, session_id)` 内记录严格有序，顺序即 append 顺序。
-3. 游标单调递增；`recover` / `read_range` 拒绝 kind 不受支持的游标。
-4. 幂等键在 `(user_id, session_id)` 内唯一；同键同指纹返回原记录，同键异指纹抛错。
-5. `append` 返回成功后记录已持久化，重启必可读。
-6. `Recovery` 的 `state.cursor_end` 与 `messages` 对齐同一个水位线 —— 它只存在于
-   `state` 上，不在 `Recovery` 里重复一份。
-7. scope 校验先于任何文件路径拼接。
-8. 记录内的 `user_id` / `session_id` 必须与所在文件代表的 scope 一致，否则 `CorruptRecordError`。
-9. fold 是纯函数：无外部副作用，不重放工具调用，不调用模型。
-10. 未知的 `payload_schema_version` 抛 `PayloadVersionError`，不静默丢弃。
-11. 正确性不依赖任何时间戳。`occur_dt` / `commit_dt` 只用于展示与排查。
-12. `AgentState` 自描述：scope、覆盖区间、内容与版本都是它的成员，不是
-    `commit_state` 的入参。写出去的版本和读回来的版本必是同一个。
-
-### 已知限制（写在这里，不假装没有）
-
-- **恢复是 O(总记录数) 的全量扫描。** 快照的作用是**跳过 state 的重算**，
-  不跳过日志扫描——messages 需要从头投影。v1 接受这个代价。
-  后续可在快照里附带 messages 水位线来避免全量扫。
-- **JSONL 只支持单进程单写者。** 多进程同时写一个 session 的文件会产生交错写，
-  实现不加文件锁——不支持的场景不假装支持。
-- **幂等索引常驻内存**，与事件条数线性相关。长时间运行的大 session 有内存压力，
-  v1 不处理。
-- **不做日志裁剪**，`events.jsonl` 无限增长。
+**崩溃一致性**：`append` 返回成功 ⇒ 已 fsync，重启必可读。fsync 失败或磁盘满 ⇒ 抛错、
+上层不 ACK。崩溃落在 `write()` 之后、`fsync` 之前 ⇒ 留下截断尾行，恢复时丢弃。崩溃落在
+「写事件」与「写快照」之间 ⇒ 事件多出来落在 `pending` 里被重新处理，这是安全的，因为
+fold 是纯函数（不变量 9）。
 
 ## 失败与恢复
 
-| 场景 | 行为 |
-| --- | --- |
-| append 超时后重试 | 幂等命中，返回原记录，不产生重复行 |
-| 崩溃留下截断尾行 | 恢复时丢弃该行，可选截断文件；不算错误 |
-| 文件中间损坏 | 抛 `CorruptRecordError`，**不静默跳过** |
-| `fsync` 失败 / 磁盘满 | `append` 抛错，不 ACK，不返回成功 |
-| 重复写入同一幂等键、内容不同 | 抛 `IdempotencyKeyConflict` |
-| 快照未提交而进程崩溃 | 多出的记录落在 `pending`，被重新 fold |
-| 时钟回拨 | 无影响：不变量 11 |
-| 工具执行过但结果丢失 | 由 `tool.result` 的 `outcome=outcome_unknown` 表达，journal 只存不判 |
-| 恢复时遇到未知 payload 版本 | 抛 `PayloadVersionError`，要求先升级 reader |
+失败分支就是上面那些不变量，不重列一遍：截断尾行丢弃、**中间损坏抛错**、fsync 失败
+不 ACK、同幂等键异指纹抛错、时钟回拨无影响、未知 payload 版本抛错、多出的记录落
+`pending` 被重新 fold。
 
-## 实施步骤
+已知缺口：
 
-1. `core/protocol/datatype/` —— `Scope` / `Message` / `AgentState` / `Cursor` 与 journal
-   专属的记录格式、值对象；`core/protocol/interface/` —— `Journal`；
-   `core/protocol/error.py` —— 契约层异常；`core/utils/encoding.py` —— JSON 基础
-   类型与 canonical 编码。纯数据，无 I/O。
-2. `core/journal/` —— `Cursor` 运算与幂等指纹、记录结构校验、messages 投影。
-3. `core/journal/impl/file_journal.py` —— 打开/扫描、追加与 fsync、幂等索引、
-   恢复与投影。
-4. `tests/` —— 契约测试跑在 journal 接口上；损坏测试与崩溃测试分开。
+- **恢复是 O(总记录数) 的全量扫描。** 快照省的是 state 的重算，不省日志扫描 ——
+  messages 要从头投影。后续可在快照里附带 messages 水位线来避免全量扫。
+- **JSONL 只支持单进程单写者。** 多进程同时写一个 session 的文件会产生交错写，
+  实现不加文件锁 —— 不支持的场景不假装支持。
+- **幂等索引常驻内存**，与事件条数线性相关。长时间运行的大 session 有内存压力。
+- **不做日志裁剪**，`events.jsonl` 无限增长。
 
-每个步骤结束时全量测试通过 + 手工 e2e 有真实输出，再进下一步。已全部完成，见实施记录。
+## 跨仓库协议变更
 
-## 验收与验证
+`core/protocol` 的字段与 type 枚举定稿后，Hymio 与客户端侧需要各自同步一份读取实现。
+字段只增不删；删改走新 `payload_schema_version` + reader 双读。`type` 集合加新成员、
+`CursorKind` 加新值都是破坏性变更。
 
-正常场景：
+## 待决事项
 
-- 连续 append N 条后重开，`recover()` 返回的 messages 顺序与写入顺序一致。
-- 同一幂等键重复 append，返回 `idempotent_hit=True` 且日志行数不变。
-- commit_state 后重开，`state` 是同一个 `AgentState`（含 scope / 区间 / payload /
-  版本），`pending` 为空。
-- commit_state 后再 append，重开时这些记录出现在 `pending`，`messages` 不含它们
-  （与 state 对齐）。
-
-异常场景：
-
-- 截断最后一行 → 恢复成功，其余记录完整。
-- 破坏中间某一行 → 抛 `CorruptRecordError`。
-- `user_id = "../../etc"` → 构造 `Scope` 时就抛 `ScopeError`，journal 拿不到 scope，
-  拼路径那一步不会发生（`test_scope_validation_is_what_prevents_escaping_root`）。
-- 同幂等键不同 payload → 抛 `IdempotencyKeyConflict`。
-- 未知 `payload_schema_version` → 抛 `PayloadVersionError`（`append` 与
-  `commit_state` 两条路径都验）。
-- 写进程在 append 中途被 SIGKILL（真实进程，slow）→ 已确认返回成功的 append
-  一条不少，重开后无损坏；连续两次崩溃后重放仍命中幂等。
-
-检查项：`uv run pytest tests/ -q`（含 slow）、`uv run ruff check .`、`uv run mypy .`。
-
-**半行怎么测**：`SIGKILL` 在普通文件系统上杀不掉页缓存里的数据 —— `os.write()`
-返回后内容已在页缓存，进程死掉不会留下半行。所以「崩溃留下半行」在本地复现
-不出来，损坏测试改用 `truncate()` 人工切出半行；真实 kill 测试验证的是另一条
-性质（已确认的 append 不丢）。这两件事不互相替代，两边都测了。
-
-跨仓库：`core/protocol` 的字段与 type 枚举定稿后，Hymio 与客户端侧需要各自同步一份
-读取实现。字段只增不删；删改走新 `payload_schema_version` + reader 双读。
-
-## 迁移与发布
-
-不适用（首次实现，无历史数据、无已发布消费者）。协议一旦发布，
-字段变更按破坏性变更处理，参见「跨仓库影响」。
-
-## 实施记录
-
-- **实际改动**（内容模块，`__init__.py` 的重导出不列）：
-
-  ```text
-  core/protocol/datatype/scope.py       Scope + 字符集校验
-  core/protocol/datatype/message.py     Message
-  core/protocol/datatype/agent_state.py AgentState
-  core/protocol/datatype/cursor.py      Cursor / CursorKind
-  core/protocol/datatype/journal.py     落盘记录格式 / 接口返回值
-  core/protocol/interface/journal.py    Journal 接口
-  core/protocol/error.py                契约层的全部异常
-  core/utils/encoding.py                JsonValue / JsonObject / canonical_json / 时间戳
-  core/journal/cursor.py                游标运算 + 幂等指纹
-  core/journal/validation.py            记录结构校验（读写共用同一套）
-  core/journal/messages.py              messages 投影
-  core/journal/impl/file_journal.py     JSONL 后端
-  ```
-
-- **验证证据**（本地实跑，非推断）：
-
-  ```text
-  $ uv run pytest tests/ -q          56 passed, 3 deselected in 0.06s
-  $ uv run pytest tests/ -m "" -q    59 passed in 1.87s
-  $ uv run ruff check .              All checks passed!
-  $ uv run ruff format --check .     33 files already formatted
-  $ uv run mypy .                    Success: no issues found in 28 source files
-  ```
-
-  手工 e2e：写入 1 条 user.message + 1 条 assistant.message（带 reasoning 与
-  tool_calls）+ 1 组 tool.call/tool.result + 1 条 assistant.message，提交快照，
-  再补 1 条 `system.agent_step`，重开进程恢复得到：
-
-  ```text
-  state   : AgentState(scope=Scope(user_id='u1', session_id='s1'), cursor_start=None,
-                       cursor_end=Cursor(kind='line', value=5),
-                       payload={'topic': '恢复语义', 'turn': 1}, payload_schema_version=1)
-    user     | 帮我查下 Oath 的恢复语义  | {}
-    assistant| 先看 spec  | {'reasoning': '恢复靠水位线，不是时间戳', 'tool_calls': [...]}
-    tool     | 命中 12 处  | {'tool_call_id': 'inv-1', 'outcome': 'succeeded'}
-    assistant| 水位线是游标  | {'reasoning': '时间戳会回拨'}
-  pending : [('system.agent_step', 6)]
-  ```
-
-- **已知限制与后续**：
-
-  - 恢复是 O(总记录数) 的全量扫描；快照省的是 state 重算，不省日志扫描
-    （messages 要从头投影）。
-  - JSONL 只支持单进程单写者，不加文件锁。
-  - 幂等索引常驻内存，与事件条数线性相关。
-  - 不做日志裁剪，`events.jsonl` 无限增长。
-  - payload schema **拒绝未知字段**。这是刻意选的严格方向：拼错字段名会被当场
-    抓住，代价是将来加字段必须先升 `payload_schema_version`。每种 type 一视同仁。
-
-- **实现中发现并修掉的坑**：状态记录曾经被写到事件日志的 fd 上（两个 fd 共用一个）。
-  现在事件与状态各有各的 fd 与行号。
-
-## 待决事项与参考
-
-- **未决**：MySQL 实现的具体表结构与事务边界；`idempotency_key` 的全局唯一性还是
-  scope 内唯一（本方案取后者）；消息裁剪 / token 预算策略；`assistant.message.reasoning`
-  重放给模型时的 provider 策略。
-- **未决**：消费者要不要显式声明自己认识的 type（不认识的不投影，还是直接报错）。
-  目前是「不认识就不投影」，不报错。
-- **背景来源**：durable + event-driven 两条约束见 [overview](overview.md)。
+- MySQL 实现的具体表结构与事务边界。
+- 消费者要不要显式声明自己认识的 type（不认识的不投影，还是报错）。目前是不报错。
+- 消息裁剪 / token 预算策略。
+- `assistant.message.reasoning` 重放给模型时的 provider 策略。
