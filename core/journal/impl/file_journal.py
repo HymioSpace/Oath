@@ -298,6 +298,10 @@ class FileJournal(Journal):
 
     # -- Journal 接口 -----------------------------------------------------
 
+    @property
+    def cursor_kind(self) -> str:
+        return CursorKind.LINE
+
     def append(
         self,
         scope: Scope,

@@ -35,11 +35,27 @@ class EventType:
     TOOL_CALL: Final = "tool.call"
     TOOL_RESULT: Final = "tool.result"
     SYSTEM_AGENT_STEP: Final = "system.agent_step"
+    #: 终止当前 run。进了 system 队列：runtime 该停下并收尾。
+    SYSTEM_CANCEL: Final = "system.cancel"
+    #: 往当前 run 里插一条 steer，run 不终止。上下文里显式打断用。
+    SYSTEM_INTERRUPT: Final = "system.interrupt"
 
     #: 全部合法的 type。
     ALL: Final = frozenset(
-        {USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT, SYSTEM_AGENT_STEP}
+        {
+            USER_MESSAGE,
+            ASSISTANT_MESSAGE,
+            TOOL_CALL,
+            TOOL_RESULT,
+            SYSTEM_AGENT_STEP,
+            SYSTEM_CANCEL,
+            SYSTEM_INTERRUPT,
+        }
     )
+
+    #: runtime 要处理的控制面指令。`system.agent_step` 不在里面 —— 那是 step
+    #: 生命周期的审计记录，消费方是 trace 视图，不是 runtime。
+    SYSTEM_COMMANDS: Final = frozenset({SYSTEM_CANCEL, SYSTEM_INTERRUPT})
 
     #: 参与 messages 投影的子集。其余只进日志，不进对话历史。
     MESSAGE_TYPES: Final = frozenset({USER_MESSAGE, ASSISTANT_MESSAGE, TOOL_CALL, TOOL_RESULT})
@@ -149,6 +165,12 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
         optional=frozenset({"content", "error"}),
     ),
     (EventType.SYSTEM_AGENT_STEP, 1): PayloadSchema(required=frozenset({"step_id", "phase"})),
+    (EventType.SYSTEM_CANCEL, 1): PayloadSchema(
+        required=frozenset({"run_id"}), optional=frozenset({"reason"})
+    ),
+    (EventType.SYSTEM_INTERRUPT, 1): PayloadSchema(
+        required=frozenset({"run_id"}), optional=frozenset({"note"})
+    ),
 }
 
 #: 状态快照的 payload 是一个 KV 对象，形状由 agent runtime 决定，

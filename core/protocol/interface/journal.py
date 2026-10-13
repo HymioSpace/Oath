@@ -28,6 +28,16 @@ class Journal(ABC):
     无需经主 agent 转发。
     """
 
+    @property
+    @abstractmethod
+    def cursor_kind(self) -> str:
+        """本实现的游标种类（`CursorKind`）。
+
+        队列复位时要用它构造「第一条之前」的位置。写死一个 kind 会让换存储
+        实现时读出错的区间，而这种错误不报错、只是安静地读错数据。
+        """
+        ...
+
     @abstractmethod
     def append(
         self,

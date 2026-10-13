@@ -20,6 +20,8 @@ core/journal/    独立追加日志模块，供所有模块统一写入和读取
 core/journal/impl/  存储后端（v1 为 JSONL）
 core/tool/       工具系统：注册表、批量并行派发、执行状态、终态事件
 core/tool/impl/  执行后端（v1 为线程池）
+core/feed/       队列：journal 之上的游标视图（user / tool / system）
+core/outbound/   对外 event 流：按订阅推给已连接的客户端
 extensions/      业务扩展：业务 tool、业务 skill、额外 context 来源
 extensions/tools/  业务工具实现（`Tool` 接口的参考实现）
 bootstrap/       装配与入口：读配置、实例化、注入 CoreRuntime
@@ -35,7 +37,7 @@ core 自带落盘 journal，所以这条判据对 durability 没有任何让步�
 
 core 不禁止第三方库：需要什么就 import 什么，装在 `pyproject.toml` 里。
 
-目前 journal 与工具系统有代码，其余目录等有对应实现再填。
+目前 journal、工具系统、队列与对外 event 流有代码，其余目录等有对应实现再填。
 
 ## 运行链路
 
@@ -84,9 +86,19 @@ flowchart TD
 
 ## 工具系统
 
-[core/tool](../core/tool/) 收集 core 与 extensions 的工具定义交给 context，把模型点名的调用派发出去。派发接口**只收批次、一定并行、立即返回执行 id**：同一批里的调用互不依赖，模型线程不能被工具拖住，真正的执行在后台线程池里跑。每个调用跑完或超时，落一条终态事件（`tool.result` payload），事件投递由注入的 sink 完成 —— 队列与消费语义是下一步 feature。
+[core/tool](../core/tool/) 收集 core 与 extensions 的工具定义交给 context，把模型点名的调用派发出去。派发接口**只收批次、一定并行、立即返回执行 id**：同一批里的调用互不依赖，模型线程不能被工具拖住，真正的执行在后台线程池里跑。每个调用跑完或超时，落一条终态事件（`tool.result` payload），事件投递由注入的 sink 完成 —— sink 往 journal 追加，队列与对外流从 journal 取。
 
 超时是「core 不再等待」而不是「终止线程」：线程跑到哪儿算哪儿，迟到的结果一律丢弃、不改写已发的终态。因此 `TIMEOUT` 的含义是「core 此刻不知道这个工具有没有生效」，能不能重试由上层判断，工具系统不替它决定。执行状态表是内存里的 derived 设施，重启即丢，真相始终是 journal 的记录。详见 [feature-tool-system](feature-tool-system.md)。
+
+## 事件通路
+
+三条内部队列（`user` / `tool` / `system`）与对外 event 流是同一个东西的四种用法：都是在 journal 上挂一个游标、按 type 过滤、往前推。所以只实现一个 `EventFeed` 加一张 type 映射表，不写四个类。
+
+**队列只装 runtime 的输入。** `assistant.message`、`tool.call` 是 runtime 与工具系统的产物，它们进 journal（对话历史要投影它们）但不进任何一条 runtime 队列 —— 队列回答的是「runtime 现在该干什么」，不是「runtime 干了什么」。
+
+对外 event 流收全部记录：客户端要看到 agent 干了什么，那是 trace 视图的职责，由客户端自己过滤。服务端替它筛等于替客户端做了决定。
+
+对外是一条双向 WebSocket：客户端既发 command 也收 event，`user_id` 由服务端从 credential 推导，客户端不能自称。慢客户端的连接会被断开而不是阻塞 core —— 断开的连接能带着游标重连续上，阻塞的会让所有 session 一起卡住。详见 [feature-event-runtime](feature-event-runtime.md)。
 
 ## 三个核心约束
 

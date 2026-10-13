@@ -97,10 +97,35 @@ class ToolExecutionError(ToolError):
     """
 
 
+class FeedError(ProtocolError):
+    """feed 的全部失败。与 `JournalError` 平级。"""
+
+
+class UnknownFeedError(FeedError):
+    """feed 名字不认识。
+
+    与「读到一条不认识 type 的记录」不同：那种情况只是没命中，静默跳过就够；
+    名字不认识是调用方的 bug，要当场暴露。
+    """
+
+
+class WireProtocolError(ProtocolError):
+    """对端发来的帧不合法。
+
+    **不是 Oath 内部的状态问题** —— 数据是外部进来的。带 `code` 是因为客户端
+    需要区分「版本不对（该重新协商）」和「字段不对（该修客户端）」。
+    """
+
+    def __init__(self, message: str, *, code: str = "bad_frame") -> None:
+        super().__init__(message)
+        self.code = code
+
+
 __all__ = [
     "ArgumentValidationError",
     "CorruptRecordError",
     "CursorError",
+    "FeedError",
     "IdempotencyKeyConflict",
     "JournalError",
     "PayloadSchemaError",
@@ -115,5 +140,7 @@ __all__ = [
     "ToolNotFoundError",
     "ToolRegistrationError",
     "ToolRequestError",
+    "UnknownFeedError",
     "ValidationError",
+    "WireProtocolError",
 ]
