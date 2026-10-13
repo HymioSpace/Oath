@@ -18,7 +18,7 @@ from core.protocol.datatype import (
     Scope,
     WireVersion,
 )
-from core.protocol.datatype.wire import close_frame, error_frame, pong
+from core.protocol.datatype.wire import ack, close_frame, error_frame, pong
 from core.protocol.error import WireProtocolError
 from core.utils.encoding import JsonObject, JsonValue
 
@@ -184,9 +184,20 @@ def test_pong_echoes_the_command_id() -> None:
     assert pong("c-1")["type"] == FrameType.PONG
 
 
-def test_there_is_no_ack_frame() -> None:
-    """WebSocket 本身可靠有序，command 到了不需要再说一遍。"""
-    assert not hasattr(FrameType, "ACK")
+def test_ack_hands_back_the_bound_session() -> None:
+    """`session.open` 是客户端唯一一次知道自己 session_id 的机会。"""
+    frame = ack("c-0", session_id="s-1")
+
+    assert frame["type"] == FrameType.ACK
+    assert frame["id"] == "c-0"
+    assert frame["session_id"] == "s-1"
+
+
+def test_ack_carries_no_cursor() -> None:
+    """回执是应用层结果，不是 journal 位置。投递不重放，没有位置可回。"""
+    frame = ack("c-0", session_id="s-1")
+
+    assert "cursor" not in frame
 
 
 def test_error_frame_separates_code_from_message() -> None:

@@ -23,11 +23,11 @@ journal 有了，工具系统有了，但两者之间没有通路：现在 agent
 直推客户端。输入一律从 journal 取，不从内存传消息。**
 
 投递不经过 journal。journal 是 Oath 存自己状态的地方，不是给客户端当消息总线用的；
-客户端自己就是它已渲染内容的存储方。拿 journal 当投递通道，等于把投递能力绑死在日志
-扫描吞吐上，还让 journal 为了一个 UI 永远长下去。
+客户端自己就是它已渲染内容的存储方。拿 journal 当投递通道，等于把投递能力绑死在日志扫描
+吞吐上，还让 journal 为了一个 UI 永远长下去。
 
-代价是断线期间的事件不补发。这是选下来的，不是漏掉的：补发要么把 journal 重新拽回
-投递通道，要么再加一个 backlog —— 两者都要为「客户端短暂掉线」付长期成本。
+代价是断线期间的事件不补发：补发要么把 journal 拽回投递通道，要么再加一个 backlog，
+两者都要为「客户端短暂掉线」付长期成本。
 
 ### 2.2 流程
 
@@ -35,6 +35,7 @@ journal 有了，工具系统有了，但两者之间没有通路：现在 agent
 flowchart TD
     Client[客户端<br/>一条 WebSocket] -->|command| Intake[Intake 落盘]
     Intake -->|append| Journal[(journal)]
+    Intake -->|ack: session_id| Client
 
     Journal -->|user| FeedUser[user 队列]
     Journal -->|tool| FeedTool[tool 队列]
@@ -74,39 +75,43 @@ flowchart TD
 
 | # | 谁 → 谁 | 发生什么 | journal |
 | --- | --- | --- | --- |
-| 1 | 客户端 → `Intake` | `session.open`，验 credential，绑出 `scope = (u1, s1)` | 不落盘 |
-| 2 | 客户端 → `Intake` | `user.message{content: "北京天气怎么样"}` | 41 |
-| 3 | journal → `Intake` | user 队列取出 41 → `TO_BRAIN` → `Brain.step` 调模型 | — |
-| 4 | `Brain` → journal | 模型要调工具 | 42 `assistant.message` |
-| 5 | `Brain` → sink | 同一件事，直推客户端 | — |
-| 6 | `Brain` → journal | 派发工具 | 43 `tool.call` |
-| 7 | `Brain` → sink | 同上 | — |
-| 8 | 工具系统 → journal | 执行完，终态事件落盘 —— agent 要它当输入 | 44 `tool.result` |
-| 9 | 工具系统 → sink | 同一件事，直推客户端 —— 客户端要它显示状态 | — |
-| 10 | journal → `Intake` | **44 也走 tool 队列** → `TO_BRAIN` → 再调一次模型 | — |
-| 11 | `Brain` → journal | 最终回答 | 45 `assistant.message` |
-| 12 | `Brain` → sink | 同上 | — |
+| 1 | 客户端 → `Intake` | `session.open`，验 credential | 不落盘 |
+| 2 | `Intake` → 客户端 | `ack{session_id: "s-1"}` —— 客户端到这里才知道自己绑到了哪个 session | — |
+| 3 | 客户端 → `Intake` | `user.message{content: "北京天气怎么样"}` | 41 |
+| 4 | journal → `Intake` | user 队列取出 41 → `TO_BRAIN` → `Brain.step` 调模型 | — |
+| 5 | `Brain` → journal | 模型要调工具 | 42 `assistant.message` |
+| 6 | `Brain` → sink | 同一件事，直推客户端 | — |
+| 7 | `Brain` → journal | 派发工具 | 43 `tool.call` |
+| 8 | `Brain` → sink | 同上 | — |
+| 9 | 工具系统 → journal | 执行完，终态事件落盘 —— agent 要它当输入 | 44 `tool.result` |
+| 10 | 工具系统 → sink | 同一件事，直推客户端 —— 客户端要它显示状态 | — |
+| 11 | journal → `Intake` | **44 也走 tool 队列** → `TO_BRAIN` → 再调一次模型 | — |
+| 12 | `Brain` → journal | 最终回答 | 45 `assistant.message` |
+| 13 | `Brain` → sink | 同上 | — |
 
-三处值得看的地方：
-
-- **`session.open` 之后没有回执。** 连接还开着就是绑定成功了；绑定失败直接
-  `close{reason: "unauthorized"}`。
-- **44 落盘与直推是两次调用。** 落盘那条给 agent 当输入，直推那条给客户端显示状态 ——
-  后者不再需要扫 journal 找它。
-- **断线就没有了。** 44 那步如果连接断了，客户端永远收不到这条；重连后 oath 也不补。
+两处值得看的地方：**只有 `session.open` 有回执** —— 它是唯一一条客户端不知道自己
+`session_id` 的 command，不回就发不出后面任何一条；其余 command 的结果要么出现在事件
+流里，要么失败时来一帧 `error`。**44 落盘与直推是两次调用** —— 落盘那条给 agent 当输入，
+直推那条给客户端显示状态，后者不再需要扫 journal 找它。这步连接断掉的话，客户端就永远
+收不到它，重连也不补。
 
 对应的帧：
 
 ```jsonc
-// 2. 客户端 → oath
+// 1. 客户端 → oath：唯一一条不带 session_id 的 command
+{"v": 1, "type": "session.open", "id": "c-0", "payload": {"credential": "token-1"}}
+
+// 2. oath → 客户端：绑到了哪个 session。客户端现在才能发下一条
+{"v": 1, "type": "ack", "id": "c-0", "session_id": "s-1"}
+
+// 3. 客户端 → oath
 {"v": 1, "type": "user.message", "id": "c-1", "session_id": "s-1",
  "payload": {"content": "北京天气怎么样"}}
 
-// 5. oath → 客户端。注意没有 cursor，也没有 id 回执
+// 6. oath → 客户端。注意没有 cursor
 {"v": 1, "type": "event", "session_id": "s-1", "occur_dt": "2026-10-13T08:31:04Z",
- "event_type": "assistant.message",
- "payload": {"content": "", "reasoning": null,
-             "tool_calls": [{"id": "t-1", "tool": "weather", "arguments": {"city": "北京"}}]}}
+ "event_type": "assistant.message", "payload": {"content": "", "reasoning": null,
+ "tool_calls": [{"id": "t-1", "tool": "weather", "arguments": {"city": "北京"}}]}}
 ```
 
 **断线重连**：客户端重新 `session.open` 即可，中间丢的事件不补。要知道自己漏了什么，
@@ -143,9 +148,9 @@ flowchart TD
 中间隔着别的记录，理由可能已经变了。返回值两个：`TO_BRAIN`（交给 agent 那条路）与
 `BY_RULE`（core 自己处理掉 —— `run.cancel` 中止运行、审批回执入账）。v1 没有实现。
 
-**`AgentEventSink` 只投递，不落盘。** 要落 journal 的一方自己 append —— 那是它自己的
-状态，跟客户端看到什么无关。sink 只管「事件已经产生了，客户端该知道」，同步调用，
-投递失败当场抛错：静默吞掉会把结果丢在内存里，而调用方永远不知道有过这么一次。
+**`AgentEventSink` 只投递，不落盘。** 要落 journal 的一方自己 append —— 那是它自己的状态，
+跟客户端看到什么无关。sink 同步调用，投递失败当场抛错：静默吞掉会把结果丢在内存里，而
+调用方永远不知道有过这么一次。
 
 ### 3.2 队列：`EventFeed`
 
@@ -178,14 +183,13 @@ class EventFeed(ABC):
 ```
 
 - `pull` 从当前位置**之后**读，**不推进返回的记录** —— 处理完再 `commit`，`commit` 只
-  允许前进。
+  允许前进。`limit` 限制读到多少条日志行，不是返回多少条，调用方要一直 `pull` 到空。
 - 途中**不属于这条 feed 的记录会跳过并推进位置，但只推到第一条命中记录之前**。少了
   后半句，一条 `system.agent_step` 会把消费方永久卡在它前面。
 - `wake(scope)` 由写入方在 `append` 成功后调用 —— journal 是 pull 模型，没有通知。不让
   `EventFeed` 包一层 `append` 是因为幂等语义与指纹计算都在 journal 里。
 - `wait` 是 `pull` 的阻塞版。唤醒按 scope 计**计数**而不是用 `Event`：后者被 notify 之后
   复位，两个等待者会互相唤醒不到。
-- `limit` 限制读到多少条日志行，不是返回多少条。调用方要一直 `pull` 到返回空为止。
 
 **位置只存内存。** v1 单进程，重启后游标回到起点、事件重放。重放安全（fold 是纯函数），
 代价是重复处理 —— 与「快照省的是 state 重算」同一个代价。位置要持久化时，它本身也是一条
@@ -194,13 +198,11 @@ journal 记录，不另开存储。
 ### 3.3 对外 wire 协议
 
 **一条 WebSocket 双向复用。** 客户端既是 command 发送方也是 event 接收方；拆成两条连接
-只多一次握手和一份权限检查。
-
-上行叫 **command**（要 oath 做一件事），下行叫 **event**（告诉客户端发生了什么）。一组
-对偶：command 带副作用，要幂等键；event 已经是既成事实，不需要。
+只多一次握手和一份权限检查。上行叫 **command**（要 oath 做一件事，带副作用，幂等键就是
+`id`），下行叫 **event**（告诉客户端发生了什么，已经是既成事实，不需要幂等键）。
 
 统一 envelope：`v` 是版本，`type` 是这一帧是什么。上行取 command 自己的类型，下行取
-`event` / `pong` / `error` / `close` —— 两套命名空间不重叠，一个字段就够。
+`event` / `ack` / `pong` / `error` / `close` —— 两套命名空间不重叠，一个字段就够。
 **客户端遇到不认识的 `v` 应该断开重协商而不是猜**：猜出来的结果是「按旧版解析成功、
 按新版执行失败」，失败点会落在某个看起来无关的地方。
 
@@ -215,14 +217,17 @@ command 类型（闭合集合，加新的按破坏性变更处理）：
 | `ping` | `{}` | 心跳 |
 
 每种 command 的 payload 有结构约束（`COMMAND_SCHEMAS`，与 journal 的 `PAYLOAD_SCHEMAS`
-同一套语义）。**未知字段报错而不是忽略**：拼错 key 时静默忽略会得到「成功但什么也没
-发生」。
+同一套语义）。**未知字段报错而不是忽略**：静默忽略会让客户端得到「成功但什么也没发生」。
 
-**没有 ack 帧。** WebSocket 本身可靠有序，「command 到了」不需要再说一遍。落盘也不另开
-一帧去报：客户端收到它引发的事件就是证据，收不到就按没落盘处理 —— 重发时带上
-幂等键，journal 会去重。多一帧确认换不来比这个更强的保证，只多一份两端要对齐的状态。
+**`ack` 是应用层回执，不是送达确认。** WebSocket 本身可靠有序，「command 到了」不需要
+再说一遍；ack 回的是传输层看不见的事 —— 凭据验过了没有、绑到了哪个 session。
 
-代价是客户端没法区分「还在路上」与「已经落盘」，除非等下一个事件或超时。跑一轮的
+`session.open` 是必须的那一条：它是唯一一条客户端不知道自己 `session_id` 的 command，
+不拿到回执客户端发不出后面任何一条。其余 command 不回执 —— 结果要么作为事件出现在
+下行流里，要么失败时来一帧 `error`。落盘也不另开一帧去报：客户端收到它引发的事件就是
+证据，收不到就按没落盘处理，重发带上幂等键，journal 会去重。
+
+代价是客户端对 `user.message` 这类 command 分不清「还在路上」与「已经落盘」。跑一轮的
 输入总会引出事件，所以这是界面上的一个不确定态，不是正确性问题。
 
 **`event` 帧不带游标。** 它是活的投递，不是 journal 记录的转发 —— 帧里没有位置可以
@@ -268,7 +273,7 @@ code —— 前者该重新协商，后者该修客户端。
 | 同一 session 两条连接 | 后来的顶掉前一条。同一 session 只有一个活动 run |
 | 慢客户端 | 发送队列满即断开，带 `slow_consumer` |
 | 推送时客户端已断开 | 事件丢掉。`NO_CONNECTION` 不触发 `close` |
-| command 落盘后连接立刻断 | 客户端没收到任何回执，也没收到事件。重连后按没落盘处理，重发带幂等键 |
+| command 落盘后连接立刻断 | 客户端没收到事件（`session.open` 除外，它有回执）。重连后按没落盘处理，重发带幂等键 |
 | 断线期间发生的事件 | **不补发。** 重连后从新事件开始 |
 | `commit` 往回推 | 抛 `CursorError`。往回推会让已处理过的记录重来 |
 | 内部队列游标丢了（重启） | 回到起点，事件重放。fold 是纯函数，重放安全 |
@@ -282,8 +287,8 @@ code —— 前者该重新协商，后者该修客户端。
    未知 type 处理。
 2. wire 协议是新的跨仓库契约：Hymio 与客户端都要实现同一套编解码，
    `core/protocol/datatype/wire.py` 是唯一来源。
-3. `event` 帧没有 `cursor`，`session.open` 没有 `resume_after`，也没有 ack 帧。客户端
-   不要设计补发逻辑，也不要等确认回执 —— 收到事件就是落盘的证据。
+3. `event` 帧没有 `cursor`，`session.open` 没有 `resume_after`。客户端不要设计补发逻辑；
+   除 `session.open` 外也没有回执 —— 收到事件就是落盘的证据。
 
 ## 7 待决事项
 

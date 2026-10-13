@@ -20,9 +20,8 @@ pong / error / close）。加一个 command 是破坏性变更：老客户端遇
 客户端自己就是它已渲染内容的存储方，让 oath 拿 journal 当消息总线只会把投递能力绑死在
 日志扫描上。
 
-**没有 ack 帧。** WebSocket 本身可靠有序，command 到了这件事不需要再说一遍。落盘这件事
-也不另开一帧去报：客户端收到它引发的事件就是证据，收不到就按没落盘处理 —— 重发带上
-幂等键，journal 会去重。
+**ack 是应用层回执，不是送达确认。** WebSocket 本身可靠有序，「command 到了」不需要
+再说一遍；ack 回的是传输层看不见的事 —— 凭据验过了没有、绑到了哪个 session。
 """
 
 from __future__ import annotations
@@ -51,6 +50,8 @@ class FrameType:
 
     #: oath → 客户端。一条事件。
     EVENT: Final = "event"
+    #: oath → 客户端。应用层回执。
+    ACK: Final = "ack"
     #: oath → 客户端。`ping` 的回声。
     PONG: Final = "pong"
     #: oath → 客户端。command 收到了但没办成，或帧本身不合法。
@@ -215,6 +216,24 @@ class EventFrame:
         }
 
 
+def ack(command_id: str, *, session_id: str | None = None) -> JsonObject:
+    """应用层回执。
+
+    **不是送达确认** —— WebSocket 本身可靠有序，command 到了这件事不需要再说
+    一遍。它回的是传输层看不见的：凭据验过了没有、绑到了哪个 session。
+
+    `session.open` 是必须的那一条：它是唯一一条客户端不知道自己 `session_id` 的
+    command —— 要绑定的正是 session_id，客户端不拿到就没法发后面任何一条。
+
+    其余 command 不需要回执：结果要么作为事件出现在下行流里，要么失败时来一帧
+    `error`。真的需要一条「它生效了」的确认时才走这条。
+    """
+    frame: JsonObject = {"v": WireVersion.CURRENT, "type": FrameType.ACK, "id": command_id}
+    if session_id is not None:
+        frame["session_id"] = session_id
+    return frame
+
+
 def pong(command_id: str) -> JsonObject:
     """`ping` 的回声。兼作应用层心跳：连接两侧据此知道对方还活着。"""
     return {
@@ -285,6 +304,7 @@ __all__ = [
     "EventFrame",
     "FrameType",
     "WireVersion",
+    "ack",
     "close_frame",
     "error_frame",
     "pong",
