@@ -9,8 +9,8 @@ journal 已经有了，工具系统也有了，但两者之间没有通路：现
 
 四件东西：
 
-1. **三条队列**（user / tool / system）—— runtime 的输入从哪来。
-2. **Ingress** —— 接收入站事件、落 journal、决定要不要交给 runtime。
+1. **三条队列**（user / tool / system）—— 输入从哪来。
+2. **Ingress** —— 接收 command、落 journal、决定要不要交给 QueueRunner。
 3. **QueueRunner** —— 消费三条队列：取记录、分发、推进游标。
 4. **Brain** —— context build → LLM → tool call → compress，决定跑什么。
 5. **对外 event 流** —— 客户端通过一条 WebSocket 既能发 user event，也能收 oath event。
@@ -47,9 +47,9 @@ flowchart TD
 
 1. **journal 是唯一入口与唯一出口。** 没有第二条通路：内存消息、进程内队列都不算数。
    断了重连能从游标续上，靠的就是这一条。
-2. **队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 runtime 和工具系统
-   的产物，它们进 journal 但不进 runtime 的队列 —— 队列回答的是「runtime 现在该
-   干什么」，不是「runtime 干了什么」。
+2. **内部队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 Brain 和工具
+   系统的产物，它们进 journal 但不进内部队列 —— 队列回答的是「现在该做什么」，不是
+   「做了什么」。
 3. **消费位置是游标，不是时间戳。** 与 journal 一致：墙钟会回拨，做位置标记会静默
    丢事件。
 4. **游标归 `QueueRunner`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，
@@ -63,19 +63,12 @@ flowchart TD
 
 | 名字 | 职责 | 依赖 |
 | --- | --- | --- |
-| `Ingress` | 接收入站事件 → 落 journal → 路由决策 → 唤醒 QueueRunner | `Journal` / `EventRouter` |
+| `Ingress` | 接收 command → 落 journal → 路由决策 → 唤醒 QueueRunner | `Journal` / `EventRouter` |
 | `QueueRunner` | 消费三条队列：取记录 → 分发 → 推进游标 → 等下一条 | 三条 `EventFeed` / `Brain` |
 | `Brain` | context build → LLM → tool call → compress → fold 状态 | `Journal` / `ToolSystem` |
 | `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `EventFeed` / `OutboundTransport` |
 
 前三个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 `Brain` 时。
-
-三个名字都是被占用过的词，所以一个都不能用：
-
-- 不叫 `Runtime` —— 整个 Oath 就是 runtime，`CoreRuntime` 已经占了。
-- 不叫 `Dispatcher` —— 对外流里推帧的那个线程已经叫 dispatcher。
-- 不叫 `Agent` —— `AgentState` / `agent step` / `AgentEvent` 都在用它指「agent 这个
-  实体本身」。
 
 **`QueueRunner` 与 `Brain` 分开是因为失败语义不同。** `QueueRunner` 没有副作用：取记录、
 分发、推进游标，崩了下次重来就行。`Brain` 可能已经调过模型、派发过工具，崩了之后哪些
@@ -94,7 +87,7 @@ flowchart TD
 的四种用法**，只有「过滤哪些 type」和「消费方是谁」不同。所以不写四个类，写一个
 `EventFeed` + 一张 type 映射表。
 
-| type | 归属 | 进 runtime 队列 | 进对外流 |
+| type | 归属 | 进内部队列 | 进对外流 |
 | --- | --- | --- | --- |
 | `user.message` | user | 是 | 是 |
 | `tool.result` | tool | 是 | 是 |
@@ -105,7 +98,7 @@ flowchart TD
 | `permission.requested` / `permission.resolved` | tool | 是 | 是 |
 
 对外流收**全部**记录：客户端要看到 agent 干了什么，那是 trace 视图的职责，由客户端
-自己过滤。内部三条队列只收 runtime 的输入。
+自己过滤。内部三条队列只收输入。
 
 映射表是显式的一张表，不是从 type 前缀推的 —— `system.agent_step` 归 system 但不进
 system 队列（前缀规则表达不了这个）。
@@ -204,7 +197,7 @@ dispatcher 会让所有 session 一起卡住。断的时候带上原因（`slow_
 位置只推进到「最后一条被跳过的记录」，且只在还没命中时推进。
 
 `OutboundStream`（`core/outbound/stream.py`）持有订阅表，一个 dispatcher 线程按
-journal 游标顺序推。它用自己的 `EventFeed` 实例，不共享 runtime 那几条 —— 订阅的
+journal 游标顺序推。它用自己的 `EventFeed` 实例，不共享 QueueRunner 那三条 —— 订阅的
 位置由客户端的 `resume_after` 决定，不能和别人的消费进度绑在一起。
 
 传输层是 `OutboundTransport` 接口（`send(scope, frame) -> SendResult` /

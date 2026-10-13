@@ -94,7 +94,7 @@ flowchart TD
 
 三条内部队列（`user` / `tool` / `system`）与对外 event 流是同一个东西的四种用法：都是在 journal 上挂一个游标、按 type 过滤、往前推。所以只实现一个 `EventFeed` 加一张 type 映射表，不写四个类。
 
-**队列只装 runtime 的输入。** `assistant.message`、`tool.call` 是 runtime 与工具系统的产物，它们进 journal（对话历史要投影它们）但不进任何一条 runtime 队列 —— 队列回答的是「runtime 现在该干什么」，不是「runtime 干了什么」。
+**内部队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 Brain 与工具系统的产物，它们进 journal（对话历史要投影它们）但不进任何一条内部队列 —— 队列回答的是「现在该做什么」，不是「做了什么」。
 
 对外 event 流收全部记录：客户端要看到 agent 干了什么，那是 trace 视图的职责，由客户端自己过滤。服务端替它筛等于替客户端做了决定。
 
