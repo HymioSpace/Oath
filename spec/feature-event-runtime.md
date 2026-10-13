@@ -25,10 +25,9 @@ journal；所有输入都从 journal 取，不从内存传消息。**
 
 ```mermaid
 flowchart TD
-    C[Client: 一条 WebSocket] -->|command: user.message / permission.decide| I[Intake 入站]
-    I -->|append| J[(journal)]
-    I -->|EventRouter 决定要不要唤醒| QC[Intake 消费]
-    QC -->|分发记录| BR[Brain]
+    C[Client: 一条 WebSocket] -->|command: user.message / permission.decide| I[Intake 落盘]
+    I -->|append + 游标| J[(journal)]
+    I -->|ack 游标| C
 
     TS[ToolSystem] -->|终态事件| S[AgentEventSink]
     PM[PermissionManager] -->|审批事件| S
@@ -37,7 +36,10 @@ flowchart TD
     J --> F1[Feed: user queue]
     J --> F2[Feed: tool queue]
     J --> F3[Feed: system queue]
-    F1 & F2 & F3 --> QC
+    F1 & F2 & F3 --> QC[Intake 消费]
+    QC -->|EventRouter: TO_BRAIN| BR[Brain]
+    QC -->|EventRouter: BY_RULE| R[core 规则处理]
+    QC -->|处理完 commit| J
 
     J -->|只推 CLIENT_FACING| OS[OutboundStream]
     OS --> C
@@ -65,26 +67,31 @@ flowchart TD
 
 | 名字 | 职责 | 依赖 |
 | --- | --- | --- |
-| `Intake` | 接 command 落 journal；消费三条队列：取记录 → 分发 → 推进游标 | `Journal` / `EventRouter` / 三条 `EventFeed` / `Brain` |
+| `Intake` | 接 command 落 journal；消费三条队列：取记录 → 路由 → 处理 → 推进游标 | `Journal` / `EventRouter` / 三条 `EventFeed` / `Brain` |
 | `Brain` | context build → LLM → tool call → compress → fold 状态 | `Journal` / `ToolSystem` |
 | `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `OutboundTransport` |
 
 前两个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 `Brain` 时。
 
-**入站与消费放在同一个组件里，是因为失败语义相同。** `Intake` 做的两件事都没有外部
-副作用：append 按 command id 幂等，崩了下次重来就行。分成「入站的」与「消费的」两个
-组件，中间那道缝是假的 —— 一个写完记录什么也不做，另一个再去把它读出来。游标归
-`Intake` 也是同一个理由：记账规则与 `Brain` 无关。
+`Intake` 有两条通路，都只跟 journal 打交道：
 
-**`Intake` 与 `Brain` 分开，也是因为失败语义不同。** `Brain` 可能已经调过模型、派发过
-工具，崩了之后哪些能重放是策略。所以 `Brain.step` 返回之后才算处理完 —— 返回之后再崩，
-记录已经 commit，重放会重复调模型。
+- **落盘**：接收 command，append 进 journal，把游标返回给传输层去 ack。它到这一步就
+  结束 —— 一条记录落盘时不带任何调度结论。
+- **消费**：从三条队列取记录，逐条问 `EventRouter` 该走规则还是走 `Brain`，处理完一条
+  commit 一条。
 
-分工一句话：**`Intake` 让事件可读且有序，`Brain` 让它有意义。** 「这条要不要给 agent」
-是 `EventRouter` 的路由决策，但那是策略 —— `EventRouter` 是个接口，v1 没有实现。
+它不解析帧 —— socket、握手、JSON 解码是传输层的事，传输解析出 `Command` 再交给
+`Intake`，core 不管自己是怎么被连上来的。
 
-**`Intake` 不解析帧。** socket、握手、JSON 解码是传输层的事：传输解析出 `Command`，
-再交给 `Intake`。core 不管自己是怎么被连上来的。
+分工：**`Intake` 让事件可读且有序，`Brain` 让它有意义。**
+
+`Intake` 没有外部副作用 —— append 按 command id 幂等，崩在中途不会留下半吊子的状态。
+所以队列游标由它推进，`Brain.step` 返回之后才算处理完：返回之后再崩，记录已经 commit，
+重放会重复调模型。
+
+`EventRouter` 判断的是**记录**，不是原始 command：一条 `run.cancel` 落盘时和被读出来时，
+中间隔着别的记录，理由可能已经变了。返回值只有两个：`TO_BRAIN`（交给 agent 的那条路）
+与 `BY_RULE`（core 自己处理掉 —— `run.cancel` 中止运行、审批回执入账）。v1 没有实现。
 
 ### 队列：`EventFeed`
 
@@ -245,7 +252,7 @@ journal 的幂等语义承担。记在待决事项里。
 | 客户端没带 `resume_after` | 从日志开头推，不做特殊处理 |
 | `commit` 往回推 | 抛 `CursorError`。往回推会让已处理过的记录重来 |
 | 内部队列游标丢了（重启） | 回到起点，事件重放。fold 是纯函数，重放安全 |
-| `Intake` 分发中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
+| `Intake` 消费中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
 | `Brain` 崩在半路 | 副作用已经发生的不重放。哪些不能重放是策略，`core` 不替它判断 |
 | `Brain.step` 抛异常 | `Intake` 不吞也不 commit：这条记录下次重来 |
 

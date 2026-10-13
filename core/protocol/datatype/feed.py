@@ -20,7 +20,7 @@ from core.protocol.datatype.journal import EventType
 
 
 class FeedName:
-    """三条内部队列。消费方是 `QueueRunner`。"""
+    """三条内部队列。消费方是 `Intake`。"""
 
     USER: Final = "user"
     TOOL: Final = "tool"

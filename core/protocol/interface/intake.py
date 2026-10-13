@@ -1,23 +1,17 @@
 """`Intake` —— 系统里唯一的入口。
 
-它做两件事，都只跟 journal 打交道：
+两条通路，都只跟 journal 打交道：
 
-1. **入站**：接收 command，落进 journal。
-2. **消费**：从三条队列取记录，分发给 `Brain`，推进游标。
+- **入站**：接收 command 落进 journal，返回游标给传输层去 ack。它到这一步就结束 ——
+  一条记录落盘时不带任何调度结论。
+- **消费**：从三条队列取记录，逐条问 `EventRouter` 走规则还是走 `Brain`，然后推进游标。
 
-这两件事放在一起不是因为「方便」，而是因为它们**失败语义相同**：append 按 command
-id 幂等，没有外部副作用，崩了下次重来就行。分开成两个组件，中间那道缝是假的 —— 一个
-写完记录什么也不做，另一个再去把它读出来。游标归它也是同一个理由：记账规则与
-`Brain` 无关。
+**它没有外部副作用。** append 按 command id 幂等，崩在中途不会留下半吊子的状态 ——
+已 commit 的记录不再来，没 commit 的下次重来。所以游标由它推进：`Brain.step` 返回之后
+才算处理完，返回之后再崩就是重复调模型。
 
-**`Intake` 不做任何决策。** 「这条要不要给 agent」是 `EventRouter` 的事，「跑什么」是
-`Brain` 的事。它只负责让事件可读且有序。
-
-它也不会解析帧：socket、握手、JSON 解码是传输层的事，传输解析出 `Command` 再交给这里。
+它不解析帧。socket、握手、JSON 解码是传输层的事，传输解析出 `Command` 再交给这里；
 core 不管自己怎么被连上来的。
-
-`Brain` 可能已经调过模型、派发过工具，它崩了之后哪些能重放是策略 —— 所以 `Brain` 与
-`Intake` 分开，而入站与消费不分。
 """
 
 from __future__ import annotations
@@ -27,29 +21,20 @@ from dataclasses import dataclass
 from typing import Final
 
 from core.protocol.datatype.cursor import Cursor
+from core.protocol.datatype.journal import Record
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command
 
 
 class RoutingDecision:
-    """一条入站记录落盘之后的结论。"""
+    """一条队列记录取出之后归谁处理。"""
 
-    #: 落盘了，该让 `Brain` 看一眼。
-    DISPATCH: Final = "dispatch"
-    #: 落盘了（或什么都没做），`Brain` 不必动。`ping`、`session.open` 走这里。
-    ACK_ONLY: Final = "ack_only"
+    #: 交给 `Brain`：这是 agent 该回应的输入。
+    TO_BRAIN: Final = "to_brain"
+    #: core 按既定规则处理掉：`run.cancel` 中止运行、审批回执入账之类。
+    BY_RULE: Final = "by_rule"
 
-    ALL: Final = frozenset({DISPATCH, ACK_ONLY})
-
-
-@dataclass(frozen=True, slots=True)
-class RoutingOutcome:
-    """`handle` 的返回。`scope` 是记录落到的位置。"""
-
-    scope: Scope
-    decision: str
-    #: 落盘后那条记录的位置。`ACK_ONLY` 且没落盘时是 None。
-    cursor: Cursor | None
+    ALL: Final = frozenset({TO_BRAIN, BY_RULE})
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,14 +59,17 @@ class SessionAuthenticator(ABC):
 
 
 class EventRouter(ABC):
-    """这条入站记录要不要交给 `Brain`。
+    """这条队列记录交给 `Brain` 还是 core 自己按规则处理掉。
 
-    v1 没有实现。接口存在的理由是：`Intake` 要被唤醒这件事必须有唯一的决定点，
-    不能散落在入站路径与消费路径各自的 if 里。
+    判断的是记录，不是原始 command：一条 `run.cancel` 落盘时和被读出来时，中间隔着
+    别的记录，理由可能已经变了。
+
+    v1 没有实现。接口存在的理由是：每条记录的去向必须有唯一的决定点，不能散落在
+    `poll` 里对 type 的 if 串中。
     """
 
     @abstractmethod
-    def route(self, command: Command) -> str:
+    def route(self, record: Record) -> str:
         """返回一个 `RoutingDecision`。"""
         ...
 
@@ -90,26 +78,28 @@ class Intake(ABC):
     """系统的入口与队列消费循环。"""
 
     @abstractmethod
-    def open_session(
-        self, command: Command, *, authenticator: SessionAuthenticator
-    ) -> RoutingOutcome:
-        """处理 `session.open`：验 credential、绑定 session。"""
+    def open_session(self, command: Command, *, authenticator: SessionAuthenticator) -> Scope:
+        """处理 `session.open`：验 credential、绑定 session，返回这个 session 的 scope。"""
         ...
 
     @abstractmethod
-    def handle(self, command: Command, scope: Scope) -> RoutingOutcome:
-        """落一条 command。
+    def handle(self, command: Command, scope: Scope) -> Cursor | None:
+        """落一条 command，返回它的游标，供传输层 ack。
 
-        返回成功即代表记录已持久化，游标已推进。抛错表示没落成，调用方不得 ACK。
+        返回 None 表示这条 command 不落盘（`ping`）。成功即代表已持久化；抛错表示
+        没落成，调用方不得 ack。
         """
         ...
 
     @abstractmethod
     def poll(self, scope: Scope) -> bool:
-        """把这个 scope 三条队列里可读的记录取出来、分发给 `Brain`。
+        """把这个 scope 三条队列里可读的记录取出来，逐条处理掉。
 
-        返回 True 表示至少分发了一条。**返回 False 不代表出错**：队列空就是队列空。
-        分发途中崩了，下次会重来 —— `Intake` 没有副作用。
+        每条记录问一次 `EventRouter`：`TO_BRAIN` 交给 `Brain.step`，`BY_RULE` 由 core
+        自己处理。处理完一条 commit 一条。
+
+        返回 True 表示至少处理了一条。**返回 False 不代表出错**：队列空就是队列空。
+        处理途中崩了，下次会重来 —— `Intake` 没有副作用。
         """
         ...
 
@@ -134,7 +124,6 @@ __all__ = [
     "EventRouter",
     "Intake",
     "RoutingDecision",
-    "RoutingOutcome",
     "SessionAuthenticator",
     "SessionIdentity",
 ]

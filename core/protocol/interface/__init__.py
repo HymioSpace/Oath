@@ -9,7 +9,6 @@ from core.protocol.interface.intake import (
     EventRouter,
     Intake,
     RoutingDecision,
-    RoutingOutcome,
     SessionAuthenticator,
     SessionIdentity,
 )
@@ -28,7 +27,6 @@ __all__ = [
     "OutboundTransport",
     "PermissionPolicy",
     "RoutingDecision",
-    "RoutingOutcome",
     "SendResult",
     "SessionAuthenticator",
     "SessionIdentity",
