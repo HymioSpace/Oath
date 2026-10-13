@@ -7,6 +7,12 @@ journal 专属的那些。
 from __future__ import annotations
 
 from core.protocol.datatype.agent_state import AgentState
+from core.protocol.datatype.config import (
+    AgentConfig,
+    ModelProviderConfig,
+    OathConfig,
+    ServerConfig,
+)
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.journal import (
@@ -24,7 +30,13 @@ from core.protocol.datatype.journal import (
     StateRef,
     ToolOutcome,
 )
-from core.protocol.datatype.message import Message
+from core.protocol.datatype.llm import (
+    LlmFinishReason,
+    LlmRequest,
+    LlmResponse,
+    LlmToolCall,
+)
+from core.protocol.datatype.message import Message, MessageEvent, MessageEventType
 from core.protocol.datatype.permission import (
     PERMISSION_REQUESTED_KEY_PREFIX,
     PERMISSION_RESOLVED_KEY_PREFIX,
@@ -81,6 +93,7 @@ __all__ = [
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
     "TOOL_NAME_PATTERN",
+    "AgentConfig",
     "AgentEvent",
     "AgentState",
     "AppendResult",
@@ -95,7 +108,15 @@ __all__ = [
     "EventType",
     "QueueName",
     "FrameType",
+    "LlmFinishReason",
+    "LlmRequest",
+    "LlmResponse",
+    "LlmToolCall",
     "Message",
+    "MessageEvent",
+    "MessageEventType",
+    "ModelProviderConfig",
+    "OathConfig",
     "PayloadSchema",
     "PermissionEvent",
     "PermissionEventType",
@@ -108,6 +129,7 @@ __all__ = [
     "RecordFormat",
     "Recovery",
     "Scope",
+    "ServerConfig",
     "StateRecord",
     "StateRef",
     "ToolCallRequest",

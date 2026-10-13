@@ -17,6 +17,7 @@ CLAUDE.md
 credentials.json
 secrets.local.*
 *.local
+oath.toml
 
 # OS and editors
 .DS_Store

@@ -1,0 +1,32 @@
+# Oath 配置。复制成 oath.toml 后按需改。
+#
+# **凭证只写环境变量名**：`api_key_env` 是变量名，不是值。配置文件会进 git，
+# 把 key 写在这里等于公开它。
+
+data_root = "./data"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+# 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
+send_queue_size = 256
+max_connections = 32
+
+[agent]
+system_prompt = """
+你是一个通过终端对话的助手。回答尽量简洁；需要外部信息时调用工具，不要凭空编。
+"""
+max_output_tokens = 2048
+temperature = 0.7
+
+[agent.provider]
+model = "gpt-4o-mini"
+api_base = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60
+
+# 演示身份。生产由 Hymio 提供 —— 认不出的 credential 直接被拒，不回落到匿名。
+[[credentials]]
+token = "demo-token"
+user_id = "demo"
+session_id = "default"

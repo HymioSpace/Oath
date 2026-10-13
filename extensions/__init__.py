@@ -1,7 +1,7 @@
-"""扩展包根。
+"""业务扩展：业务 tool 与业务 skill。
 
-`extensions/` 可缺省 —— 判据是删掉它 runtime 仍能启动。没有 manifest，也没有插件
-加载器：core 不反向查找或下载插件，注册由 `bootstrap/` 显式完成。
+删掉这一层 runtime 仍然起得来，只是没有工具可用。依赖方向：`extensions` → `core`，
+反过来没有。
 """
 
 from __future__ import annotations

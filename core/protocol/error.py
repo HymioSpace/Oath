@@ -109,6 +109,14 @@ class UnknownQueueError(QueueError):
     """
 
 
+class LlmError(ProtocolError):
+    """模型调用的全部失败：网络、超时、非 2xx、响应体形状不对。
+
+    没有「返回值表示失败」的形态 —— 一个 `LlmResponse` 一定是模型真说过的话。
+    与 `ToolError` 平级：调用方要分别处理「模型没说话」与「工具没跑成」。
+    """
+
+
 class WireProtocolError(ProtocolError):
     """对端发来的帧不合法。
 
@@ -128,6 +136,7 @@ __all__ = [
     "QueueError",
     "IdempotencyKeyConflict",
     "JournalError",
+    "LlmError",
     "PayloadSchemaError",
     "PayloadVersionError",
     "PermissionDeniedError",
