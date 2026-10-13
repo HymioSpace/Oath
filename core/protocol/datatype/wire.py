@@ -222,13 +222,17 @@ class EventFrame:
         }
 
 
-def ack(command_id: str) -> JsonObject:
-    """command 收到了。要不要 ACK 之外的回执由 command 自己决定。"""
-    return {
-        "v": WireVersion.CURRENT,
-        "type": FrameType.ACK,
-        "id": command_id,
-    }
+def ack(command_id: str, cursor: Cursor | None = None) -> JsonObject:
+    """command 收到了，**并且已经落盘**。
+
+    `cursor` 是刚落的那条记录的位置。客户端发 `user.message` 时已经知道自己发了什么，
+    需要的是「它落在哪儿」—— 断线重连带的就是这个游标，所以游标走 ack 而不是把
+    客户端自己的记录再推一遍。
+    """
+    frame: JsonObject = {"v": WireVersion.CURRENT, "type": FrameType.ACK, "id": command_id}
+    if cursor is not None:
+        frame["cursor"] = cursor.to_json()
+    return frame
 
 
 def pong(command_id: str) -> JsonObject:

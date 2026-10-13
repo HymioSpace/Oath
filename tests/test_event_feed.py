@@ -117,15 +117,6 @@ def test_feeds_are_independent(journal: FileJournal, feed: JournalEventFeed, sco
     assert len(feed.pull(scope, "system")) == 0
 
 
-def test_outbound_sees_everything(
-    journal: FileJournal, feed: JournalEventFeed, scope: Scope
-) -> None:
-    _append_user(journal, scope, "u1")
-    _append_step(journal, scope, "s1")
-
-    assert len(feed.pull(scope, "outbound")) == 2
-
-
 def test_scopes_do_not_leak(journal: FileJournal, feed: JournalEventFeed, scope: Scope) -> None:
     other = Scope(user_id="u1", session_id="s2")
     _append_user(journal, scope, "u1")
@@ -270,51 +261,77 @@ def stream(journal: FileJournal, transport: _FakeTransport) -> Iterator[Outbound
     s.close()
 
 
-def test_stream_pushes_in_cursor_order(
+def test_stream_skips_records_the_client_already_has(
     journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
 ) -> None:
+    """`user.message` 是客户端自己发的，回声对它没有信息量。"""
     _append_user(journal, scope, "u1")
     _append_step(journal, scope, "s1")
 
     stream.subscribe(scope)
-    stream.wake(scope)
-
-    assert transport.delivered.wait(5.0)
-    assert transport.types() == [EventType.USER_MESSAGE, EventType.SYSTEM_AGENT_STEP]
-
-
-def test_stream_resumes_from_client_cursor(
-    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
-) -> None:
-    first = _append_user(journal, scope, "u1")
-    _append_step(journal, scope, "s1")
-
-    stream.subscribe(scope, resume_after=first)
-    stream.wake(scope)
+    stream.wake()
 
     assert transport.delivered.wait(5.0)
     assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
 
 
-def test_stream_drops_slow_consumer_without_committing(journal: FileJournal, scope: Scope) -> None:
-    """慢客户端断开后游标留在原地，客户端带游标重连才能补上。"""
-    transport = _FakeTransport(accept_until=2)
-    stream = OutboundStream(journal, transport=transport, poll_interval=0.02)
+def test_stream_pushes_in_cursor_order(
+    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
+) -> None:
     _append_user(journal, scope, "u1")
     _append_step(journal, scope, "s1")
     _append_user(journal, scope, "u2", "second")
+    _append_step(journal, scope, "s2")
 
     stream.subscribe(scope)
-    stream.wake(scope)
+    stream.wake()
 
+    assert transport.delivered.wait(5.0)
+    assert transport.types() == [EventType.SYSTEM_AGENT_STEP, EventType.SYSTEM_AGENT_STEP]
+
+
+def test_stream_resumes_from_client_cursor(
+    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
+) -> None:
+    first = _append_step(journal, scope, "s1")
+    _append_step(journal, scope, "s2")
+
+    stream.subscribe(scope, resume_after=first)
+    stream.wake()
+
+    assert transport.delivered.wait(5.0)
+    assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
+
+
+def test_stream_drops_slow_consumer(journal: FileJournal, scope: Scope) -> None:
+    transport = _FakeTransport(accept_until=2)
+    stream = OutboundStream(journal, transport=transport, poll_interval=0.02)
+    for i in range(4):
+        _append_step(journal, scope, f"s{i}")
+
+    stream.subscribe(scope)
+    stream.wake()
     time.sleep(0.3)
 
     assert transport.closed == [(scope, CloseReason.SLOW_CONSUMER)]
     assert stream.subscriptions() == ()
-
-    # 故意不 commit：没送达的那几帧靠客户端带游标重连补，不是靠这里记着。
-    assert JournalEventFeed(journal).position(scope, "outbound").value == 0
     stream.close()
+
+
+def test_stream_advances_past_records_it_does_not_send(
+    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
+) -> None:
+    """不推进的话，一批全是 `user.message` 的行会让 poll 空转到读完为止。"""
+    for i in range(300):
+        _append_user(journal, scope, f"u{i}")
+    _append_step(journal, scope, "s1")
+
+    stream.subscribe(scope)
+    stream.wake()
+
+    assert transport.delivered.wait(5.0)
+    assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
+    assert stream.subscriptions()[0].cursor.value >= 256
 
 
 def test_stream_forgets_dead_connection(journal: FileJournal, scope: Scope) -> None:
@@ -324,9 +341,9 @@ def test_stream_forgets_dead_connection(journal: FileJournal, scope: Scope) -> N
 
     transport = _Dead()
     stream = OutboundStream(journal, transport=transport, poll_interval=0.02)
-    _append_user(journal, scope, "u1")
+    _append_step(journal, scope, "s1")
     stream.subscribe(scope)
-    stream.wake(scope)
+    stream.wake()
     time.sleep(0.3)
 
     assert stream.subscriptions() == ()

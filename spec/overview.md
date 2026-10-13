@@ -92,11 +92,11 @@ flowchart TD
 
 ## 事件通路
 
-三条内部队列（`user` / `tool` / `system`）与对外 event 流是同一个东西的四种用法：都是在 journal 上挂一个游标、按 type 过滤、往前推。所以只实现一个 `EventFeed` 加一张 type 映射表，不写四个类。
+三条内部队列（`user` / `tool` / `system`）是同一个东西的三种用法：都是在 journal 上挂一个游标、按 type 过滤、往前推。所以只实现一个 `EventFeed` 加一张 type 映射表，不写三个类。
 
 **内部队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 Brain 与工具系统的产物，它们进 journal（对话历史要投影它们）但不进任何一条内部队列 —— 队列回答的是「现在该做什么」，不是「做了什么」。
 
-对外 event 流收全部记录：客户端要看到 agent 干了什么，那是 trace 视图的职责，由客户端自己过滤。服务端替它筛等于替客户端做了决定。
+对外 event 流**不是队列**：oath 内部没有消费方，缓冲与重排是客户端的事。它只推客户端没发过的记录 —— `user.message` 回声没有信息量，客户端要的是那条记录落在哪儿，那个游标由 `ack` 帧回。
 
 对外是一条双向 WebSocket：客户端既发 command 也收 event，`user_id` 由服务端从 credential 推导，客户端不能自称。慢客户端的连接会被断开而不是阻塞 core —— 断开的连接能带着游标重连续上，阻塞的会让所有 session 一起卡住。详见 [feature-event-runtime](feature-event-runtime.md)。
 

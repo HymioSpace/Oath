@@ -20,8 +20,8 @@ journal 已经有了，工具系统也有了，但两者之间没有通路：现
 
 ## 总览
 
-一句话：**所有事件先落 journal，队列与对外 event 流都是 journal 的游标视图，消费方
-推进游标；两个系统都从 journal 取输入，不从内存传消息。**
+一句话：**所有事件先落 journal，三条内部队列是 journal 上的游标视图、对外流直接读
+journal；所有输入都从 journal 取，不从内存传消息。**
 
 ```mermaid
 flowchart TD
@@ -39,22 +39,24 @@ flowchart TD
     J --> F3[Feed: system queue]
     F1 & F2 & F3 --> QR
 
-    J --> F4[Feed: outbound 流]
-    F4 --> C
+    J -->|只推 CLIENT_FACING| OS[OutboundStream]
+    OS --> C
 ```
 
-四条贯穿全文的规则：
+六条贯穿全文的规则：
 
 1. **journal 是唯一入口与唯一出口。** 没有第二条通路：内存消息、进程内队列都不算数。
    断了重连能从游标续上，靠的就是这一条。
-2. **内部队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 Brain 和工具
+2. **对外流不是队列。** oath 内部没有消费方：没有「处理完才推进」，缓冲与重排是客户端
+   自己的事。它记的读位置只是为了别每次 poll 重扫日志，不是记账。
+3. **内部队列只装输入，不装输出。** `assistant.message`、`tool.call` 是 Brain 和工具
    系统的产物，它们进 journal 但不进内部队列 —— 队列回答的是「现在该做什么」，不是
    「做了什么」。
-3. **消费位置是游标，不是时间戳。** 与 journal 一致：墙钟会回拨，做位置标记会静默
+4. **队列位置是游标，不是时间戳。** 与 journal 一致：墙钟会回拨，做位置标记会静默
    丢事件。
-4. **游标归 `QueueRunner`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，
+5. **游标归 `QueueRunner`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，
    后者是「可能已经调过模型」。两者混在一个类里，游标什么时候推进就说不清了。
-5. **推不动就断开，不阻塞 core。** 慢客户端的连接会被断开；因为有游标，重连能续上，
+6. **推不动就断开，不阻塞 core。** 慢客户端的连接会被断开；因为有游标，重连能续上，
    丢的不是数据而是延迟。
 
 ## 接口与数据
@@ -83,22 +85,24 @@ flowchart TD
 
 ### 队列：`EventFeed`
 
-三条内部队列（`user` / `tool` / `system`）与对外 event 流（`outbound`）是**同一个东西
-的四种用法**，只有「过滤哪些 type」和「消费方是谁」不同。所以不写四个类，写一个
-`EventFeed` + 一张 type 映射表。
+三条内部队列（`user` / `tool` / `system`）**是同一个东西的三种用法**，只有「过滤哪些
+type」不同。所以不写三个类，写一个 `EventFeed` + 一张 type 映射表。
 
-| type | 归属 | 进内部队列 | 进对外流 |
-| --- | --- | --- | --- |
-| `user.message` | user | 是 | 是 |
-| `tool.result` | tool | 是 | 是 |
-| `assistant.message` | user | 否 | 是 |
-| `tool.call` | tool | 否 | 是 |
-| `system.agent_step` | system | 否 | 是 |
-| `system.cancel` / `system.interrupt` | system | 是 | 是 |
-| `permission.requested` / `permission.resolved` | tool | 是 | 是 |
+| type | 进哪条队列 | 进对外流 |
+| --- | --- | --- |
+| `user.message` | user | 否 |
+| `tool.result` | tool | 是 |
+| `assistant.message` | — | 是 |
+| `tool.call` | — | 是 |
+| `system.agent_step` | — | 是 |
+| `system.cancel` / `system.interrupt` | system | 否 |
 
-对外流收**全部**记录：客户端要看到 agent 干了什么，那是 trace 视图的职责，由客户端
-自己过滤。内部三条队列只收输入。
+**对外流只推客户端没发过的记录。** `user.message`、`system.cancel`、`system.interrupt`
+都是客户端自己发的，回声对它没有信息量；真正要的是「它落在哪儿」，而那个游标由
+`ack` 帧回。
+
+`tool.result` 两边都进：agent 要它作为输入，客户端要它显示工具状态。两边要的不是同一
+件事，各走各的通路。
 
 映射表是显式的一张表，不是从 type 前缀推的 —— `system.agent_step` 归 system 但不进
 system 队列（前缀规则表达不了这个）。
@@ -148,7 +152,13 @@ class EventFeed(ABC):
 // 下行：oath → client
 {"v": 1, "type": "event", "session_id": "s-1", "cursor": {"kind": "line", "value": 42},
  "occur_dt": "2026-10-13T08:31:04Z", "record_type": "tool.result", "payload": {...}}
+
+{"v": 1, "type": "ack", "id": "c-1", "cursor": {"kind": "line", "value": 41}}
 ```
+
+**`ack` 回的是那条记录落在哪儿，不是它是什么。** 客户端发 `user.message` 时已经知道
+自己发了什么，它要的是「落盘了没有、落在哪儿」—— 断线重连带的就是这个游标。回声会把
+同一份内容再推一遍，没有信息量还多一份要保持一致的状态。
 
 上行 command 的类型（闭合集合，加新的按破坏性变更处理）：
 
@@ -173,7 +183,7 @@ class EventFeed(ABC):
 `SessionAuthenticator` 是接口，v1 没有实现。
 
 **重连靠游标。** 客户端重连时在 `session.open` 里带 `resume_after`，服务端从那里
-继续推。没带就从日志开头推：对外流收全部记录，跳不跳过历史是客户端自己的事 ——
+继续推。没带就从日志开头推：客户端要看到 agent 干了什么，跳不跳过历史是它自己的事 ——
 拿不准就带游标来。
 
 ### 背压
@@ -186,8 +196,10 @@ class EventFeed(ABC):
 dispatcher 会让所有 session 一起卡住。断的时候带上原因（`slow_consumer`），客户端
 据此退避。
 
-**断开时不 commit。** 已经交给传输但没送达的帧就是丢了；位置留在原地，客户端带着自己
-收到的最后一个游标重连就能补上。这里 commit 了才是真的丢数据。
+**对外流的位置不是记账。** 读到哪里就记到哪里，包括没能送出去的那几帧 —— 少了的那段
+靠客户端自己带的 `resume_after` 补。oath 这边的位置只管「别每次 poll 都重扫日志」，所以
+不属于 `CLIENT_FACING` 的记录照样推进，否则一批全是 `user.message` 的行会让 poll 空转
+到把日志读完为止。
 
 ## 实现方案
 
@@ -197,8 +209,8 @@ dispatcher 会让所有 session 一起卡住。断的时候带上原因（`slow_
 位置只推进到「最后一条被跳过的记录」，且只在还没命中时推进。
 
 `OutboundStream`（`core/outbound/stream.py`）持有订阅表，一个 dispatcher 线程按
-journal 游标顺序推。它用自己的 `EventFeed` 实例，不共享 QueueRunner 那三条 —— 订阅的
-位置由客户端的 `resume_after` 决定，不能和别人的消费进度绑在一起。
+journal 游标顺序推。它**不用 `EventFeed`** —— 对外流没有消费方，`pull` / `commit` /
+`wait` 那套语义对它没有意义，直接 `journal.read_range` 加一个自己的读位置更直白。
 
 传输层是 `OutboundTransport` 接口（`send(scope, frame) -> SendResult` /
 `close(scope, reason)`），v1 不实现 —— 具体是 WebSocket、SSE 还是别的，等接入渠道确定
@@ -223,6 +235,7 @@ journal 的幂等语义承担。记在待决事项里。
 | 同一 session 两条连接 | 后来的顶掉前一条。同一 session 只有一个活动 run，连接也不该有两个 |
 | 慢客户端 | 发送队列满即断开，帧里带 `slow_consumer` |
 | 断线重连带过期的游标 | 从该游标之后续推；游标指向日志末尾之后就是没有新事件，不是错 |
+| 客户端没带 `resume_after` | 从日志开头推，不做特殊处理 |
 | `commit` 往回推 | 抛 `CursorError`。往回推会让已处理过的记录重来 |
 | 内部队列游标丢了（重启） | 回到起点，事件重放。fold 是纯函数，重放安全 |
 | `QueueRunner` 分发中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
