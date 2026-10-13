@@ -1,4 +1,4 @@
-# Feature — 事件运行时（队列、Ingress、QueueRunner、Brain、对外 event 流）
+# Feature — 事件运行时（队列、Intake、Brain、对外 event 流）
 
 状态：Implementing
 
@@ -7,13 +7,13 @@
 journal 已经有了，工具系统也有了，但两者之间没有通路：现在 agent 跑不起来，客户端
 也看不到任何东西。本 feature 把 event-driven 的骨架搭出来。
 
-四件东西：
+三件东西：
 
 1. **三条队列**（user / tool / system）—— 输入从哪来。
-2. **Ingress** —— 接收 command、落 journal、决定要不要交给 QueueRunner。
-3. **QueueRunner** —— 消费三条队列：取记录、分发、推进游标。
-4. **Brain** —— context build → LLM → tool call → compress，决定跑什么。
-5. **对外 event 流** —— 客户端通过一条 WebSocket 既能发 user event，也能收 oath event。
+2. **`Intake`** —— 系统的入口：接收入站 command 落 journal，同时消费三条队列。
+3. **`Brain`** —— context build → LLM → tool call → compress，决定跑什么。
+
+再加一条对外 event 流：客户端通过一条 WebSocket 既能发 user event，也能收 oath event。
 
 这一轮只搭基础设施。**判断是否给 agent、context 怎么 build、LLM 怎么调、怎么压缩，
 都不实现** —— 这些是策略，保留 interface 即可。
@@ -25,10 +25,10 @@ journal；所有输入都从 journal 取，不从内存传消息。**
 
 ```mermaid
 flowchart TD
-    C[Client: 一条 WebSocket] -->|command: user.message / permission.decide| I[Ingress]
+    C[Client: 一条 WebSocket] -->|command: user.message / permission.decide| I[Intake 入站]
     I -->|append| J[(journal)]
-    I -->|EventRouter 决定要不要唤醒| QR[QueueRunner]
-    QR -->|分发记录| BR[Brain]
+    I -->|EventRouter 决定要不要唤醒| QC[Intake 消费]
+    QC -->|分发记录| BR[Brain]
 
     TS[ToolSystem] -->|终态事件| S[AgentEventSink]
     PM[PermissionManager] -->|审批事件| S
@@ -37,7 +37,7 @@ flowchart TD
     J --> F1[Feed: user queue]
     J --> F2[Feed: tool queue]
     J --> F3[Feed: system queue]
-    F1 & F2 & F3 --> QR
+    F1 & F2 & F3 --> QC
 
     J -->|只推 CLIENT_FACING| OS[OutboundStream]
     OS --> C
@@ -54,34 +54,37 @@ flowchart TD
    「做了什么」。
 4. **队列位置是游标，不是时间戳。** 与 journal 一致：墙钟会回拨，做位置标记会静默
    丢事件。
-5. **游标归 `QueueRunner`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，
-   后者是「可能已经调过模型」。两者混在一个类里，游标什么时候推进就说不清了。
+5. **游标归 `Intake`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，后者
+   是「可能已经调过模型」。两者混在一个类里，游标什么时候推进就说不清了。
 6. **推不动就断开，不阻塞 core。** 慢客户端的连接会被断开；因为有游标，重连能续上，
    丢的不是数据而是延迟。
 
 ## 接口与数据
 
-### 四个系统
+### 三个系统
 
 | 名字 | 职责 | 依赖 |
 | --- | --- | --- |
-| `Ingress` | 接收 command → 落 journal → 路由决策 → 唤醒 QueueRunner | `Journal` / `EventRouter` |
-| `QueueRunner` | 消费三条队列：取记录 → 分发 → 推进游标 → 等下一条 | 三条 `EventFeed` / `Brain` |
+| `Intake` | 接 command 落 journal；消费三条队列：取记录 → 分发 → 推进游标 | `Journal` / `EventRouter` / 三条 `EventFeed` / `Brain` |
 | `Brain` | context build → LLM → tool call → compress → fold 状态 | `Journal` / `ToolSystem` |
-| `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `EventFeed` / `OutboundTransport` |
+| `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `OutboundTransport` |
 
-前三个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 `Brain` 时。
+前两个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 `Brain` 时。
 
-**`QueueRunner` 与 `Brain` 分开是因为失败语义不同。** `QueueRunner` 没有副作用：取记录、
-分发、推进游标，崩了下次重来就行。`Brain` 可能已经调过模型、派发过工具，崩了之后哪些
-能重放是策略。所以游标由 `QueueRunner` 推进，`Brain.step` 返回之后才算处理完 —— 返回
-之后再崩，记录已经 commit，重放会重复调模型。
+**入站与消费放在同一个组件里，是因为失败语义相同。** `Intake` 做的两件事都没有外部
+副作用：append 按 command id 幂等，崩了下次重来就行。分成「入站的」与「消费的」两个
+组件，中间那道缝是假的 —— 一个写完记录什么也不做，另一个再去把它读出来。游标归
+`Intake` 也是同一个理由：记账规则与 `Brain` 无关。
 
-分工一句话：**`QueueRunner` 决定「现在该不该跑」，`Brain` 决定「跑什么」。**
+**`Intake` 与 `Brain` 分开，也是因为失败语义不同。** `Brain` 可能已经调过模型、派发过
+工具，崩了之后哪些能重放是策略。所以 `Brain.step` 返回之后才算处理完 —— 返回之后再崩，
+记录已经 commit，重放会重复调模型。
 
-`Ingress` 与它们分工是**持久化 vs 执行**：Ingress 只管让事件**可读且有序**，后面两个
-只管让它**有意义**。判断「这条要不要给 agent」是 Ingress 的路由决策，但那是策略 ——
-`EventRouter` 是个接口，v1 没有实现。
+分工一句话：**`Intake` 让事件可读且有序，`Brain` 让它有意义。** 「这条要不要给 agent」
+是 `EventRouter` 的路由决策，但那是策略 —— `EventRouter` 是个接口，v1 没有实现。
+
+**`Intake` 不解析帧。** socket、握手、JSON 解码是传输层的事：传输解析出 `Command`，
+再交给 `Intake`。core 不管自己是怎么被连上来的。
 
 ### 队列：`EventFeed`
 
@@ -139,6 +142,10 @@ class EventFeed(ABC):
 **一条 WebSocket，双向复用。** 客户端既是 command 的发送方也是 event 的接收方；拆成
 两条连接只会多一次握手和一份权限检查。
 
+上行叫 **command**（客户端要 oath 做一件事），下行叫 **event**（oath 告诉客户端发生了
+什么）。一组对偶：command 是要求，带副作用，要幂等键；event 是通知，已经是既成事实，
+不需要。
+
 统一的 envelope：`v` 是协议版本，`type` 是这一帧是什么。上行 `type` 取 command 自己的
 类型，下行取 `event` / `ack` / `pong` / `error` / `close` —— 两套命名空间不重叠，
 一个字段就够表达「这是什么」，不需要先判方向再判种类。**客户端遇到不认识的 `v` 应该
@@ -160,7 +167,7 @@ class EventFeed(ABC):
 自己发了什么，它要的是「落盘了没有、落在哪儿」—— 断线重连带的就是这个游标。回声会把
 同一份内容再推一遍，没有信息量还多一份要保持一致的状态。
 
-上行 command 的类型（闭合集合，加新的按破坏性变更处理）：
+command 的类型（闭合集合，加新的按破坏性变更处理）：
 
 | type | payload | 说明 |
 | --- | --- | --- |
@@ -238,9 +245,9 @@ journal 的幂等语义承担。记在待决事项里。
 | 客户端没带 `resume_after` | 从日志开头推，不做特殊处理 |
 | `commit` 往回推 | 抛 `CursorError`。往回推会让已处理过的记录重来 |
 | 内部队列游标丢了（重启） | 回到起点，事件重放。fold 是纯函数，重放安全 |
-| `QueueRunner` 分发中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
+| `Intake` 分发中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
 | `Brain` 崩在半路 | 副作用已经发生的不重放。哪些不能重放是策略，`core` 不替它判断 |
-| `Brain.step` 抛异常 | `QueueRunner` 不吞也不 commit：这条记录下次重来 |
+| `Brain.step` 抛异常 | `Intake` 不吞也不 commit：这条记录下次重来 |
 
 ## 跨仓库协议变更
 
@@ -256,8 +263,7 @@ journal 的幂等语义承担。记在待决事项里。
 - 审批事件进 journal、`permissions.jsonl` 退场（见上）。
 - `OutboundTransport` 的具体实现，以及渠道接入时的鉴权方式。
 - `Brain` 的 context build 策略、压缩触发条件、并发控制。
-- `Ingress` / `QueueRunner` / `Brain` 都还只是接口。`Ingress` 的落盘那一半与
-  `QueueRunner` 的取用逻辑都不算策略，但它们同时要依赖 `SessionAuthenticator`、
-  `EventRouter` 与权限系统，等第一个 `Brain` 落地时一起做，否则会先写出一版路由策略
-  再推翻。
+- `Intake` 与 `Brain` 都还只是接口。`Intake` 的落盘与取用逻辑都不算策略，但它同时要
+  依赖 `SessionAuthenticator`、`EventRouter` 与权限系统，等第一个 `Brain` 落地时一起做，
+  否则会先写出一版路由策略再推翻。
 - 内部队列游标的持久化时机 —— 现在位置丢了只是重放，等 `Brain` 真正跑起来后看代价。

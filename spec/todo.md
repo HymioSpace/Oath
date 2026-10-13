@@ -4,9 +4,9 @@
 
 | 分类 | 事项 | 状态 | 描述 |
 | --- | --- | --- | --- |
-| 事件通路 | QueueRunner | 未开始 | 消费三条队列：取记录、分发、推进游标，现在只有 interface |
 | 事件通路 | Brain | 未开始 | context build → LLM → tool call → compress，现在只有 interface |
-| 事件通路 | Ingress | 未开始 | 入站事件落 journal + 路由决策，现在只有 interface |
+| 事件通路 | Intake | 未开始 | 接 command 落 journal + 消费三条队列 + 路由决策，现在只有 interface |
+| 事件通路 | WebSocket 传输 | 未开始 | `OutboundTransport` 的实现，含上行 command 的接收与有界发送队列 |
 | 事件通路 | 传输层实现 | 未开始 | `OutboundTransport` 的 WebSocket 实现，含有界发送队列与鉴权 |
 | 审批 | 审批事件进 journal | 未开始 | 审批事件现在只在 `permissions.jsonl`，feed 看不到它们 |
 | 崩溃恢复 | 悬挂调用的终态 | 未开始 | runtime 重启后没有 `tool.result` 的 `tool.call` 要补一条终态，否则投影一直发 `unresolved` 的 tool 消息给模型 |
