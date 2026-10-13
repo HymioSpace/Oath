@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Final
 
+from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     ToolOutcome,
@@ -196,22 +197,15 @@ class ToolDefinition:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolEvent:
+class ToolEvent(AgentEvent):
     """工具执行的终态事件。
 
     `payload` 逐字段对齐 `PAYLOAD_SCHEMAS[(EventType.TOOL_RESULT, 1)]`，所以
     投递到 journal 时可以直接 append，不需要翻译。字段变更按破坏性变更处理。
     """
 
-    type: str
-    scope: Scope
-    tool_call_id: str
-    invocation_id: str
-    tool: str
+    #: 执行的终态，取值见 `ToolOutcome`。
     outcome: str
-    payload: JsonObject
-    idempotency_key: str
-    occur_dt: str
 
     def to_dict(self) -> JsonObject:
         return {

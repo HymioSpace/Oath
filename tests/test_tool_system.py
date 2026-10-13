@@ -38,7 +38,6 @@ from tests._support.tool_fixtures import (
     EchoTool,
     GatedTool,
     RaisingTool,
-    RecordingPermissionSink,
     RecordingSink,
     VerdictPolicy,
     deny,
@@ -175,7 +174,7 @@ def test_timeout_settles_and_emits(registry: ToolRegistry, sink: RecordingSink) 
         handle = ts.execute(
             SCOPE, [ToolCallRequest(tool="gated", arguments={}, tool_call_id="tc")]
         ).handles[0]
-        events = sink.wait_for(1)
+        events = sink.wait_for_tool(1)
 
         assert events[0].type == ToolEventType.TERMINAL
         assert events[0].outcome == ToolStatus.TIMEOUT
@@ -201,7 +200,7 @@ def test_a_late_result_never_overwrites_the_terminal_state(
         handle = ts.execute(
             SCOPE, [ToolCallRequest(tool="gated", arguments={}, tool_call_id="tc")]
         ).handles[0]
-        sink.wait_for(1)
+        sink.wait_for_tool(1)
         gate.set()
         ts.shutdown(wait=True)  # 等工具线程真的跑完
         assert tool.finished == [handle.invocation_id]
@@ -227,7 +226,7 @@ def test_timeout_means_core_stopped_waiting_not_the_thread(
         handle = ts.execute(
             SCOPE, [ToolCallRequest(tool="gated", arguments={}, tool_call_id="tc")]
         ).handles[0]
-        sink.wait_for(1)
+        sink.wait_for_tool(1)
         gate.set()
         ts.shutdown(wait=True)
 
@@ -269,7 +268,7 @@ def test_a_queued_call_that_times_out_never_runs(
             ],
         )
 
-        assert sink.wait_for(1)[0].invocation_id == "second"
+        assert sink.wait_for_tool(1)[0].invocation_id == "second"
         gate.set()
         ts.shutdown(wait=True)  # 等线程池里那个排队任务被取走
         assert queued.entered == 0
@@ -295,7 +294,7 @@ def test_permission_is_checked_before_every_execution(
         assert handle.error is not None
         assert handle.error.kind == ToolErrorKind.PERMISSION_DENIED
         assert policy.calls == [("u1", "echo")]
-        assert error_kind(sink.wait_for(1)[0].payload) == ToolErrorKind.PERMISSION_DENIED
+        assert error_kind(sink.wait_for_tool(1)[0].payload) == ToolErrorKind.PERMISSION_DENIED
     finally:
         ts.shutdown(wait=False)
 
@@ -387,7 +386,7 @@ def test_an_ask_call_is_not_executed_but_still_gets_a_terminal_event(
     registry: ToolRegistry, sink: RecordingSink
 ) -> None:
     """ask 的当场结论：模型那个槽位必须被填上，但没有任何东西被执行。"""
-    perm_sink = RecordingPermissionSink()
+    perm_sink = RecordingSink()
     manager = permission_manager(
         VerdictPolicy({"gated": PermissionVerdict.ASK}), sink=perm_sink, ttl_seconds=30.0
     )
@@ -401,13 +400,13 @@ def test_an_ask_call_is_not_executed_but_still_gets_a_terminal_event(
         assert handle.state == ToolHandleState.PENDING_APPROVAL
         assert tool.entered == 0
 
-        event = sink.wait_for(1)[0]
+        event = sink.wait_for_tool(1)[0]
         assert event.outcome == ToolOutcome.AWAITING_APPROVAL
         assert event.payload["content"] == AWAITING_APPROVAL_CONTENT
         # 不进执行表：没有任何东西被执行过，「这个 id 跑成什么」暂时无从谈起。
         assert ts.status(SCOPE, handle.invocation_id) is None
 
-        requested = perm_sink.of_type(PermissionEventType.REQUESTED)
+        requested = perm_sink.permission_of_type(PermissionEventType.REQUESTED)
         assert len(requested) == 1
         assert requested[0].invocation_id == handle.invocation_id
         assert requested[0].status == PermissionStatus.PENDING
@@ -449,7 +448,7 @@ def test_the_awaiting_approval_event_is_a_legal_tool_result(
     registry.register(EchoTool("echo"), timeout_seconds=10.0)
     try:
         ts.execute(SCOPE, [ToolCallRequest(tool="echo", arguments={}, tool_call_id="tc")])
-        validate_payload(EventType.TOOL_RESULT, 1, sink.wait_for(1)[0].payload)
+        validate_payload(EventType.TOOL_RESULT, 1, sink.wait_for_tool(1)[0].payload)
     finally:
         ts.shutdown(wait=False)
         manager.shutdown(wait=False)
@@ -474,7 +473,7 @@ def test_bad_arguments_are_rejected_at_admission(
         assert handle.error is not None
         assert handle.error.kind == ToolErrorKind.INVALID_ARGUMENTS
         assert tool.entered == 0
-        assert sink.wait_for(1)[0].outcome == ToolStatus.FAILED
+        assert sink.wait_for_tool(1)[0].outcome == ToolStatus.FAILED
     finally:
         ts.shutdown(wait=False)
 
@@ -520,7 +519,7 @@ def test_same_invocation_runs_once(registry: ToolRegistry, sink: RecordingSink) 
         assert second.invocation_id == "dup"
 
         gate.set()
-        sink.wait_for(1)
+        sink.wait_for_tool(1)
         assert tool.finished == ["dup"]
         assert len(sink.events) == 1
     finally:
@@ -696,7 +695,7 @@ def test_every_call_gets_exactly_one_terminal_event(
                 )
             ],
         )
-        events = sink.wait_for(6)
+        events = sink.wait_for_tool(6)
 
         assert len(events) == 6
         assert all(event.type == ToolEventType.TERMINAL for event in events)
@@ -733,7 +732,7 @@ def test_event_payload_is_a_legal_tool_result_record(
                 )
             ],
         )
-        for event in sink.wait_for(3):
+        for event in sink.wait_for_tool(3):
             validate_payload(EventType.TOOL_RESULT, 1, event.payload)
             validate_idempotency_key(event.idempotency_key)
             assert event.payload["outcome"] == event.outcome
@@ -767,7 +766,8 @@ def test_success_and_failure_payloads_carry_the_right_fields(
             SCOPE,
             [ToolCallRequest(tool_call_id="tc-f3", tool="crash", arguments={}, invocation_id="f3")],
         )
-        events = {event.invocation_id: event for event in sink.wait_for(3)}
+        events = {event.invocation_id: event for event in sink.wait_for_tool(3)}
+        assert len(events) == 3
 
         assert events["f1"].outcome == ToolOutcome.SUCCEEDED
         assert events["f1"].payload["content"] == {"a": 1}
@@ -846,7 +846,7 @@ def test_the_model_tool_call_id_is_echoed_verbatim(
                 )
             ],
         )
-        event = sink.wait_for(1)[0]
+        event = sink.wait_for_tool(1)[0]
         assert event.tool_call_id == model_id
         assert event.payload["tool_call_id"] == model_id
         assert event.invocation_id == "i-1"
@@ -873,7 +873,7 @@ def test_rejected_calls_still_echo_the_tool_call_id(
             ],
         ).handles[0]
         assert handle.state == ToolHandleState.REJECTED
-        assert sink.wait_for(1)[0].tool_call_id == "toolu_x"
+        assert sink.wait_for_tool(1)[0].tool_call_id == "toolu_x"
     finally:
         ts.shutdown(wait=False)
 

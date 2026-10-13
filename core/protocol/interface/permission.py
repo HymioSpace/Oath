@@ -1,17 +1,15 @@
-"""权限系统的接口：应用侧实现 `PermissionPolicy`，投递方实现 `PermissionEventSink`。
-
-分工与工具系统那边一致：
+"""权限系统的接口：应用侧实现 `PermissionPolicy`。
 
 - `PermissionPolicy` 只回答「这个主体能不能调这个工具」。它不记录、不发事件、
   不知道有没有定时器 —— 那些一律 core 自己做。
-- `PermissionEventSink` 是投递口。投递失败必须当场抛错。
+- 审批事件的投递口**不在这一层**：系统只有一个 `AgentEventSink`
+  （见 `core/protocol/interface/event.py`），工具终态与审批事件走同一个口。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.protocol.datatype import PermissionEvent
 from core.protocol.datatype.scope import Scope
 from core.utils.encoding import JsonObject
 
@@ -32,15 +30,4 @@ class PermissionPolicy(ABC):
         ...
 
 
-class PermissionEventSink(ABC):
-    """审批事件（请求与裁定）的投递口。
-
-    同步调用，投递失败必须当场抛错 —— 静默吞掉会让一次待审批请求凭空消失，
-    而调用方永远不会知道有这么一次调用。
-    """
-
-    @abstractmethod
-    def emit(self, event: PermissionEvent) -> None: ...
-
-
-__all__ = ["PermissionEventSink", "PermissionPolicy"]
+__all__ = ["PermissionPolicy"]

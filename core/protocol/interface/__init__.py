@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.journal import Journal
-from core.protocol.interface.permission import PermissionEventSink, PermissionPolicy
-from core.protocol.interface.tool import Tool, ToolEventSink, ToolSystem
+from core.protocol.interface.permission import PermissionPolicy
+from core.protocol.interface.tool import Tool, ToolSystem
 
 __all__ = [
+    "AgentEventSink",
     "Journal",
-    "PermissionEventSink",
     "PermissionPolicy",
     "Tool",
-    "ToolEventSink",
     "ToolSystem",
 ]

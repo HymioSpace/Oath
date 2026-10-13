@@ -15,23 +15,23 @@ import pytest
 
 from core.journal.impl import FileJournal
 from core.protocol.datatype import (
+    AgentEvent,
     AgentState,
     Cursor,
     EventType,
     Record,
     Scope,
     ToolCallRequest,
-    ToolEvent,
     ToolOutcome,
 )
 from core.protocol.datatype.permission import PermissionEventType, PermissionVerdict
-from core.protocol.interface import ToolEventSink
+from core.protocol.interface import AgentEventSink
 from core.tool import ToolRegistry
 from core.tool.impl import ThreadedToolSystem
 from extensions.tools import ClockTool
 from tests._support.tool_fixtures import (
     EchoTool,
-    RecordingPermissionSink,
+    RecordingSink,
     VerdictPolicy,
     permission_manager,
     wait_terminal,
@@ -41,13 +41,13 @@ SCOPE = Scope(user_id="u1", session_id="s1")
 BEGINNING = Cursor(kind="line", value=0)
 
 
-class JournalSink(ToolEventSink):
+class JournalSink(AgentEventSink):
     """把终态事件直接 append 进 journal。字段一一对应，没有翻译层。"""
 
     def __init__(self, journal: FileJournal) -> None:
         self._journal = journal
 
-    def emit(self, event: ToolEvent) -> None:
+    def emit(self, event: AgentEvent) -> None:
         self._journal.append(
             SCOPE,
             EventType.TOOL_RESULT,
@@ -220,7 +220,7 @@ def test_a_batch_leaves_no_unfilled_tool_call(journal: FileJournal) -> None:
             idempotency_key=f"call:{invocation_id}",
         )
 
-    perm_sink = RecordingPermissionSink()
+    perm_sink = RecordingSink()
     manager = permission_manager(
         VerdictPolicy({"echo_no": PermissionVerdict.DENY, "echo_wait": PermissionVerdict.ASK}),
         sink=perm_sink,
@@ -263,7 +263,7 @@ def test_a_batch_leaves_no_unfilled_tool_call(journal: FileJournal) -> None:
             ToolOutcome.AWAITING_APPROVAL,
         ]
 
-        requested = perm_sink.of_type(PermissionEventType.REQUESTED)
+        requested = perm_sink.permission_of_type(PermissionEventType.REQUESTED)
         assert [event.invocation_id for event in requested] == ["inv-wait"]
     finally:
         system.shutdown(wait=False)

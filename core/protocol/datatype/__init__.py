@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.cursor import Cursor, CursorKind
+from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -68,6 +69,7 @@ __all__ = [
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
     "TOOL_NAME_PATTERN",
+    "AgentEvent",
     "AgentState",
     "AppendResult",
     "BatchExecution",

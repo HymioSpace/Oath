@@ -57,7 +57,7 @@ from core.protocol.error import (
     ToolExecutionError,
     ToolRequestError,
 )
-from core.protocol.interface import ToolEventSink, ToolSystem
+from core.protocol.interface import AgentEventSink, ToolSystem
 from core.tool.permission import PermissionManager
 from core.tool.registry import RegisteredTool, ToolRegistry
 from core.utils.encoding import JsonObject, utc_now_iso
@@ -125,7 +125,7 @@ class ThreadedToolSystem(ToolSystem):
     def __init__(
         self,
         registry: ToolRegistry,
-        sink: ToolEventSink,
+        sink: AgentEventSink,
         permission: PermissionManager,
         *,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,

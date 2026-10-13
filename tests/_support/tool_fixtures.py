@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 
 from core.protocol.datatype import (
+    AgentEvent,
     Scope,
     ToolDefinition,
     ToolEvent,
@@ -25,10 +26,9 @@ from core.protocol.datatype.permission import (
 )
 from core.protocol.error import PermissionStoreError
 from core.protocol.interface import (
-    PermissionEventSink,
+    AgentEventSink,
     PermissionPolicy,
     Tool,
-    ToolEventSink,
     ToolSystem,
 )
 from core.tool.permission import DEFAULT_TTL_SECONDS, PermissionManager, PermissionStore
@@ -131,34 +131,85 @@ class GatedTool(Tool):
         return ToolResult(content="done")
 
 
-class RecordingSink(ToolEventSink):
-    """记录全部终态事件，可选在投递时抛错。"""
+def _matching(events: list[AgentEvent], type_: str) -> Iterator[PermissionEvent]:
+    """筛出某类审批事件。不持锁 —— 调用方要么已经持着 `_lock`，要么只读快照。"""
+    return (event for event in events if isinstance(event, PermissionEvent) and event.type == type_)
+
+
+def _tool_events(events: list[AgentEvent]) -> Iterator[ToolEvent]:
+    """筛出终态事件。同样不持锁：`Condition` 与 `_lock` 是同一把，不可重入。"""
+    return (event for event in events if isinstance(event, ToolEvent))
+
+
+class RecordingSink(AgentEventSink):
+    """记录全部事件（终态与审批事件走同一个口），可选在投递时抛错。
+
+    事件是跨线程投递的，所以等待靠闸门（`Condition`）而不是轮询 —— 等的是
+    「事件真的到了」这个事实，不是一个时长猜出来的窗口。
+    """
 
     def __init__(self, fail: bool = False) -> None:
-        self.events: list[ToolEvent] = []
+        self.events: list[AgentEvent] = []
         self.fail = fail
         self._lock = threading.Lock()
         self._arrived = threading.Condition(self._lock)
 
-    def emit(self, event: ToolEvent) -> None:
+    def emit(self, event: AgentEvent) -> None:
         if self.fail:
             raise RuntimeError("投递失败（测试）")
         with self._arrived:
             self.events.append(event)
             self._arrived.notify_all()
 
-    def wait_for(self, count: int, timeout: float = 10.0) -> list[ToolEvent]:
-        """等到攒够 `count` 条事件。返回当时的快照。"""
+    def wait_for(self, count: int, timeout: float = 10.0) -> list[AgentEvent]:
+        """等到攒够 `count` 条事件（不限类型）。返回当时的快照。"""
         with self._arrived:
             ok = self._arrived.wait_for(lambda: len(self.events) >= count, timeout=timeout)
         if not ok:
-            raise AssertionError(f"等待 {count} 条终态事件超时，只到了 {len(self.events)} 条")
+            raise AssertionError(f"等待 {count} 条事件超时，只到了 {len(self.events)} 条")
         with self._lock:
             return list(self.events)
 
+    def wait_for_tool(self, count: int, timeout: float = 10.0) -> list[ToolEvent]:
+        """等到攒够 `count` 条终态事件。返回当时的快照。"""
+        with self._arrived:
+            ok = self._arrived.wait_for(
+                lambda: sum(1 for _ in _tool_events(self.events)) >= count, timeout=timeout
+            )
+        if not ok:
+            raise AssertionError(
+                f"等待 {count} 条终态事件超时，只到了 {len(self.tool_events())} 条"
+            )
+        return self.tool_events()
+
+    def wait_for_permission(
+        self, type_: str, count: int = 1, timeout: float = 5.0
+    ) -> list[PermissionEvent]:
+        """等到攒够 `count` 条某类型的审批事件。返回当时的快照。"""
+        with self._arrived:
+            ok = self._arrived.wait_for(
+                lambda: sum(1 for _ in _matching(self.events, type_)) >= count,
+                timeout=timeout,
+            )
+        if not ok:
+            raise AssertionError(f"等 {count} 条 {type_} 事件超时")
+        return self.permission_of_type(type_)
+
+    def permission_of_type(self, type_: str) -> list[PermissionEvent]:
+        with self._lock:
+            return list(_matching(self.events, type_))
+
+    def tool_events(self) -> list[ToolEvent]:
+        with self._lock:
+            return list(_tool_events(self.events))
+
+    def permission_events(self) -> list[PermissionEvent]:
+        with self._lock:
+            return [event for event in self.events if isinstance(event, PermissionEvent)]
+
     def outcomes(self) -> dict[str, str]:
         with self._lock:
-            return {event.invocation_id: event.outcome for event in self.events}
+            return {event.invocation_id: event.outcome for event in _tool_events(self.events)}
 
 
 class MemoryPermissionStore(PermissionStore):
@@ -201,44 +252,6 @@ def _record_key(record: PermissionRecord) -> tuple[str, str, str]:
     return (record.scope.user_id, record.scope.session_id, record.invocation_id)
 
 
-class RecordingPermissionSink(PermissionEventSink):
-    """记录全部审批事件，可选在投递时抛错。
-
-    事件是跨线程投递的，所以等待靠闸门（`Condition`）而不是轮询 —— 等的是
-    「事件真的到了」这个事实，不是一个时长猜出来的窗口。
-    """
-
-    def __init__(self, fail: bool = False) -> None:
-        self.events: list[PermissionEvent] = []
-        self.fail = fail
-        self._lock = threading.Lock()
-        self._arrived = threading.Condition(self._lock)
-
-    def emit(self, event: PermissionEvent) -> None:
-        if self.fail:
-            raise RuntimeError("投递失败（测试）")
-        with self._arrived:
-            self.events.append(event)
-            self._arrived.notify_all()
-
-    def of_type(self, type_: str) -> list[PermissionEvent]:
-        with self._lock:
-            return [event for event in self.events if event.type == type_]
-
-    def wait_for_type(
-        self, type_: str, count: int = 1, timeout: float = 5.0
-    ) -> list[PermissionEvent]:
-        """等到攒够 `count` 条某类型的审批事件。返回当时的快照。"""
-        with self._arrived:
-            ok = self._arrived.wait_for(
-                lambda: sum(1 for e in self.events if e.type == type_) >= count,
-                timeout=timeout,
-            )
-        if not ok:
-            raise AssertionError(f"等 {count} 条 {type_} 事件超时")
-        return self.of_type(type_)
-
-
 class VerdictPolicy(PermissionPolicy):
     """按工具名给判定值，默认值给没列出的工具。记录每次被问过什么。"""
 
@@ -270,14 +283,14 @@ def permission_manager(
     policy: PermissionPolicy | None = None,
     *,
     store: PermissionStore | None = None,
-    sink: PermissionEventSink | None = None,
+    sink: AgentEventSink | None = None,
     ttl_seconds: float = DEFAULT_TTL_SECONDS,
 ) -> PermissionManager:
     """装配一个 `PermissionManager`。默认内存存储 + 记录型 sink。"""
     return PermissionManager(
         store if store is not None else MemoryPermissionStore(),
         policy if policy is not None else VerdictPolicy(),
-        sink if sink is not None else RecordingPermissionSink(),
+        sink if sink is not None else RecordingSink(),
         ttl_seconds=ttl_seconds,
     )
 
@@ -317,7 +330,6 @@ __all__ = [
     "GatedTool",
     "MemoryPermissionStore",
     "RaisingTool",
-    "RecordingPermissionSink",
     "RecordingSink",
     "StaticTool",
     "VerdictPolicy",

@@ -35,7 +35,7 @@ from core.protocol.datatype import (
 from core.protocol.datatype.permission import PermissionVerdict
 from core.protocol.datatype.scope import Scope
 from core.protocol.error import PermissionDeniedError, PermissionError
-from core.protocol.interface import PermissionEventSink, PermissionPolicy
+from core.protocol.interface import AgentEventSink, PermissionPolicy
 from core.tool.permission.store import PermissionStore
 from core.utils.encoding import JsonObject, utc_now_iso
 
@@ -74,7 +74,7 @@ class PermissionManager:
         self,
         store: PermissionStore,
         policy: PermissionPolicy,
-        sink: PermissionEventSink,
+        sink: AgentEventSink,
         *,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
     ) -> None:

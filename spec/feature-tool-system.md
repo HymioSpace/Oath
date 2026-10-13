@@ -61,7 +61,7 @@ agent 要动手就得调工具。LLM 只会返回「要调哪个工具、传什�
   `PermissionChecker` 删除，被 `PermissionPolicy` 取代。`PermissionEvent` 与
   `PermissionRecord` 跨仓库消费，字段变更按破坏性变更处理。跨仓库影响：客户端 trace
   视图会看到新的 `outcome: awaiting_approval`；Hymio 侧的 biz 要提供
-  `PermissionPolicy` 与 `PermissionEventSink` 的实现，否则 runtime 装不起来。
+  `PermissionPolicy` 与 `AgentEventSink` 的实现，否则 runtime 装不起来。
 - 代码布局：`core/tool/`（机制，其中 `core/tool/permission/` 是权限环节）
   + `extensions/tools/`（业务工具）。
 
@@ -259,12 +259,7 @@ class ToolEvent:
 并由测试逐条验证。sink 拿到事件可以直接 `journal.append(type=EventType.TOOL_RESULT,
 payload=event.payload, idempotency_key=event.idempotency_key)`，不用翻译。
 
-投递接口：
-
-```python
-class ToolEventSink(ABC):
-    def emit(self, event: ToolEvent) -> None: ...
-```
+投递接口是**系统层面的那一个**（见「事件投递口」），不是工具系统独占的。
 
 `emit` 抛错 = 这条事件没送出去，对应执行的状态转 `OUTCOME_UNKNOWN`。sink 是同步调用：
 投递失败必须当场知道，静默吞掉会把执行结果丢在内存里。
@@ -362,8 +357,28 @@ class PermissionStore(ABC):
   它存不存在。
 - 业务状态不在这儿 —— 那是 journal 的事。这个存储记的是运行时协调状态。
 
-`PermissionEventSink(ABC).emit(event)` 与 `ToolEventSink` 同形但分开定义：两条事件
-流的消费方不同（工具终态给 agent runtime，审批事件给外部审批通道）。
+审批事件走系统层面那一个投递口（见「事件投递口」），不另开一个。
+
+### 事件投递口
+
+```python
+class AgentEventSink(ABC):
+    def emit(self, event: AgentEvent) -> None: ...
+```
+
+**系统层面只有一个 sink。** 工具终态与审批事件是同一件事的两头 —— `tool.result`
+给 agent runtime 接着往下走，`permission.requested` 给外部审批通道，
+`permission.resolved` 回到 agent。分成两个投递口只会让实现方写两份几乎一样的代码，
+而下游拿到的事件流还是同一条。
+
+`AgentEvent` 是所有事件的基类，只承载所有事件都有的那几个字段（`type` / `scope` /
+两个调用标识 / `tool` / `payload` / `idempotency_key` / `occur_dt`）。**基类一改，
+所有已发出去的事件形状就都变了**，所以新增事件类型时加子类（`ToolEvent` /
+`PermissionEvent`），不要往基类上加字段。
+
+投递是同步的，`emit` 抛错必须当场知道：工具系统据此把状态转成 `OUTCOME_UNKNOWN`，
+权限系统直接把错误抛给发起派发的那一方。实现内部可以排队、可以重试，但**失败信号
+必须同步传回** —— core 用它判断「对方到底知不知道这件事发生过」。
 
 ### 异常
 
@@ -399,8 +414,10 @@ core/protocol/datatype/tool.py    ToolDefinition / ToolCallRequest / ToolResult 
 core/protocol/datatype/permission.py   PermissionVerdict / PermissionStatus /
                                        PermissionEventType / PermissionEvent /
                                        PermissionRecord / PermissionRecordDict
-core/protocol/interface/tool.py   Tool / ToolSystem / ToolEventSink
-core/protocol/interface/permission.py  PermissionPolicy / PermissionEventSink
+core/protocol/datatype/event.py   AgentEvent（所有事件的基类）
+core/protocol/interface/event.py  AgentEventSink（系统层面唯一的投递口）
+core/protocol/interface/tool.py   Tool / ToolSystem
+core/protocol/interface/permission.py  PermissionPolicy
 core/protocol/error.py            ToolError 及其子类、PermissionError 一族
 core/tool/registry.py             ToolRegistry
 core/tool/impl/threaded_tool_system.py   ThreadedToolSystem
@@ -420,7 +437,7 @@ sequenceDiagram
     participant TS as ThreadedToolSystem
     participant Pool as ThreadPoolExecutor
     participant W as watchdog
-    participant Sink as ToolEventSink
+    participant Sink as AgentEventSink
 
     Caller->>TS: execute(scope, [call, call, call])
     TS->>TS: 逐项：去重 / 权限 / 入参 / 名额
@@ -645,12 +662,13 @@ TTL 是 core 侧策略（构造参数 `ttl_seconds`，默认 300 秒），与 `t
 ## 实施步骤
 
 1. `core/protocol/datatype/tool.py` + `error.py` 增补 —— 契约先立。
-2. `core/protocol/interface/tool.py` —— `Tool` / `ToolSystem` / `ToolEventSink`。
+2. `core/protocol/interface/tool.py` —— `Tool` / `ToolSystem`；
+   `core/protocol/interface/event.py` —— 系统层面唯一的 `AgentEventSink`。
 3. `core/tool/registry.py` —— 注册、去重、汇总排序、定义校验。
 4. `core/tool/impl/threaded_tool_system.py` —— 接纳、线程池、watchdog、状态表、事件。
 5. `extensions/tools/` —— 两个参考工具。
 6. `core/protocol/datatype/permission.py` + `interface/permission.py` + `error.py`
-   —— 权限契约（`PermissionPolicy` / `PermissionEventSink` / `PermissionError`），
+   —— 权限契约（`PermissionPolicy` / `PermissionError`），
    删除 `PermissionChecker`。
 7. `core/tool/permission/store.py` + `impl/jsonl_store.py` —— 审批存储接口与 JSONL 实现。
 8. `core/tool/permission/manager.py` —— 判定、记录、发事件、裁定、过期 watchdog。
@@ -718,7 +736,7 @@ uv run pytest tests/ -m "" -q
 
 无数据迁移：审批记录不跨版本读，`permissions.jsonl` 的 schema 只有 v1。
 
-**破坏性变更**，四处，都在同一个 PR 内：
+**破坏性变更**，五处，都在同一个 PR 内：
 
 1. `ToolOutcome` 新增一个取值 `awaiting_approval`，并入 `ToolStatus.OUTCOMES`。下游
    读到不认识的值应当按未知值处理（不要当成 `succeeded`），Hymio 与客户端需要在本 PR
@@ -726,9 +744,12 @@ uv run pytest tests/ -m "" -q
    版本。
 2. `ToolErrorKind` 新增 `permission_error`。显式枚举了错误分类的地方（trace 视图、
    重试判定）要同步。
-3. `ThreadedToolSystem` 的构造签名变了（`PermissionChecker` → `PermissionManager`），
+3. 投递口合并成系统层面的一个：`ToolEventSink` 与 `PermissionEventSink` 都不复存在，
+   由 `AgentEventSink` 取代，`emit` 收的是基类 `AgentEvent`。应用侧原来要实现两个
+   sink，现在实现一个。工具系统与权限管理器注入的是同一个实例。
+4. `ThreadedToolSystem` 的构造签名变了（`PermissionChecker` → `PermissionManager`），
    装配代码同步改；不给权限管理器构造不出来，这是刻意的。
-4. `tool.call` / `tool.result` 的 payload 加 `tool_call_id` 为必填、去掉 `attempt_id`。
+5. `tool.call` / `tool.result` 的 payload 加 `tool_call_id` 为必填、去掉 `attempt_id`。
 
 新增依赖：`jsonschema`（运行时）、`types-jsonschema`（开发）。
 
@@ -743,13 +764,17 @@ uv run pytest tests/ -m "" -q
     `is_valid_tool_name` / `is_valid_invocation_id` / `RESULT_KEY_PREFIX` /
     `MAX_INVOCATION_ID_LENGTH`。
   - `core/protocol/interface/tool.py` —— `Tool`（扩展实现）、`ToolSystem`
-    （调用面）、`ToolEventSink`（投递）。
+    （调用面）。投递口是系统层面的 `AgentEventSink`。
+  - `core/protocol/datatype/event.py`（新增）—— `AgentEvent`，工具终态与审批事件的
+    共同基类。
+  - `core/protocol/interface/event.py`（新增）—— `AgentEventSink`，系统层面唯一的
+    投递口，取代原先分开的 `ToolEventSink` / `PermissionEventSink`。
   - `core/protocol/datatype/permission.py` —— `PermissionVerdict` /
     `PermissionStatus` / `PermissionEventType` / `PermissionRecordType` /
     `PermissionRecordDict` / `PermissionEvent` / `PermissionRecord` /
     `expired()`（只用于展示的墙钟判断）。
   - `core/protocol/interface/permission.py` —— `PermissionPolicy` /
-    `PermissionEventSink`。
+    `AgentEventSink`。
   - `core/protocol/error.py` —— `ToolError` 及其子类，与 `JournalError` 平级；
     新增 `PermissionError` / `PermissionStoreError`，`PermissionDeniedError` 的
     语义收窄为「判定为拒绝」。
@@ -812,7 +837,7 @@ uv run pytest tests/ -m "" -q
     `tool_call_id`，重新派发时 `_replay_verdict` 会放行）。
   - 审批存储是单进程单写者的 JSONL 文件。多进程部署（例如审批回调走独立服务）需要
     换成有并发控制的实现 —— 接口已经立好了，换实现只动 `impl/`。
-  - `PermissionPolicy` 与 `PermissionEventSink` 没有参考实现（它们是应用侧的东西）。
+  - `PermissionPolicy` 与 `AgentEventSink` 没有参考实现（它们是应用侧的东西）。
     runtime 装配层接上之前，这里只有测试夹具里的假实现。
   - 没有内置工具、没有联网工具、没有重试，理由见「待决事项与参考」。
 

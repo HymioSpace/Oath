@@ -6,7 +6,9 @@
   迁移、没有投递 —— 这些一律 core 自己做，不给扩展留「权限扩展」「调度扩展」
   这类位置。
 - `ToolSystem` 掌握生命周期：定义汇总、批量派发、状态查询。
-- `ToolEventSink` 是投递口，投递失败由实现抛错，core 据此判定结果未知。
+- 终态事件从这里出去，但投递口不归这一层 —— 系统只有一个
+  `AgentEventSink`（见 `core/protocol/interface/event.py`），权限的审批事件走
+  同一个口。投递失败由实现抛错，core 据此判定结果未知。
 - 权限不在这里。判定是三值的（allow / deny / ask），带审批流与有效期，
   是独立的一套机制，见 `core/protocol/interface/permission.py`。
 """
@@ -21,7 +23,6 @@ from core.protocol.datatype import (
     Scope,
     ToolCallRequest,
     ToolDefinition,
-    ToolEvent,
     ToolExecution,
     ToolInvocation,
     ToolResult,
@@ -51,17 +52,6 @@ class Tool(ABC):
         拿它给自己要发的 I/O 设更短的内部超时即可；core 到点就不再等待。
         """
         ...
-
-
-class ToolEventSink(ABC):
-    """终态事件的投递口。
-
-    同步调用，投递失败必须当场抛错 —— 静默吞掉会把执行结果丢在内存里，而调用方
-    永远不会知道有这么一次调用。
-    """
-
-    @abstractmethod
-    def emit(self, event: ToolEvent) -> None: ...
 
 
 class ToolSystem(ABC):
@@ -112,4 +102,4 @@ class ToolSystem(ABC):
         ...
 
 
-__all__ = ["Tool", "ToolEventSink", "ToolSystem"]
+__all__ = ["Tool", "ToolSystem"]

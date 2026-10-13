@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final, NotRequired, TypedDict
 
+from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.scope import Scope
 from core.utils.encoding import JsonObject, parse_timestamp, utc_now_iso
 
@@ -105,22 +106,15 @@ class PermissionRecordDict(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
-class PermissionEvent:
+class PermissionEvent(AgentEvent):
     """审批请求，或它的裁定结果。
 
     `payload` 逐字段对齐落盘记录的 payload，所以投递到存储时可以直接 append，
     不需要翻译。字段变更按破坏性变更处理。
     """
 
-    type: str
-    scope: Scope
-    tool_call_id: str
-    invocation_id: str
-    tool: str
+    #: 审批状态，取值见 `PermissionStatus`。
     status: str
-    payload: JsonObject
-    idempotency_key: str
-    occur_dt: str
 
     def to_dict(self) -> JsonObject:
         return {
