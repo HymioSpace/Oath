@@ -7,7 +7,6 @@ from collections.abc import Callable, Sequence
 import pytest
 
 from core.agent import AgentBrain
-from core.context import ContextManager
 from core.protocol.datatype import AgentEvent, Cursor, CursorKind, EventType, Record, Scope
 from core.protocol.datatype.config import AgentConfig, ModelProviderConfig
 from core.protocol.datatype.llm import LlmRequest, LlmResponse, LlmToolCall
@@ -19,6 +18,7 @@ from core.protocol.datatype.tool import (
 )
 from core.protocol.error import LlmError
 from core.protocol.interface import AgentEventSink, DeltaSink, Journal, ModelProvider, ToolSystem
+from tests._support.agent_fixtures import agent_ctx
 
 # --------------------------------------------------------------------------
 # 替身
@@ -113,9 +113,8 @@ def _brain(
         system_prompt=system_prompt,
         provider=ModelProviderConfig(model="m1", api_base="http://x", api_key_env="TEST_KEY"),
     )
-    return AgentBrain(
-        journal, tools, ContextManager(journal, config), provider, config, sink, id_gen=_ids()
-    )
+    ctx = agent_ctx(journal, sink=sink, tools=tools, config=config)
+    return AgentBrain(ctx, provider, id_gen=_ids())
 
 
 def _types(journal: Journal, scope: Scope) -> list[str]:

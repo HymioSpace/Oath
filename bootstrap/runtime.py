@@ -28,6 +28,7 @@ from core.protocol.interface.intake import Intake, SessionAuthenticator, Session
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.tool import Tool, ToolSystem
 from core.queue import InMemoryEventQueue
+from core.runtime import AgentContext
 from core.tool.impl import ThreadedToolSystem
 from core.tool.permission import PermissionManager
 from core.tool.permission.impl import FilePermissionStore
@@ -90,37 +91,40 @@ class Runtime:
         self.authenticator = TokenAuthenticator(config.credentials)
 
         data_root = config.data_root
+        # 关停要调 `close`，而 `Journal` 接口上没有这个方法 —— 那是具体实现的
+        # 生命周期，装配层握着自己造出来的那个对象。
         self.journal = FileJournal(data_root / "journal")
-        self.queue = InMemoryEventQueue()
+        queue = InMemoryEventQueue()
         self.hub = OutboundHub(loop, send_queue_size=config.server.send_queue_size)
         outbound: AgentEventSink = WsEventSink(self.hub)
         # 工具系统的终态事件从工作线程来，没人替它落盘 —— 这一层补上，
         # 顺带把它放回 tool 队列，下一次 step 才接得上。brain 发的事件原样穿过。
-        self.sink: AgentEventSink = ToolResultRouter(self.journal, self.queue, outbound)
+        sink: AgentEventSink = ToolResultRouter(self.journal, queue, outbound)
 
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         for tool in tools or []:
             registry.register(tool)
-        self.tool_system: ToolSystem = ThreadedToolSystem(
+        tool_system: ToolSystem = ThreadedToolSystem(
             registry,
-            self.sink,
+            sink,
             PermissionManager(
                 FilePermissionStore(data_root / "permissions"),
                 AllowAllPolicy(),
-                self.sink,
+                sink,
             ),
         )
 
-        self.context = ContextManager(self.journal, config.agent, compressor=NullCompressor())
-        self.brain: Brain = AgentBrain(
-            self.journal,
-            self.tool_system,
-            self.context,
-            OpenAICompatibleProvider(config.agent.provider),
-            config.agent,
-            self.sink,
+        # 共享基础设施收口成一份。各组件按自己的需要从这里取，不用各自接一遍。
+        self.ctx = AgentContext(
+            journal=self.journal,
+            queue=queue,
+            sink=sink,
+            tools=tool_system,
+            context_manager=ContextManager(self.journal, config.agent, compressor=NullCompressor()),
+            config=config.agent,
         )
-        self.intake: Intake = JournalIntake(self.journal, self.queue, self.brain, TypeRouter())
+        self.brain: Brain = AgentBrain(self.ctx, OpenAICompatibleProvider(config.agent.provider))
+        self.intake: Intake = JournalIntake(self.ctx, self.brain, TypeRouter())
         self._workers: dict[Scope, SessionWorker] = {}
         self._workers_lock = threading.Lock()
 
@@ -157,7 +161,7 @@ class Runtime:
         for worker in workers:
             worker.thread.join(timeout=2.0)
         self.intake.close(wait=True)
-        self.tool_system.shutdown(wait=True)
+        self.ctx.tools.shutdown(wait=True)
         self.hub.shutdown()
         self.journal.close()
 

@@ -14,18 +14,14 @@ import itertools
 import threading
 from collections.abc import Callable
 
-from core.context.manager import ContextManager
-from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.journal import EventType, Record
 from core.protocol.datatype.llm import LlmRequest
 from core.protocol.datatype.message import MessageEvent, MessageEventType, ToolCallRef
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolCallRequest
 from core.protocol.interface.brain import Brain
-from core.protocol.interface.event import AgentEventSink
-from core.protocol.interface.journal import Journal
 from core.protocol.interface.llm import DeltaSink, ModelProvider
-from core.protocol.interface.tool import ToolSystem
+from core.runtime import AgentContext
 from core.utils.encoding import JsonObject, utc_now_iso
 
 #: `tool.call` 幂等键的前缀。
@@ -56,21 +52,13 @@ class AgentBrain(Brain):
 
     def __init__(
         self,
-        journal: Journal,
-        tools: ToolSystem,
-        context: ContextManager,
+        ctx: AgentContext,
         provider: ModelProvider,
-        config: AgentConfig,
-        sink: AgentEventSink,
         *,
         id_gen: Callable[[], str] | None = None,
     ) -> None:
-        self._journal = journal
-        self._tools = tools
-        self._context = context
+        self._ctx = ctx
         self._provider = provider
-        self._config = config
-        self._sink = sink
         # id 源是注入的：测试要能定住它，否则幂等键每次都不一样，
         # 「重放不写新行」这条根本验不了。
         self._next_id = id_gen or _default_id_gen()
@@ -99,15 +87,15 @@ class AgentBrain(Brain):
         self._record_step(scope, step_id, "end")
 
     def _think(self, scope: Scope, step_id: str) -> None:
-        context = self._context.build(scope, self._tools.definitions())
+        context = self._ctx.context_manager.build(scope, self._ctx.tools.definitions())
         response = self._provider.complete(
             LlmRequest(
                 messages=context.messages,
                 tools=context.tools,
-                model=self._config.provider.model,
-                max_output_tokens=self._config.max_output_tokens,
-                temperature=self._config.temperature,
-                extra_params=self._config.provider.extra_params,
+                model=self._ctx.config.provider.model,
+                max_output_tokens=self._ctx.config.max_output_tokens,
+                temperature=self._ctx.config.temperature,
+                extra_params=self._ctx.config.provider.extra_params,
             ),
             on_delta=self._delta_sink(scope, step_id),
         )
@@ -119,7 +107,7 @@ class AgentBrain(Brain):
             scope, step_id, response.content, response.reasoning, refs, response.usage
         )
         if refs:
-            self._tools.execute(scope, self._append_tool_calls(scope, refs))
+            self._ctx.tools.execute(scope, self._append_tool_calls(scope, refs))
 
     def _delta_sink(self, scope: Scope, step_id: str) -> DeltaSink:
         """把一段增量变成一条 `assistant.delta` 事件。
@@ -173,11 +161,11 @@ class AgentBrain(Brain):
             payload["tool_calls"] = [ref.to_dict() for ref in refs]
         if usage:
             payload["usage"] = dict(usage)
-        if self._config.provider.model:
-            payload["model"] = self._config.provider.model
+        if self._ctx.config.provider.model:
+            payload["model"] = self._ctx.config.provider.model
 
         key = f"msg:{step_id}"
-        self._journal.append(
+        self._ctx.journal.append(
             scope,
             EventType.ASSISTANT_MESSAGE,
             payload,
@@ -212,7 +200,7 @@ class AgentBrain(Brain):
                 "arguments": ref.arguments,
             }
             key = f"{TOOL_CALL_KEY_PREFIX}{invocation_id}"
-            self._journal.append(
+            self._ctx.journal.append(
                 scope, EventType.TOOL_CALL, payload, payload_schema_version=1, idempotency_key=key
             )
             self._emit(
@@ -242,7 +230,7 @@ class AgentBrain(Brain):
 
         它是审计记录，不投递给客户端：消费方是 trace 视图，不是 agent 的对端。
         """
-        self._journal.append(
+        self._ctx.journal.append(
             scope,
             EventType.SYSTEM_AGENT_STEP,
             {"step_id": step_id, "phase": phase},
@@ -254,7 +242,7 @@ class AgentBrain(Brain):
 
     def _emit(self, event: MessageEvent) -> None:
         try:
-            self._sink.emit(event)
+            self._ctx.sink.emit(event)
         except Exception:
             # 送不出去就算了 —— 事件已经落盘，对话不会缺，只是客户端没看见。
             # 这一版不重试：重试只会反复失败。工具系统的终态事件不是这样处理的，

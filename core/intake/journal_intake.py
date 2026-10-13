@@ -23,8 +23,7 @@ from core.protocol.interface.intake import (
     RoutingDecision,
     SessionAuthenticator,
 )
-from core.protocol.interface.journal import Journal
-from core.protocol.interface.queue import EventQueue
+from core.runtime import AgentContext
 from core.utils.encoding import JsonObject, utc_now_iso
 
 #: command 落盘时的幂等键前缀。挂上 command id：同一个 command 重发是重放，
@@ -58,13 +57,11 @@ class JournalIntake(Intake):
 
     def __init__(
         self,
-        journal: Journal,
-        queue: EventQueue,
+        ctx: AgentContext,
         brain: Brain,
         router: EventRouter,
     ) -> None:
-        self._journal = journal
-        self._queue = queue
+        self._ctx = ctx
         self._brain = brain
         self._router = router
 
@@ -109,11 +106,11 @@ class JournalIntake(Intake):
         文件。payload 与键是刚写进去的那一份，`commit_dt` 用本地的时刻 —— 队列只读
         `type` 与 `payload`，不参与任何判定。
         """
-        result = self._journal.append(
+        result = self._ctx.journal.append(
             scope, type_, payload, payload_schema_version=1, idempotency_key=key
         )
         record = Record.of(result.cursor, _raw(scope, type_, payload, key))
-        self._queue.put(scope, record)
+        self._ctx.queue.put(scope, record)
         return record
 
     # -- 消费 --------------------------------------------------------------
@@ -126,7 +123,7 @@ class JournalIntake(Intake):
         """
         handled = False
         for queue in QUEUE_ORDER:
-            record = self._queue.get(scope, queue, timeout=0)
+            record = self._ctx.queue.get(scope, queue, timeout=0)
             if record is None:
                 continue
             handled = True
@@ -152,7 +149,7 @@ class JournalIntake(Intake):
         if record.type != EventType.SYSTEM_CANCEL:
             return
         run_id = str(record.payload.get("run_id", ""))
-        self._journal.append(
+        self._ctx.journal.append(
             scope,
             EventType.SYSTEM_AGENT_STEP,
             {"step_id": run_id, "phase": "cancelled"},
@@ -161,10 +158,10 @@ class JournalIntake(Intake):
         )
 
     def wait(self, scope: Scope, *, timeout: float | None = None) -> bool:
-        return self._queue.wait(scope, timeout=timeout)
+        return self._ctx.queue.wait(scope, timeout=timeout)
 
     def close(self, *, wait: bool = True) -> None:
-        self._queue.close(wait=wait)
+        self._ctx.queue.close(wait=wait)
         self._brain.close(wait=wait)
 
 

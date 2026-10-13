@@ -12,6 +12,7 @@ from core.protocol.error import WireProtocolError
 from core.protocol.interface import EventQueue, Journal
 from core.protocol.interface.intake import RoutingDecision, SessionAuthenticator, SessionIdentity
 from core.utils.encoding import JsonValue, utc_now_iso
+from tests._support.agent_fixtures import agent_ctx
 
 # --------------------------------------------------------------------------
 # 替身
@@ -78,7 +79,8 @@ def _command(type_: str, cid: str, session_id: str | None = "s1", **payload: Jso
 def _intake(journal: Journal) -> tuple[JournalIntake, _FakeQueue, _Brain]:
     queue = _FakeQueue()
     brain = _Brain()
-    return JournalIntake(journal, queue, brain, TypeRouter()), queue, brain  # type: ignore[arg-type]
+    ctx = agent_ctx(journal, queue=queue)
+    return JournalIntake(ctx, brain, TypeRouter()), queue, brain  # type: ignore[arg-type]
 
 
 def _types(journal: Journal, scope: Scope) -> list[str]:
