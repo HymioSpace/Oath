@@ -9,7 +9,6 @@ from __future__ import annotations
 from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
-from core.protocol.datatype.feed import QUEUE_TYPES, FeedName, belongs_to
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -38,6 +37,7 @@ from core.protocol.datatype.permission import (
     PermissionVerdict,
     expired,
 )
+from core.protocol.datatype.queue import INPUT_QUEUE, QueueName, queue_of
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
@@ -76,7 +76,7 @@ __all__ = [
     "MAX_INVOCATION_ID_LENGTH",
     "COMMAND_SCHEMAS",
     "PAYLOAD_SCHEMAS",
-    "QUEUE_TYPES",
+    "INPUT_QUEUE",
     "RESULT_KEY_PREFIX",
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
@@ -93,7 +93,7 @@ __all__ = [
     "EventFrame",
     "EventRecord",
     "EventType",
-    "FeedName",
+    "QueueName",
     "FrameType",
     "Message",
     "PayloadSchema",
@@ -124,7 +124,7 @@ __all__ = [
     "ToolResult",
     "ToolStatus",
     "WireVersion",
-    "belongs_to",
+    "queue_of",
     "expired",
     "is_valid_invocation_id",
     "is_valid_scope_id",

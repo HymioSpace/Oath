@@ -97,12 +97,12 @@ class ToolExecutionError(ToolError):
     """
 
 
-class FeedError(ProtocolError):
-    """feed 的全部失败。与 `JournalError` 平级。"""
+class QueueError(ProtocolError):
+    """队列的全部失败。与 `JournalError` 平级。"""
 
 
-class UnknownFeedError(FeedError):
-    """feed 名字不认识。
+class UnknownQueueError(QueueError):
+    """队列名不认识。
 
     与「读到一条不认识 type 的记录」不同：那种情况只是没命中，静默跳过就够；
     名字不认识是调用方的 bug，要当场暴露。
@@ -125,7 +125,7 @@ __all__ = [
     "ArgumentValidationError",
     "CorruptRecordError",
     "CursorError",
-    "FeedError",
+    "QueueError",
     "IdempotencyKeyConflict",
     "JournalError",
     "PayloadSchemaError",
@@ -140,7 +140,7 @@ __all__ = [
     "ToolNotFoundError",
     "ToolRegistrationError",
     "ToolRequestError",
-    "UnknownFeedError",
+    "UnknownQueueError",
     "ValidationError",
     "WireProtocolError",
 ]

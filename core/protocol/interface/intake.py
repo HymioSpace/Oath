@@ -1,15 +1,14 @@
 """`Intake` —— 系统里唯一的入口。
 
-两条通路，都只跟 journal 打交道：
+一条通路，顺序固定：**先落 journal，再入队，消费时才做决策。**
 
-- **入站**：接收 command 落进 journal。它到这一步就结束 —— 一条记录落盘时不带任何
-  调度结论，也不回什么给传输层：连接本身可靠有序，落盘这件事由它引发的下一个事件
-  作证。
-- **消费**：从三条队列取记录，逐条问 `EventRouter` 走规则还是走 `Brain`，然后推进游标。
+- **入站**：接收 command，append 进 journal，把落好的记录扔进它该在的那条队列。落盘
+  在排队之前 —— 队列里不会有没写进日志的东西。
+- **消费**：从队列取出记录，逐条问 `EventRouter` 走规则还是走 `Brain`。
 
-**它没有外部副作用。** append 按 command id 幂等，崩在中途不会留下半吊子的状态 ——
-已 commit 的记录不再来，没 commit 的下次重来。所以游标由它推进：`Brain.step` 返回之后
-才算处理完，返回之后再崩就是重复调模型。
+**入队就是全部的缓冲。** 队列取出即出队，没有位置要推进。崩溃时队列清空，里面没处理
+过的记录还留在 journal 里 —— 真相在 journal，不在队列；那些记录要靠上层决定重启后怎么
+办。
 
 它不解析帧。socket、握手、JSON 解码是传输层的事，传输解析出 `Command` 再交给这里；
 core 不管自己怎么被连上来的。
@@ -27,7 +26,7 @@ from core.protocol.datatype.wire import Command
 
 
 class RoutingDecision:
-    """一条队列记录取出之后归谁处理。"""
+    """一条记录出队之后归谁处理。"""
 
     #: 交给 `Brain`：这是 agent 该回应的输入。
     TO_BRAIN: Final = "to_brain"
@@ -84,22 +83,22 @@ class Intake(ABC):
 
     @abstractmethod
     def handle(self, command: Command, scope: Scope) -> None:
-        """落一条 command。
+        """落一条 command 并入队。
 
-        返回即代表已持久化；抛错表示没落成。有些 command 不产生记录（`ping`），
-        那不算错。
+        返回即代表已持久化；抛错表示没落成，调用方不得回执成功。有些 command 不产生
+        记录（`ping`），那不算错。
         """
         ...
 
     @abstractmethod
     def poll(self, scope: Scope) -> bool:
-        """把这个 scope 三条队列里可读的记录取出来，逐条处理掉。
+        """把这个 scope 三条队列里的记录取出来，逐条处理掉。
 
         每条记录问一次 `EventRouter`：`TO_BRAIN` 交给 `Brain.step`，`BY_RULE` 由 core
-        自己处理。处理完一条 commit 一条。
+        自己处理。
 
         返回 True 表示至少处理了一条。**返回 False 不代表出错**：队列空就是队列空。
-        处理途中崩了，下次会重来 —— `Intake` 没有副作用。
+        崩了不会丢 —— 出队前记录已经在 journal 里。
         """
         ...
 
@@ -107,7 +106,7 @@ class Intake(ABC):
     def wait(self, scope: Scope, *, timeout: float | None = None) -> bool:
         """等到有可读记录再 `poll`。超时返回 False。
 
-        空转轮询 journal 是浪费 IO，也是把「有没有事做」与「谁负责等」搞混。
+        空转轮询是浪费 CPU，也是把「有没有事做」与「谁负责等」搞混。
         """
         ...
 
@@ -115,7 +114,7 @@ class Intake(ABC):
     def close(self, *, wait: bool = True) -> None:
         """停机。`wait=False` 不等正在跑的 `poll` 返回。
 
-        停机不写任何「收尾」记录：没处理的输入在 journal 里，下次起来还在。
+        停机不写任何「收尾」记录：队列里剩下的还在 journal 里。
         """
         ...
 

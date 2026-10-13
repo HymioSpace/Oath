@@ -20,7 +20,7 @@ core/journal/    独立追加日志模块，供所有模块统一写入和读取
 core/journal/impl/  存储后端（v1 为 JSONL）
 core/tool/       工具系统：注册表、批量并行派发、执行状态、终态事件
 core/tool/impl/  执行后端（v1 为线程池）
-core/feed/       队列：journal 之上的游标视图（user / tool / system）
+core/queue/      三条内部队列（user / tool / system）
 extensions/      业务扩展：业务 tool、业务 skill、额外 context 来源
 extensions/tools/  业务工具实现（`Tool` 接口的参考实现）
 bootstrap/       装配与入口：读配置、实例化、注入 CoreRuntime
@@ -91,7 +91,7 @@ flowchart TD
 
 ## 事件通路
 
-三条内部队列（`user` / `tool` / `system`）是同一个东西的三种用法：journal 之上的游标 + type 过滤 + 往前推，所以只实现一个 `EventFeed` 加一张映射表。**队列只装输入，不装输出** —— `assistant.message`、`tool.call` 进 journal 但不进任何队列。
+三条内部队列（`user` / `tool` / `system`）是同一个东西的三种用法，只有 type 过滤不同，所以只有一个 `EventQueue` 加一张映射表。命令先落 journal 再入队，取出时才决定走规则还是走 agent。**队列只装输入，不装输出** —— `assistant.message`、`tool.call` 进 journal 但不进任何队列。
 
 对外投递**不是队列，也不经过 journal**：`AgentEventSink` 在事件产生时直推客户端，断了不补发。落 journal 是 Oath 的状态（agent 当输入用），推客户端是通知 —— 两次独立调用。对外是一条双向 WebSocket，`user_id` 由服务端从 credential 推导，客户端不能自称。详见 [feature-event-runtime](feature-event-runtime.md)。
 
