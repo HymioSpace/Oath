@@ -9,7 +9,7 @@ from __future__ import annotations
 from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
-from core.protocol.datatype.feed import CLIENT_FACING, QUEUE_TYPES, FeedName, belongs_to
+from core.protocol.datatype.feed import QUEUE_TYPES, FeedName, belongs_to
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -74,7 +74,6 @@ __all__ = [
     "PERMISSION_REQUESTED_KEY_PREFIX",
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "MAX_INVOCATION_ID_LENGTH",
-    "CLIENT_FACING",
     "COMMAND_SCHEMAS",
     "PAYLOAD_SCHEMAS",
     "QUEUE_TYPES",

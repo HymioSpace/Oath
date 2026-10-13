@@ -15,6 +15,10 @@ ack / pong / error / close）。加一个 command 是破坏性变更：老客户
 用户身份**不在上行帧里**。`user_id` 由服务端从 `credential` 推导，客户端不能自称：
 隔离键一旦能被调用方伪造，越权读就不是漏洞而是默认行为（同一理由见 journal 的
 `ScopeError`）。
+
+下行是**活的投递**，不是 journal 的转发：`event` 帧不带游标，断线期间发生的事件不补发。
+客户端自己就是它已渲染内容的存储方，让 oath 拿 journal 当消息总线只会把投递能力绑死在
+日志扫描上。
 """
 
 from __future__ import annotations
@@ -23,8 +27,8 @@ from dataclasses import dataclass
 from typing import Final
 
 from core.protocol.datatype.cursor import Cursor
-from core.protocol.datatype.journal import PayloadSchema, Record
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.event import AgentEvent
+from core.protocol.datatype.journal import PayloadSchema
 from core.protocol.error import WireProtocolError
 from core.utils.encoding import JsonObject, JsonValue
 
@@ -42,7 +46,7 @@ class FrameType:
     两套命名空间不重叠，一个字段就能表达「这是什么」，不需要先判方向再判种类。
     """
 
-    #: oath → 客户端。一条 journal 记录。
+    #: oath → 客户端。一条事件。
     EVENT: Final = "event"
     #: oath → 客户端。command 收到了。`id` 回指。
     ACK: Final = "ack"
@@ -104,10 +108,7 @@ class CloseReason:
 #:
 #: 未知字段报错而不是忽略：客户端拼错 key 时静默忽略会得到「成功但什么也没发生」。
 COMMAND_SCHEMAS: Final[dict[str, PayloadSchema]] = {
-    CommandType.SESSION_OPEN: PayloadSchema(
-        required=frozenset({"credential"}),
-        optional=frozenset({"resume_after"}),
-    ),
+    CommandType.SESSION_OPEN: PayloadSchema(required=frozenset({"credential"})),
     CommandType.USER_MESSAGE: PayloadSchema(required=frozenset({"content"})),
     CommandType.PERMISSION_DECIDE: PayloadSchema(
         required=frozenset({"invocation_id", "status"}),
@@ -179,35 +180,27 @@ class Command:
             out["session_id"] = self.session_id
         return out
 
-    def cursor(self, key: str) -> Cursor | None:
-        """从 payload 里取一个可选游标字段，取不到返回 None。"""
-        raw = self.payload.get(key)
-        if raw is None:
-            return None
-        try:
-            return Cursor.from_json(raw)
-        except ValueError as exc:
-            raise WireProtocolError(str(exc), code="bad_payload") from exc
-
 
 @dataclass(frozen=True, slots=True)
 class EventFrame:
-    """下发给客户端的一条 journal 记录。"""
+    """下发给客户端的一条事件。
+
+    活的投递，不是 journal 记录的转发 —— 所以这里没有游标：客户端断线期间发生的
+    事件不会补发。
+    """
 
     session_id: str
-    cursor: Cursor
-    record_type: str
+    event_type: str
     occur_dt: str | None
     payload: JsonObject
 
     @classmethod
-    def of(cls, scope: Scope, record: Record) -> EventFrame:
+    def of(cls, event: AgentEvent) -> EventFrame:
         return cls(
-            session_id=scope.session_id,
-            cursor=record.cursor,
-            record_type=record.type,
-            occur_dt=record.occur_dt,
-            payload=record.payload,
+            session_id=event.scope.session_id,
+            event_type=event.type,
+            occur_dt=event.occur_dt,
+            payload=event.payload,
         )
 
     def to_json(self) -> JsonObject:
@@ -215,9 +208,8 @@ class EventFrame:
             "v": WireVersion.CURRENT,
             "type": FrameType.EVENT,
             "session_id": self.session_id,
-            "cursor": self.cursor.to_json(),
             "occur_dt": self.occur_dt,
-            "record_type": self.record_type,
+            "event_type": self.event_type,
             "payload": self.payload,
         }
 
@@ -225,9 +217,9 @@ class EventFrame:
 def ack(command_id: str, cursor: Cursor | None = None) -> JsonObject:
     """command 收到了，**并且已经落盘**。
 
-    `cursor` 是刚落的那条记录的位置。客户端发 `user.message` 时已经知道自己发了什么，
-    需要的是「它落在哪儿」—— 断线重连带的就是这个游标，所以游标走 ack 而不是把
-    客户端自己的记录再推一遍。
+    `cursor` 是刚落的那条记录在 journal 里的位置 —— Oath 自己的记账位置。客户端发
+    `user.message` 时已经知道自己发了什么，要的是「它落在哪儿」：这句 ack 说的就是
+    「进了 journal，跑不掉」，所以 ack 不落 journal，它就是传输层的一帧。
     """
     frame: JsonObject = {"v": WireVersion.CURRENT, "type": FrameType.ACK, "id": command_id}
     if cursor is not None:

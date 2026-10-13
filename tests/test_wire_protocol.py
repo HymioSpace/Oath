@@ -7,13 +7,11 @@ from __future__ import annotations
 
 import pytest
 
-from core.journal.impl import FileJournal
 from core.protocol.datatype import (
+    AgentEvent,
     CloseReason,
     Command,
     CommandType,
-    Cursor,
-    CursorKind,
     EventFrame,
     EventType,
     FrameType,
@@ -37,6 +35,19 @@ def _frame(**over: JsonValue) -> JsonObject:
     return frame
 
 
+def _event(scope: Scope) -> AgentEvent:
+    return AgentEvent(
+        type=EventType.TOOL_RESULT,
+        scope=scope,
+        tool_call_id="t-1",
+        invocation_id="i-1",
+        tool="weather",
+        payload={"tool_call_id": "t-1", "outcome": "completed"},
+        idempotency_key="tool.result:i-1",
+        occur_dt="2026-10-13T08:31:04Z",
+    )
+
+
 # --------------------------------------------------------------------------
 # 正常路径
 # --------------------------------------------------------------------------
@@ -56,63 +67,44 @@ def test_session_open_carries_no_session_id() -> None:
             "v": WireVersion.CURRENT,
             "type": CommandType.SESSION_OPEN,
             "id": "c-0",
-            "payload": {
-                "credential": "token-1",
-                "resume_after": {"kind": CursorKind.LINE, "value": 12},
-            },
+            "payload": {"credential": "token-1"},
         }
     )
 
     assert command.type == CommandType.SESSION_OPEN
     assert command.session_id is None
-    assert command.cursor("resume_after") == Cursor(CursorKind.LINE, 12)
-    assert command.cursor("nope") is None
 
 
-def test_resume_after_must_be_a_cursor() -> None:
-    command = Command.parse(
-        {
-            "v": 1,
-            "type": CommandType.SESSION_OPEN,
-            "id": "c-0",
-            "payload": {"credential": "t", "resume_after": {"kind": "line", "value": -1}},
-        }
-    )
-
+def test_session_open_takes_no_resume_cursor() -> None:
+    """对外流是活的投递，断线期间的事件不补发 —— 没有可续的位置。"""
     with pytest.raises(WireProtocolError) as exc:
-        command.cursor("resume_after")
+        Command.parse(
+            {
+                "v": WireVersion.CURRENT,
+                "type": CommandType.SESSION_OPEN,
+                "id": "c-0",
+                "payload": {"credential": "t", "resume_after": {"kind": "line", "value": 12}},
+            }
+        )
     assert exc.value.code == "bad_payload"
 
 
-def test_event_frame_is_built_from_a_record(scope: Scope, journal: FileJournal) -> None:
-    appended = journal.append(
-        scope,
-        EventType.USER_MESSAGE,
-        {"content": "hi"},
-        payload_schema_version=1,
-        idempotency_key="u1",
-    )
-    record = next(journal.read_range(scope, Cursor(CursorKind.LINE, 0)))
-    frame = EventFrame.of(scope, record).to_json()
-    cursor = frame["cursor"]
-    assert isinstance(cursor, dict)
-    assert cursor["value"] == appended.cursor.value
-    assert frame["payload"] == {"content": "hi"}
+def test_event_frame_is_built_from_an_event(scope: Scope) -> None:
+    frame = EventFrame.of(_event(scope)).to_json()
+
+    assert frame["session_id"] == scope.session_id
+    assert frame["event_type"] == EventType.TOOL_RESULT
+    assert frame["occur_dt"] == "2026-10-13T08:31:04Z"
+    assert frame["payload"] == {"tool_call_id": "t-1", "outcome": "completed"}
 
 
-def test_event_frame_shape(scope: Scope) -> None:
-    frame = EventFrame(
-        session_id="s1",
-        cursor=Cursor(CursorKind.LINE, 7),
-        record_type=EventType.USER_MESSAGE,
-        occur_dt="2026-10-13T08:31:04Z",
-        payload={"content": "hi"},
-    ).to_json()
+def test_event_frame_carries_no_cursor(scope: Scope) -> None:
+    """event 是活的投递，不是 journal 记录的转发。帧里不该有位置。"""
+    frame = EventFrame.of(_event(scope)).to_json()
 
-    assert frame["v"] == WireVersion.CURRENT
+    assert "cursor" not in frame
     assert frame["type"] == FrameType.EVENT
-    assert frame["cursor"] == {"kind": CursorKind.LINE, "value": 7}
-    assert frame["record_type"] == EventType.USER_MESSAGE
+    assert frame["v"] == WireVersion.CURRENT
 
 
 # --------------------------------------------------------------------------

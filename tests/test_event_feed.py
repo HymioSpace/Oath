@@ -1,30 +1,24 @@
-"""`EventFeed` 与对外 event 流。
+"""`EventFeed` —— journal 上的三条内部队列。
 
-重点是三条容易被写错的规则：不推进位置、跳过不属于自己的记录、以及推不动就断开
-而不是阻塞。
+重点是两条容易被写错的规则：不推进位置、跳过不属于自己的记录。
 """
 
 from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Iterator
 
 import pytest
 
 from core.feed import JournalEventFeed
 from core.journal.impl import FileJournal
-from core.outbound import OutboundStream
 from core.protocol.datatype import (
-    CloseReason,
     Cursor,
     CursorKind,
     EventType,
     Scope,
 )
 from core.protocol.error import CursorError, UnknownFeedError
-from core.protocol.interface.transport import OutboundTransport, SendResult
-from core.utils.encoding import JsonObject
 
 # --------------------------------------------------------------------------
 # 夹具
@@ -218,134 +212,3 @@ def test_wait_only_returns_once_per_wake(feed: JournalEventFeed, scope: Scope) -
     thread.start()
     thread.join()
     assert result == [False]
-
-
-# --------------------------------------------------------------------------
-# 对外 event 流
-# --------------------------------------------------------------------------
-
-
-class _FakeTransport(OutboundTransport):
-    def __init__(self, *, accept_until: int | None = None) -> None:
-        self.sent: list[tuple[Scope, JsonObject]] = []
-        self.closed: list[tuple[Scope, str]] = []
-        self._accept_until = accept_until
-        self._lock = threading.Lock()
-        self.delivered = threading.Event()
-
-    def send(self, scope: Scope, frame: JsonObject) -> SendResult:
-        with self._lock:
-            if self._accept_until is not None and len(self.sent) >= self._accept_until:
-                return SendResult.QUEUE_FULL
-            self.sent.append((scope, frame))
-            if len(self.sent) >= (self._accept_until or 1):
-                self.delivered.set()
-        return SendResult.ACCEPTED
-
-    def close(self, scope: Scope, reason: str, message: str = "") -> None:
-        self.closed.append((scope, reason))
-
-    def types(self) -> list[str]:
-        return [str(f["record_type"]) for _, f in self.sent]
-
-
-@pytest.fixture
-def transport() -> _FakeTransport:
-    return _FakeTransport()
-
-
-@pytest.fixture
-def stream(journal: FileJournal, transport: _FakeTransport) -> Iterator[OutboundStream]:
-    s = OutboundStream(journal, transport=transport, poll_interval=0.02)
-    yield s
-    s.close()
-
-
-def test_stream_skips_records_the_client_already_has(
-    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
-) -> None:
-    """`user.message` 是客户端自己发的，回声对它没有信息量。"""
-    _append_user(journal, scope, "u1")
-    _append_step(journal, scope, "s1")
-
-    stream.subscribe(scope)
-    stream.wake()
-
-    assert transport.delivered.wait(5.0)
-    assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
-
-
-def test_stream_pushes_in_cursor_order(
-    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
-) -> None:
-    _append_user(journal, scope, "u1")
-    _append_step(journal, scope, "s1")
-    _append_user(journal, scope, "u2", "second")
-    _append_step(journal, scope, "s2")
-
-    stream.subscribe(scope)
-    stream.wake()
-
-    assert transport.delivered.wait(5.0)
-    assert transport.types() == [EventType.SYSTEM_AGENT_STEP, EventType.SYSTEM_AGENT_STEP]
-
-
-def test_stream_resumes_from_client_cursor(
-    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
-) -> None:
-    first = _append_step(journal, scope, "s1")
-    _append_step(journal, scope, "s2")
-
-    stream.subscribe(scope, resume_after=first)
-    stream.wake()
-
-    assert transport.delivered.wait(5.0)
-    assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
-
-
-def test_stream_drops_slow_consumer(journal: FileJournal, scope: Scope) -> None:
-    transport = _FakeTransport(accept_until=2)
-    stream = OutboundStream(journal, transport=transport, poll_interval=0.02)
-    for i in range(4):
-        _append_step(journal, scope, f"s{i}")
-
-    stream.subscribe(scope)
-    stream.wake()
-    time.sleep(0.3)
-
-    assert transport.closed == [(scope, CloseReason.SLOW_CONSUMER)]
-    assert stream.subscriptions() == ()
-    stream.close()
-
-
-def test_stream_advances_past_records_it_does_not_send(
-    journal: FileJournal, scope: Scope, stream: OutboundStream, transport: _FakeTransport
-) -> None:
-    """不推进的话，一批全是 `user.message` 的行会让 poll 空转到读完为止。"""
-    for i in range(300):
-        _append_user(journal, scope, f"u{i}")
-    _append_step(journal, scope, "s1")
-
-    stream.subscribe(scope)
-    stream.wake()
-
-    assert transport.delivered.wait(5.0)
-    assert transport.types() == [EventType.SYSTEM_AGENT_STEP]
-    assert stream.subscriptions()[0].cursor.value >= 256
-
-
-def test_stream_forgets_dead_connection(journal: FileJournal, scope: Scope) -> None:
-    class _Dead(_FakeTransport):
-        def send(self, scope: Scope, frame: JsonObject) -> SendResult:
-            return SendResult.NO_CONNECTION
-
-    transport = _Dead()
-    stream = OutboundStream(journal, transport=transport, poll_interval=0.02)
-    _append_step(journal, scope, "s1")
-    stream.subscribe(scope)
-    stream.wake()
-    time.sleep(0.3)
-
-    assert stream.subscriptions() == ()
-    assert transport.closed == []  # 连接本来就是断的，不用再断一次
-    stream.close()
