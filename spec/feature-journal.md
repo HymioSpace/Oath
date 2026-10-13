@@ -8,7 +8,7 @@ Oath 长期运行，两条硬约束：**durable** 与 **event-driven**。影响�
 effect intent、结果与状态迁移必须先落盘再 ACK；恢复时只重建状态，不重做外部副作用。
 
 两条都压在一个模块上：**journal 是唯一状态来源**。broker、快照、索引、trace 视图都是
-可从它恢复的派生设施。agent、工具、队列、Supervisor、biz、扩展各自直接写 journal，
+从它恢复出来的 derived 设施。agent、工具、队列、Supervisor、biz、扩展各自直接写 journal，
 不经主 agent 转发。
 
 本 feature 定义：追加日志的**记录格式**（跨仓库 wire 契约，语言无关）、agent state 的
@@ -31,7 +31,7 @@ journal 不反向依赖任何层。
 
 ## 总览
 
-一句话：**写进去的记录 fsync 之后必可读；恢复按游标水位线切出「已知状态」与「待处理
+一句话：**写进去的记录 fsync 之后必可读；恢复按游标watermark切出「已知状态」与「待处理
 事件」，重放是纯函数，不重做副作用。**
 
 ```mermaid
@@ -40,9 +40,9 @@ flowchart TD
     F -->|成功| IDX[更新幂等索引，返回游标]
     F -->|失败| ERR[抛错，上层不 ACK]
 
-    R[recover: 全量扫描 events + 读 state 尾部] --> C[水位线 = state.cursor_end]
-    C --> M[messages: cursor ≤ 水位线的投影]
-    C --> P[pending: 水位线之后的记录]
+    R[recover: 全量扫描 events + 读 state 尾部] --> C[watermark = state.cursor_end]
+    C --> M[messages: cursor ≤ watermark的投影]
+    C --> P[pending: watermark之后的记录]
     M --> X[调用方: fold(state, pending) → 最新 state<br/>纯函数，无副作用]
     P --> X
 ```
@@ -50,7 +50,7 @@ flowchart TD
 五条贯穿全文的规则：
 
 1. **只追加，不改不删。** 失效的东西追加新记录说明它失效了。
-2. **水位线是游标，不是时间戳。** 墙钟会回拨、会撞精度，做水位线会静默丢数据。
+2. **watermark是游标，不是时间戳。** 墙钟会回拨、会撞精度，做watermark会静默丢数据。
    `occur_dt` / `commit_dt` 只用于展示与排查。
 3. **`append` 返回成功 ⇒ 已 fsync。** 这是唯一的耐久性承诺，也是全部其他保证的根。
 4. **journal 不解释业务语义。** fold 是调用方的纯函数：不调工具、不调 LLM、不产生
@@ -66,7 +66,7 @@ flowchart TD
 | 3 | 游标单调递增；`recover` / `read_range` 拒绝本实现不支持的 kind |
 | 4 | 幂等键在 scope 内唯一；同键同指纹返回原记录，同键异指纹抛错 |
 | 5 | `append` 返回成功后记录已持久化，重启必可读 |
-| 6 | `Recovery` 的 `state.cursor_end` 与 `messages` 对齐同一个水位线，不重复一份 |
+| 6 | `Recovery` 的 `state.cursor_end` 与 `messages` 对齐同一个watermark，不重复一份 |
 | 7 | scope 校验先于任何文件路径拼接 |
 | 8 | 记录内的 `user_id` / `session_id` 必须与所在文件代表的 scope 一致 |
 | 9 | fold 是纯函数，无外部副作用 |
@@ -96,7 +96,7 @@ flowchart TD
 `user_id` / `session_id` 在每行里冗余存在，即使文件已按 scope 分目录 —— 不变量 8 靠它
 成立：分文件写错、文件被手工搬过、路径拼接出错，都会被挡住，而不是变成静默的越权读。
 
-**行编码**必须钉死：键按字典序、无多余空白、UTF-8、非 ASCII 不转义、`\n` 结尾。幂等
+**行编码**必须固定：键按字典序、无多余空白、UTF-8、非 ASCII 不转义、`\n` 结尾。幂等
 指纹要哈希 payload，跨语言必须能生成逐字节一致的记录。
 
 ### type 集合（v1）
@@ -154,11 +154,11 @@ class AgentState:
 ```
 
 一个游标 =「在某个 scope 的日志里定位到某条记录的位置」，`kind` 标明由哪种实现盖章：
-`line` 是物理行号（1-based，`value=0` 是合法值，表示「第一条记录之前」，空日志的水位线
+`line` 是物理行号（1-based，`value=0` 是合法值，表示「第一条记录之前」，空日志的watermark
 就是它），`id` 是自增 id。不同后端的游标不可互换，`kind` 的生成与解析归实现。
 
-**为什么不用 `commit_dt` 做水位线。** 「取 `commit_dt > state.commit_dt` 的记录」有三条
-静默丢数据的路径：同一时间戳精度内的边界那条被漏掉或重复折叠；NTP 校正让墙钟倒退 →
+**为什么不用 `commit_dt` 做watermark。** 「取 `commit_dt > state.commit_dt` 的记录」有三条
+静默丢数据的路径：同一时间戳精度内的边界那条被漏掉或重复 fold；NTP 校正让墙钟倒退 →
 后写的记录比快照还小 → 永久丢失；「写快照」与「写事件」是两次独立 append，中间崩溃 →
 两者相对顺序不确定。
 
@@ -220,7 +220,7 @@ messages = recovery.messages + project_messages(recovery.pending)
 journal.commit_state(state)                                 # 下次 recover 更快
 ```
 
-**journal 不折叠 pending。** fold 需要知道「`tool.result` 的 outcome 如何改变 agent
+**journal 不 fold pending。** fold 需要知道「`tool.result` 的 outcome 如何改变 agent
 state」，那是 agent runtime 的业务语义。
 
 ### messages 投影规则
@@ -291,7 +291,7 @@ fold 是纯函数（不变量 9）。
 已知缺口：
 
 - **恢复是 O(总记录数) 的全量扫描。** 快照省的是 state 的重算，不省日志扫描 ——
-  messages 要从头投影。后续可在快照里附带 messages 水位线来避免全量扫。
+  messages 要从头投影。后续可在快照里附带 messages watermark来避免全量扫。
 - **JSONL 只支持单进程单写者。** 多进程同时写一个 session 的文件会产生交错写，
   实现不加文件锁 —— 不支持的场景不假装支持。
 - **幂等索引常驻内存**，与事件条数线性相关。长时间运行的大 session 有内存压力。

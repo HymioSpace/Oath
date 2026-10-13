@@ -154,7 +154,7 @@ result，而 context 是 append-only 的。所以「正在等待批准」当场�
 执行表，待审批两者都不占；审批状态查 `PermissionManager`。
 
 审批记录（`PermissionRecord`）含 `arguments` / `status` / `expires_dt` / `decided_by` /
-`reason`，存的是**判权限时看到的那份参数** —— 批注的人要看的就是它们。
+`reason`，存的是**判权限时看到的那份参数** —— 审批的人要看的就是它们。
 
 `PermissionStore`（`record` / `resolve` / `get` / `pending`）只保证**当前状态**、
 **裁定只生效一次**、**跨 scope 查不到**。
@@ -163,7 +163,7 @@ result，而 context 是 append-only 的。所以「正在等待批准」当场�
 
 接纳顺序固定为 **去重 → 工具存在 → 权限 → 入参 → 名额**：先便宜的、再判定性的，最后
 才占稀缺资源。权限排在入参前面 —— 它问的是「这个主体能不能调这个工具」，拿不合法参数
-去问没有意义，还可能把参数泄给不该看它的策略实现。接纳阶段判完的失败不进线程池。
+去问没有意义，还可能把参数泄露给不该看它的策略实现。接纳阶段判完的失败不进线程池。
 
 执行在 `ThreadPoolExecutor` 里跑；超时由独立的 watchdog 线程判，不占用 worker。
 
@@ -191,8 +191,8 @@ Python 没有安全的线程终止手段，强杀会让 `finally` 不跑、锁�
 2. 已有记录 → 回放上次结果。
 3. 调策略。抛异常 → `PermissionDeniedError`（fail closed）；返回未约定的值 →
    `PermissionError`（接口违约，不能猜）。
-4. `ask` → 落记录 → 压堆 → **当场发** `permission.requested`。一个等人批的请求没被告知
-   出去就永远等不到。先压堆再发事件是刻意的：投递方可能同步回一个裁定，那时 watchdog
+4. `ask` → 落记录 → 压进 deadline 堆 → **当场发** `permission.requested`。一个等人批的请求没被告知
+   出去就永远等不到。先压进堆再发事件是刻意的：投递方可能同步回一个裁定，那时 watchdog
    醒来必须已经看到这条请求不再需要管，否则会拿过期裁定盖掉人的同意。
 
 **重发**同一个 `invocation_id` 不重新问策略，回放记录：`approved → allow`、`pending →
@@ -235,7 +235,7 @@ Hymio / Nostalgia / 客户端要跟着改的三处：
 1. `ToolOutcome` 新增 `awaiting_approval`。下游读到不认识的值应按未知值处理，不要当成
    `succeeded`。
 2. `ToolErrorKind` 新增 `permission_error`，与 `permission_denied` 分开：前者「判定为
-   拒绝」，后者「这一步没能完成」。两者都折成该项被拒不往外抛。
+   拒绝」，后者「这一步没能完成」。两者都收敛成该项被拒不往外抛。
 3. `tool.call` / `tool.result` 的 payload 加 `tool_call_id` 为必填。
 
 投递口只有一个 `AgentEventSink`（`emit` 收基类 `AgentEvent`），应用侧实现一个就够。
