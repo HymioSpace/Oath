@@ -34,7 +34,7 @@ from core.protocol.error import (
     ValidationError,
 )
 from core.protocol.interface import Journal
-from core.utils.encoding import JsonObject
+from core.utils.encoding import JsonObject, JsonValue
 
 # --------------------------------------------------------------------------
 # 夹具级工具
@@ -70,12 +70,17 @@ def user_msg(journal: Journal, scope: Scope, n: int, content: str | None = None)
 
 
 def assistant_msg(
-    journal: Journal, scope: Scope, key: str, *, reasoning: str | None = "想了想"
+    journal: Journal,
+    scope: Scope,
+    key: str,
+    *,
+    reasoning: str | None = "想了想",
+    tool_calls: list[JsonValue] | None = None,
 ) -> Cursor:
     result = journal.append(
         scope,
         EventType.ASSISTANT_MESSAGE,
-        {"content": "好的", "reasoning": reasoning},
+        {"content": "好的", "reasoning": reasoning, "tool_calls": tool_calls},
         payload_schema_version=1,
         idempotency_key=key,
     )
@@ -88,13 +93,24 @@ def tool_round(
     invocation_id: str,
     *,
     outcome: str = ToolOutcome.SUCCEEDED,
-    attempt: int = 1,
+    revision: int = 1,
     content: str = "结果",
 ) -> tuple[Cursor, Cursor]:
+    """写一组 `tool.call` / `tool.result`。
+
+    `tool_call_id` 是模型 API 返回的值，形态由 provider 决定；`invocation_id` 是
+    Oath 自己的调用 id。两者刻意取不同的形状，测试才能看出投影用的是哪一个。
+    """
+    tool_call_id = f"toolu_{invocation_id}"
     call = journal.append(
         scope,
         EventType.TOOL_CALL,
-        {"invocation_id": invocation_id, "tool": "search", "arguments": {"q": "x"}},
+        {
+            "tool_call_id": tool_call_id,
+            "invocation_id": invocation_id,
+            "tool": "search",
+            "arguments": {"q": "x"},
+        },
         payload_schema_version=1,
         idempotency_key=f"call-{invocation_id}",
     )
@@ -102,13 +118,13 @@ def tool_round(
         scope,
         EventType.TOOL_RESULT,
         {
+            "tool_call_id": tool_call_id,
             "invocation_id": invocation_id,
-            "attempt_id": f"{invocation_id}#{attempt}",
             "outcome": outcome,
             "content": content,
         },
         payload_schema_version=1,
-        idempotency_key=f"result-{invocation_id}-{attempt}",
+        idempotency_key=f"result-{invocation_id}-{revision}",
     )
     return call.cursor, result.cursor
 
@@ -283,14 +299,66 @@ def test_tool_call_and_result_project_to_one_tool_message(journal: Journal, scop
     snapshot_through(journal, scope, result)
     messages = journal.recover(scope).messages
     assert [m.role for m in messages] == ["assistant", "tool"]
-    assert messages[1].extra["tool_call_id"] == "inv-1"
+    # 模型给的 id，不是 Oath 自己的调用 id。
+    assert messages[1].extra["tool_call_id"] == "toolu_inv-1"
 
 
-def test_tool_retry_keeps_only_the_final_attempt(journal: Journal, scope: Scope) -> None:
+def test_tool_message_pairs_with_the_models_tool_call(journal: Journal, scope: Scope) -> None:
+    """整条链路的核心不变量：assistant 轮里模型留下的 `tool_calls[i].id`，
+    必须和后面 tool 消息的 `tool_call_id` 逐字节相同。"""
+
+    model_id = "toolu_01AbC-xY9"
+    assistant_msg(
+        journal,
+        scope,
+        "a",
+        tool_calls=[{"id": model_id, "name": "search", "arguments": {"q": "x"}}],
+    )
+    journal.append(
+        scope,
+        EventType.TOOL_CALL,
+        {
+            "tool_call_id": model_id,
+            "invocation_id": "inv-77",
+            "tool": "search",
+            "arguments": {"q": "x"},
+        },
+        payload_schema_version=1,
+        idempotency_key="call-inv-77",
+    )
+    result = journal.append(
+        scope,
+        EventType.TOOL_RESULT,
+        {
+            "tool_call_id": model_id,
+            "invocation_id": "inv-77",
+            "outcome": ToolOutcome.SUCCEEDED,
+            "content": "命中 12 处",
+        },
+        payload_schema_version=1,
+        idempotency_key="result-inv-77",
+    )
+    snapshot_through(journal, scope, result.cursor)
+
+    messages = journal.recover(scope).messages
+    assistant, tool = messages[0], messages[1]
+    calls = assistant.extra["tool_calls"]
+    assert isinstance(calls, list)
+    assert calls[0]["id"] == tool.extra["tool_call_id"] == model_id
+    # 配对靠 `invocation_id`，但它不进对话历史 —— 模型不认这个字段。
+    assert tool.extra["tool_call_id"] != "inv-77"
+
+
+def test_the_final_result_wins_for_one_invocation(journal: Journal, scope: Scope) -> None:
+    """同一个 `invocation_id` 上出了多条结果时，投影只留最后一条。
+
+    配对靠 `invocation_id`，所以多次结果填同一个位置；对话里不会堆出多条 tool 消息。"""
     assistant_msg(journal, scope, "a")
-    tool_round(journal, scope, "inv-1", outcome=ToolOutcome.FAILED, attempt=1, content="第一次失败")
+    tool_round(
+        journal, scope, "inv-1", outcome=ToolOutcome.FAILED, revision=1, content="第一次失败"
+    )
     _, result = tool_round(
-        journal, scope, "inv-1", outcome=ToolOutcome.SUCCEEDED, attempt=2, content="第二次成功"
+        journal, scope, "inv-1", outcome=ToolOutcome.SUCCEEDED, revision=2, content="第二次成功"
     )
     snapshot_through(journal, scope, result)
     messages = journal.recover(scope).messages
@@ -304,7 +372,12 @@ def test_unresolved_tool_call_is_surfaced_not_dropped(journal: Journal, scope: S
     journal.append(
         scope,
         EventType.TOOL_CALL,
-        {"invocation_id": "inv-9", "tool": "search", "arguments": {}},
+        {
+            "tool_call_id": "toolu_inv-9",
+            "invocation_id": "inv-9",
+            "tool": "search",
+            "arguments": {},
+        },
         payload_schema_version=1,
         idempotency_key="call-9",
     )
@@ -316,6 +389,8 @@ def test_unresolved_tool_call_is_surfaced_not_dropped(journal: Journal, scope: S
     # 交给任何 provider 都是坏的。
     assert messages[-1].role == "tool"
     assert messages[-1].extra["unresolved"] is True
+    # 空结果也得报出模型那个 id —— 否则补结果时无从配对。
+    assert messages[-1].extra["tool_call_id"] == "toolu_inv-9"
 
 
 def test_reasoning_is_persisted_and_projected(journal: Journal, scope: Scope) -> None:
@@ -401,7 +476,7 @@ def test_missing_required_payload_field_raises(journal: Journal, scope: Scope) -
         journal.append(
             scope,
             EventType.TOOL_RESULT,
-            {"invocation_id": "x", "attempt_id": "y"},  # 缺 outcome
+            {"tool_call_id": "a", "invocation_id": "x"},  # 缺 outcome
             payload_schema_version=1,
             idempotency_key="k",
         )
@@ -412,7 +487,7 @@ def test_invalid_outcome_raises(journal: Journal, scope: Scope) -> None:
         journal.append(
             scope,
             EventType.TOOL_RESULT,
-            {"invocation_id": "x", "attempt_id": "y", "outcome": "maybe"},
+            {"tool_call_id": "a", "invocation_id": "x", "outcome": "maybe"},
             payload_schema_version=1,
             idempotency_key="k",
         )

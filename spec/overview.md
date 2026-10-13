@@ -18,7 +18,10 @@ core/protocol/   契约：datatype 与 interface。跨仓库消费，纯数据�
 core/utils/      工具：编码与时间处理，与 protocol 同级，不构成契约
 core/journal/    独立追加日志模块，供所有模块统一写入和读取
 core/journal/impl/  存储后端（v1 为 JSONL）
+core/tool/       工具系统：注册表、批量并行派发、执行状态、终态事件
+core/tool/impl/  执行后端（v1 为线程池）
 extensions/      业务扩展：业务 tool、业务 skill、额外 context 来源
+extensions/tools/  业务工具实现（`Tool` 接口的参考实现）
 bootstrap/       装配与入口：读配置、实例化、注入 CoreRuntime
 biz/             runtime 操作、状态和 trace 查询
 spec/            整体架构、feature 实现方案、决策与验收条件
@@ -32,7 +35,7 @@ core 自带落盘 journal，所以这条判据对 durability 没有任何让步�
 
 core 不禁止第三方库：需要什么就 import 什么，装在 `pyproject.toml` 里。
 
-目前只有 journal 有代码，其余目录等有对应实现再填。
+目前 journal 与工具系统有代码，其余目录等有对应实现再填。
 
 ## 运行链路
 
@@ -54,17 +57,18 @@ flowchart TD
     Views --> Biz[Management API]
 ```
 
-队列是持久化事件的投递视图，不要求一开始部署三个消息中间件。唯一业务状态来源是 journal；broker、快照、索引都是可恢复的派生设施。事件决定下一步，不以显式的 `while true → model → tools` 驱动 agent；队列消费器内部使用循环不违背这一约束。
+队列是持久化事件的投递视图，不要求一开始部署三个消息中间件。唯一业务状态来源是 journal；broker、快照、索引都是从 journal 恢复出来的 derived 设施。事件决定下一步，不以显式的 `while true → model → tools` 驱动 agent；队列消费器内部使用循环不违背这一约束。
 
 ## 执行单元
 
 - `user_id`：第一层隔离；`session_id`：用户内第二层隔离与串行化边界。所有资源以 `(user_id, session_id)` 定位，同名 session 不得跨用户混用。
-- `run_id`：session 内每次运行的稳定标识，用于关联输入、模型请求、工具、日志与 trace。恢复同一次运行保留 run_id；新运行分配新 run_id，重试用 attempt_id 区分。run 不是第三层权限隔离。
+- `run_id`：session 内每次运行的稳定标识，用于关联输入、模型请求、工具、日志与 trace。恢复同一次运行保留 run_id；新运行分配新 run_id。run 不是第三层权限隔离。
 - `step_id`：一次固定 context / 配置下的模型请求及后处理。
-- `invocation_id`：一次逻辑工具调用；`attempt_id`：其中一次实际尝试。
-- `epoch`：会话 owner 的 fencing 代数；`cursor`：journal 内定位一条日志记录的位置（JSONL 为行号，MySQL 为自增 id），在同一 scope 内严格单调递增，是状态快照的水位线；`state_version`：仅执行状态提交递增的版本，用于并发控制。
+- `tool_call_id`：模型 API 返回的工具调用标识，组对话历史时原样透传，assistant 轮的 `tool_calls[i].id` 与 tool 消息的 `tool_call_id` 必须逐字节相同。
+- `invocation_id`：Oath 自己的一次逻辑工具调用标识。工具状态查询的键，也是 `tool.call` 与 `tool.result` 的配对键；不作为查询键使用时它就是日志里的一个关联 id。
+- `epoch`：会话 owner 的 fencing 代数；`cursor`：journal 内定位一条日志记录的位置（JSONL 为行号，MySQL 为自增 id），在同一 scope 内严格单调递增，是状态快照的watermark；`state_version`：仅执行状态提交递增的版本，用于并发控制。
 
-日志记录的顺序由 `cursor` 表达，**不由时间戳表达**。`occur_dt` / `commit_dt` 只用于展示与排查，正确性不依赖它们——墙钟会回拨、会撞精度，做水位线会静默丢数据。详见 [feature-journal](feature-journal.md)。
+日志记录的顺序由 `cursor` 表达，**不由时间戳表达**。`occur_dt` / `commit_dt` 只用于展示与排查，正确性不依赖它们——墙钟会回拨、会撞精度，做watermark会静默丢数据。详见 [feature-journal](feature-journal.md)。
 
 当前不引入部署实例身份作为隔离维度。队列、工具映射、幂等键、快照、lease、查询 cursor 和 blob 引用都继承 user/session scope；user_id 来自认证主体或授权委托，不接受调用方任意伪造。
 
@@ -76,7 +80,13 @@ flowchart TD
 
 `core/protocol/` 单独承载记录格式，因为它是**跨仓库契约**——Hymio 的 biz 查询、客户端的 trace 视图、Nostalgia 都要读它，所以它必须与任何具体存储实现解耦，可以脱离 Python 独立描述。
 
-恢复的水位线是状态快照携带的游标，不是时间戳。快照是全量 KV，恢复时取最后一条完整快照并把游标之后的记录作为 pending 交回调用方折叠；fold 是不产生外部副作用的纯函数，所以重放不会重做工具调用。详见 [feature-journal](feature-journal.md)。
+恢复的watermark是状态快照携带的游标，不是时间戳。快照是全量 KV，恢复时取最后一条完整快照并把游标之后的记录作为 pending 交回调用方 fold；fold 是不产生外部副作用的纯函数，所以重放不会重做工具调用。详见 [feature-journal](feature-journal.md)。
+
+## 工具系统
+
+[core/tool](../core/tool/) 收集 core 与 extensions 的工具定义交给 context，把模型点名的调用派发出去。派发接口**只收批次、一定并行、立即返回执行 id**：同一批里的调用互不依赖，模型线程不能被工具拖住，真正的执行在后台线程池里跑。每个调用跑完或超时，落一条终态事件（`tool.result` payload），事件投递由注入的 sink 完成 —— 队列与消费语义是下一步 feature。
+
+超时是「core 不再等待」而不是「终止线程」：线程跑到哪儿算哪儿，迟到的结果一律丢弃、不改写已发的终态。因此 `TIMEOUT` 的含义是「core 此刻不知道这个工具有没有生效」，能不能重试由上层判断，工具系统不替它决定。执行状态表是内存里的 derived 设施，重启即丢，真相始终是 journal 的记录。详见 [feature-tool-system](feature-tool-system.md)。
 
 ## 三个核心约束
 
@@ -90,4 +100,4 @@ flowchart TD
 
 先完成内存模型与持久化适配器的同一套契约，再做单机 crash recovery；随后独立 Supervisor、biz 查询与多进程 owner failover。HA 依赖具备原子追加和 fencing 能力的共享存储，不能把单机 JSONL 宣称为多机高可用。
 
-详见 [feature 清单](README.md)。语言、存储引擎、模型 SDK、broker、快照频率、租约时长均为待决事项；接口约束先确定。
+详见 [feature-journal](feature-journal.md) 与 [feature-tool-system](feature-tool-system.md)。语言、存储引擎、模型 SDK、broker、快照频率、租约时长均为待决事项；接口约束先确定。

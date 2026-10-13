@@ -51,6 +51,10 @@ class ToolOutcome:
     `OUTCOME_UNKNOWN` 是刻意存在的一支：工具执行过但结果丢了（网络中断、
     进程被杀、对端超时无响应）。这种情况**不能**一律重试 —— 幂等键不保证
     第三方系统去重。journal 只存不判，重试策略属于工具系统。
+
+    `AWAITING_APPROVAL` 也刻意存在：工具**没执行**，因为权限判定要人批。这不是
+    失败 —— 没有东西出错。而它必须是个终态：LLM 的 message 数组里每个
+    tool call 都要配一条 tool result，缺一条这个数组交给任何 provider 都是坏的。
     """
 
     SUCCEEDED: Final = "succeeded"
@@ -58,8 +62,11 @@ class ToolOutcome:
     TIMEOUT: Final = "timeout"
     CANCELLED: Final = "cancelled"
     OUTCOME_UNKNOWN: Final = "outcome_unknown"
+    AWAITING_APPROVAL: Final = "awaiting_approval"
 
-    ALL: Final = frozenset({SUCCEEDED, FAILED, TIMEOUT, CANCELLED, OUTCOME_UNKNOWN})
+    ALL: Final = frozenset(
+        {SUCCEEDED, FAILED, TIMEOUT, CANCELLED, OUTCOME_UNKNOWN, AWAITING_APPROVAL}
+    )
 
 
 class EventRecord(TypedDict):
@@ -131,11 +138,14 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
         required=frozenset({"content", "reasoning"}),
         optional=frozenset({"tool_calls", "model", "usage"}),
     ),
+    # `tool_call_id` 与 `invocation_id` 是两个不同的标识，不是一对别名：
+    # 前者由模型 API 返回、必须原样透传进对话历史，后者是 Oath 自己的调用 id。
+    # 分开存，投影才有办法在多次结果之间挑出终态，同时仍把模型认的那个 id 原样还回去。
     (EventType.TOOL_CALL, 1): PayloadSchema(
-        required=frozenset({"invocation_id", "tool", "arguments"})
+        required=frozenset({"tool_call_id", "invocation_id", "tool", "arguments"})
     ),
     (EventType.TOOL_RESULT, 1): PayloadSchema(
-        required=frozenset({"invocation_id", "attempt_id", "outcome"}),
+        required=frozenset({"tool_call_id", "invocation_id", "outcome"}),
         optional=frozenset({"content", "error"}),
     ),
     (EventType.SYSTEM_AGENT_STEP, 1): PayloadSchema(required=frozenset({"step_id", "phase"})),
