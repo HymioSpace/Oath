@@ -164,7 +164,11 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
         required=frozenset({"tool_call_id", "invocation_id", "outcome"}),
         optional=frozenset({"content", "error"}),
     ),
-    (EventType.SYSTEM_AGENT_STEP, 1): PayloadSchema(required=frozenset({"step_id", "phase"})),
+    # `trigger` 是这一轮被什么唤醒的：没有它，trace 里分不清「用户问了」和「工具回来
+    # 了」，两者的排查方式不一样。
+    (EventType.SYSTEM_AGENT_STEP, 1): PayloadSchema(
+        required=frozenset({"step_id", "phase"}), optional=frozenset({"trigger"})
+    ),
     (EventType.SYSTEM_CANCEL, 1): PayloadSchema(
         required=frozenset({"run_id"}), optional=frozenset({"reason"})
     ),

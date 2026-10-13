@@ -2,8 +2,9 @@
 
 **core 不 import `websockets`。** 这一层是 core 与 socket 之间的桥，两个方向：
 
-- 上行：解析帧 → `Intake.handle` / `open_session`。`handle` 要写文件、要落盘，是阻塞
-  的，所以交给 `asyncio.to_thread`，不占着事件循环。
+- 上行：解析帧 → `Runtime.submit` / `open_session`。两者都是纯内存操作，直接在事件
+  循环里调 —— 不落盘，也就没有要等的写操作。**同一条连接上的多条 command 因此保持
+  顺序**：交给线程池的话，第二条可能比第一条先到队列。
 - 下行：**事件**走 `OutboundHub`（有界队列、有背压）；**控制帧**（ack / pong / error /
   close）直接写在这条连接上 —— 它们是对某一条 command 的回应，跟着那条连接走才对，
   排队没有意义。
@@ -82,9 +83,7 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
                     )
                     return
                 try:
-                    scope = await asyncio.to_thread(
-                        runtime.intake.open_session, command, authenticator=runtime.authenticator
-                    )
+                    scope = runtime.open_session(command)
                 except Exception as exc:
                     await connection.send(
                         canonical_json(close_frame(CloseReason.UNAUTHORIZED, str(exc)))
@@ -116,7 +115,7 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
                 continue
 
             try:
-                await asyncio.to_thread(runtime.intake.handle, command, scope)
+                runtime.submit(command, scope)
             except WireProtocolError as exc:
                 await _fail(connection, command.id, exc)
             except Exception as exc:  # 装配层给不出更细的分类

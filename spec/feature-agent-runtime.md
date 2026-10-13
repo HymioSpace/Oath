@@ -1,78 +1,78 @@
 # Feature — Agent Runtime（让 Oath 跑起来）
 
-状态：Implemented
+状态：Implementing
 
 前置：[feature-journal](feature-journal.md)、[feature-event-runtime](feature-event-runtime.md)、
 [feature-tool-system](feature-tool-system.md)
 
 ## 1 背景与目标
 
-骨架已经齐了：journal 存得住，三条队列排得下，工具系统跑得动，wire 协议说得清。但没有
-一条命令能让它真的动起来 —— `Intake`、`Brain` 都还是接口，事件也送不出去。
+骨架已经齐了：journal 存得住，队列排得下，工具系统跑得动，wire 协议说得清。但没有
+一条通路能让它真的动起来 —— 「一条用户输入」和「一次 `step`」之间该是什么关系，
+从没定清楚。
 
 本 feature 把这几块接上，让 Oath 能接一句用户输入、回一段回答：
 
+- **`Inbound`** —— 还没进对话历史的一件事。
+- **`EventBuffer`** —— 攒批的持久化缓冲，跨过它崩溃就不丢。
+- **`SessionConsumer`** —— 每个 session 一条线程，监听三条队列、判断该不该醒。
+- **`AgentBrain`** —— context build → LLM → 落盘 → 派发工具。
 - **`ContextManager`** —— 把 `AgentState` + journal 投影成一次模型请求要的东西。
-- **`ModelProvider`** —— provider 无关的调用接口，加一个 OpenAI 兼容实现。
 - **`AgentConfig`** —— 一份配置管住模型、system prompt、server、路径。
-- **`AgentBrain`** —— context build → LLM → tool call，让 `Brain` 有实现。
-- **`OutboundHub`** —— 按 scope 分流的有界发送队列，core 与 socket 之间唯一那座桥。
 
-压缩、多轮重试、工具结果的复杂补齐都不在这一版 —— 位置留着，实现不写。
+压缩、多 provider、工具结果的复杂补齐都不在这一版 —— 位置留着，实现不写。
 
 ## 2 总览
 
 ### 2.1 一句话
 
-**一条 `user.message` 走完的全程：入队 → 恢复 context → 调一次模型 → 落
-`assistant.message` → 有 tool call 就落 `tool.call` 并交给工具系统。等待期间模型吐出来的
-增量直推客户端，不落盘。**
+**`Inbound` 先进队列，consumer 攒进 buffer，`AgentBrain.step` 把这一批落进 journal 再
+调一次模型。等待期间模型吐出来的增量直推客户端，不落盘。**
 
-三段分得很清：**`Intake` 负责可靠，`ContextManager` 负责正确，`ModelProvider` 负责格式。**
-core 自己拼的东西都是 provider 无关的（`Message` 用 `role`/`content`，
-`ToolDefinition` 用 `name`/`description`/`input_schema`）；谁的字段名由 provider 适配层
-翻译，core 不沾。
+三段分得很清：**队列管叫醒，buffer 管不丢，brain 管什么算数。**
 
-### 2.2 流程
+### 2.2 数据流向
 
 ```mermaid
 flowchart TD
-    Client[客户端] -->|command| Intake[Intake]
-    Intake -->|append + put| Journal[(journal)]
-    Intake -->|出队 + 路由| Brain[AgentBrain.step]
-    Brain -->|build| CM[ContextManager]
+    Client[客户端] -->|command| Q1
+    Tools[工具系统] -->|终态事件| Q2
+    Super[Supervisor] -->|invoke| Q3
+    Q1[user 队列] --> C
+    Q2[tool 队列] --> C
+    Q3[system 队列] --> C
+    C[SessionConsumer<br/>一条线程] -->|wait 醒来| D[三个 buffer]
+    D -->|到点了| B[AgentBrain.step]
+    B -->|落盘| Journal[(journal)]
+    B -->|投影| CM[ContextManager]
     CM -->|recover| Journal
-    Brain -->|LlmRequest| Provider[ModelProvider]
-    Provider -->|provider 请求体| LLM[(模型 API)]
-    LLM -->|响应| Provider
-    Provider -->|LlmResponse| Brain
-    Brain -->|assistant.message / tool.call| Journal
-    Brain -->|emit| Sink[AgentEventSink]
-    Brain -->|execute| Tools[ToolSystem]
-    Tools -->|emit| Router[ToolResultRouter]
-    Router -->|tool.result: append + put| Journal
-    Router --> Sink
+    B -->|LlmRequest| Provider[ModelProvider]
+    Provider -->|响应| B
+    B -->|execute| Tools
+    B -->|emit| Sink[AgentEventSink]
     Sink -->|event 帧| Hub[OutboundHub]
     Hub --> Client
+    Tools -->|emit| Sink
 ```
 
-`ToolResultRouter` 把工具系统的终态事件变成一条记录：先落 journal 再入 tool 队列，最后才推给
-客户端 —— 落盘那条让下一次 `step` 能把它投影进对话，直推那条让客户端立刻看到状态。
+**journal 只由 brain 写。** producer（ws、工具系统、Supervisor）只往队列里放东西。
+「我发起了一个 toolcall」和「我收到了它的结果」都不是 brain 的视角 —— 工具系统知道
+结果，但不知道这一轮是什么。只有 brain 知道，所以也只有 brain 写得动那些记录。
 
 ### 2.3 规则
 
-1. **先落盘，再做下一步。** `assistant.message` 与 `tool.call` 一定先 append 进 journal，再
-   emit / 派发。反过来做就会出现「客户端看到了、journal 里没有」，重放时这段对话凭空消失。
-2. **增量只走客户端，不落盘。** 一段增量在 journal 里是一句半话 —— 落它等于让记录说谎。
-   兜底是完整的 `assistant.message`，那才是这一轮真正说过的话。
-3. **core 不认识任何 provider 的字段名。** `Message` 与 `ToolDefinition` 用通用名；翻译成各家
-   请求格式是 `ModelProvider` 的事。
-4. **模型给的 `tool_call_id` 原样透传。** Oath 不生成、不改写、不解释它 —— 它只是 assistant
-   轮与 tool 消息之间的配对值。`invocation_id` 另由 Oath 生成。
-5. **一次 `step` 只调一次模型。** 模型说该调工具就派发出去，等结果回来由 `tool.result` 触发
-   下一次 `step`。不循环、不等工具 —— 一个工具挂住不会把这一轮卡死。
-6. **压缩是接口不是实现。** `ContextCompressor` 留着位，v1 用不压缩的实现。
-7. **凭证只走环境变量。** 配置里写 `api_key_env`，不写 `api_key`。
+1. **先落盘，再做下一步。** `assistant.message` 与 `tool.call` 一定先 append 进
+   journal，再 emit / 派发。反过来做就会出现「客户端看到了、journal 里没有」。
+2. **队列里的一切都没进对话历史。** 队列与 buffer 装的是「还没算数的事」，落盘是
+   brain 的判断，不是传输层的副作用。
+3. **buffer 是持久化边界。** 一个事实从队列移进 buffer 那一刻起就不再会丢。
+4. **增量只走客户端，不落盘。** 一段增量在 journal 里是一句半话 —— 落它等于让记录
+   说谎。兜底是完整的 `assistant.message`。
+5. **一个 session 一条消费线程。** `brain.step` 跑在那条线程上，阻塞的模型调用只挡住
+   那一条会话。三条 buffer 要读写同一批记录，多线程就是真竞争。
+6. **core 不认识任何 provider 的字段名。** `Message` 与 `ToolDefinition` 用通用名。
+7. **模型给的 `tool_call_id` 原样透传。** Oath 不生成、不改写、不解释它。
+8. **凭证只走环境变量。** 配置里写 `api_key_env`，不写 `api_key`。
 
 ### 2.4 一个完整的例子
 
@@ -81,217 +81,214 @@ flowchart TD
 | # | 发生什么 | journal |
 | --- | --- | --- |
 | 1 | `session.open` 验 credential，回 `ack` | 不落盘 |
-| 2 | `user.message` 落盘，入 user 队列，出队 → `TO_BRAIN` | 41 |
-| 3 | `AgentBrain` 记一步开始 | 42 `system.agent_step{start}` |
+| 2 | `user.message` 进 user 队列，consumer 被叫醒，移进 user buffer | 不落盘 |
+| 3 | `brain.step` 落 user 输入与 `system.agent_step{start, trigger:user}` | 41、42 |
 | 4 | `ContextManager` 把 41 投影成 user 消息，带上工具定义 → provider | — |
 | 5 | 模型说要调 `weather` → 先落盘，再直推客户端 | 43 `assistant.message` |
-| 6 | 每个 tool call 一条记录，然后 `execute()` 派发，立即返回 | 44 `tool.call` |
-| 7 | 工具跑完 → `ToolResultRouter` 落盘 → 入队 → 推客户端 | 45 `tool.result` |
-| 8 | **45 本身是一条输入** → 出队 → `TO_BRAIN` → 第二次 `step` | — |
-| 9 | 最终回答落盘，这一步收尾 | 46 `assistant.message`、47 `system.agent_step{end}` |
+| 6 | 每个 tool call 落一条记录，然后派发出去，立即返回 | 44、45 `tool.call` |
+| 7 | 工具跑完 → 投递客户端 + 进 tool 队列 → consumer 被叫醒 | 不落盘 |
+| 8 | 结果移进 tool buffer；两个都到了才算齐 | 不落盘 |
+| 9 | `brain.step` 落 `tool.result` → 再调一次模型 → 落最终回答 | 46、47、48 |
 
-第 8 步是循环的来源。模型这一轮不再要工具，第 9 步就没有 `tool.call`，队列空下来，这轮就停。
-
-第 5 步必须先落盘：它携带 assistant 轮的 `tool_calls`，投影要按 `invocation_id` 把 `tool.result`
-填回 `tool.call` 占的位置，顺序反了这个槽位就填不上。
+第 9 步是循环的来源。模型这一轮不再要工具，就不会有 `tool.call`，下次没人叫醒，
+这轮就停。
 
 ## 3 接口与数据
 
-### 3.1 `AgentConfig` 与 `OathConfig`
+### 3.1 `Inbound` 与 `EventBuffer`
 
-一份配置管三块：模型、server、路径。全部 frozen dataclass，从 `oath.toml` 读，缺省值
-保证最小可启动。
+`Inbound` 是「还没进对话历史的一件事」：`kind` 是 `user` / `tool_result` / `invoke`，
+`payload` 是它的原样内容。它不是 `Record` —— 还没落盘，没有游标、没有幂等键。
 
+`EventBuffer` 是 consumer 侧的攒批缓冲，三条（user / tool / system），接口只有 scope
+与四个动作：`put` / `snapshot` / `clear` / `scopes`。
+
+**`snapshot` 不删除。** brain 跑完、落完盘，consumer 才 `clear`。中间崩了重启再读到
+同一批，会重跑一次 `step` —— journal 的幂等键（`msg:<step_id>`、`tool.result:<invocation_id>`）
+挡住重复写入。`scopes()` 是重启恢复的入口：起来时把每个 scope 没 clear 的那批捞回来
+直接进判断，不等新的 `put` 来叫醒。
+
+`FileEventBuffer` 是 v1 唯一的实现：per-scope 目录 + append，`O_APPEND | O_CREAT` +
+`fsync`，写失败 `ftruncate` 回 good_size，只丢最后一行。**单进程单写者**这条取舍照抄
+journal —— 多进程下这个存储不成立。
+
+### 3.2 `SessionConsumer`
+
+每个 session 一条线程，起来就 `queue.wait(scope)` 阻塞，谁往这个 scope 的队列 `put`
+就唤醒谁。没有 tick 轮询。
+
+醒来之后：**取光三条队列 → 按 kind 灌进对应 buffer → 把这一批交给 brain → brain 说处理
+完了才 `clear`**。
+
+**该不该醒、该不该清 buffer，全是 brain 说了算**，consumer 一概不判断。醒来之后没有
+「这是什么东西、该送去哪」那一步 —— batch 里已经按队列分好，brain 自己知道这批是什么。
+consumer 只管搬运和等。
+
+### 3.3 `AgentBrain`
+
+`AgentBrain(Brain)` 只有一个入口：`step(scope, batch) -> bool`。
+
+**返回 False 表示现在还不该处理这批**，consumer 据此不清 buffer。什么时候不该处理：
+batch 里只有 tool 结果，而这一轮还没齐。
+
+| batch 里有 | 行为 |
+| --- | --- |
+| user 输入 | 一定处理 |
+| tool 结果，且这一轮齐了 | 处理 |
+| tool 结果，还没齐，且没到期 | 返回 False，什么都不做 |
+| tool 结果，距第一个结果到达已过 n 秒 | 处理，缺的那些由投影补 `unresolved` 占位 |
+| invoke | 处理（`Supervisor` 还没做，现在不会有） |
+
+**时限从第一个结果到达起算，不是从派发起算。** 慢的是工具，不是 agent 决定等它；
+从派发起算的话，一轮里最快回来的那个把时限吃光了，同批还在跑的那几个一个都等不到。
+没回来的那几条不会往队列里 `put` 任何东西，所以到期这一条不是兜底，是这轮唯一的
+出路 —— 没有它，这一轮永远停在 buffer 里，agent 再也不说话。
+
+`step` 的顺序固定：落 user 输入与 `system.agent_step{start, trigger}` → build →
+调模型 → 落 `assistant.message` → emit → 每个 tool call 落 `tool.call` → emit →
+`tool_system.execute`。**每一步都先落盘再做下一步。**
+
+落盘用的幂等键：`user.message` 用 `cmd:<command_id>`，`assistant.message` 用
+`msg:<step_id>`，`tool.call` 用 `tool.call:<invocation_id>`，`tool.result` 用
+`tool.result:<invocation_id>`，`system.agent_step` 用 `step:<step_id>:<phase>`。
+
+「这一轮派发了几个」不需要额外状态：`assistant.message` 里的 `tool_calls` 已经落盘，
+投影时数一下就知道。「这一轮什么时候派发的」就是那些 `tool.call` 记录的 `commit_dt`。
+
+### 3.4 context build
+
+投影出的消息数组，**末尾如果是带 `tool_calls` 的 assistant 轮，就必须紧跟同样数量的
+tool 消息，`tool_call_id` 一致** —— 这是 provider 的硬要求，缺一条那个数组交给谁都
+是坏的。还没回来的补一条 `unresolved` 占位。
+
+**迟到的结果不改历史。** 一个 tool 结果在它的槽位已经被占位之后才到，投影不动那个
+占位 —— 它是当时的记录，改它就是让记录说谎。真相以另一种形式附在下一次 user message
+里：
+
+```xml
+<events>
+  <event_type=user>你好</>
+  <event_type=tool_result invocation_id="00000002" tool="echo">之前 id 为 00000002 的工具结果为：链路通了</>
+</events>
 ```
-OathConfig
-├── data_root: Path              journal / 权限存储的根目录
-├── server: ServerConfig         host / port / 每连接发送队列长度 / 空闲超时 / 连接数上限
-├── credentials                  credential → (user_id, session_id)
-└── agent: AgentConfig
-    ├── system_prompt / max_output_tokens / temperature
-    ├── provider: ModelProviderConfig
-    │   └── model / api_base / api_key_env / timeout_seconds / extra_params
-    ├── context_window / compress_at_ratio      ← 压缩触发线，v1 只记录不触发
-    ├── max_step_tokens                          ← 一步内最多调几次模型
-    └── tool_timeout_seconds
-```
 
-**凭证只允许引用环境变量**（`api_key_env = "MINIMAX_API_KEY"`）。配置文件进 git，把 key 写
-进去等于把 key 公开 —— `oath.toml` 因此在 `.gitignore` 里。`extra_params` 透传给模型 API，
-模型特有的参数走它。
+**「槽位关了没有」不需要额外状态。** `tool.call` 之后出现了一条 `assistant.message`，
+就说明模型已经读过那个槽位了 —— 哪怕当时填进去的只是个 `unresolved` 占位。扫一遍
+journal 就能得出两件事：这一轮还差谁、谁的槽位已经关了。关掉的那批结果不写
+`tool.result`，走上面这条路。
 
-### 3.2 `ContextManager`
+工具名从对应的 `tool.call` 查：`tool.result` 的 payload 里没有它 —— 那是事件顶层的
+字段，journal 里那份不重复存。
 
-```python
-class ContextManager:
-    def build(self, scope: Scope, tools: tuple[ToolDefinition, ...]) -> Context: ...
-```
+**同一条补告不会被说第二遍** —— 幂等键是 `notice:<参与它的 invocation_id>`，重跑一次
+得到同一个键，重放被 journal 去重。唯一的「已经说过什么」就是 journal 本身。
 
-`Context` 是 `(messages, tools, state)`，前两个都是 provider 无关的。`state` 原样带出去，
-给压缩器用。
+`ContextManager.build` 只有三步，全是纯读：`journal.recover(scope)` 拿到自洽的
+`(state, messages)` 与 `pending`；`project(pending)` 把水位线之后的记录接上；
+system prompt 拼在第一条，`ToolDefinition` 原样挂上。
 
-build 只有三步，全是纯读：`journal.recover(scope)` 拿到自洽的 `(state, messages)` 与
-`pending`；`project(pending)` 把水位线之后的记录接到 `messages` 后面 —— 恢复之后的事件也是
-这一轮对话的一部分；system prompt 拼在第一条，`ToolDefinition` 原样挂上。压缩器说该压就在
-拼之前压。
+**不写快照。** 快照是加速恢复的，不是正确性来源。压缩器接口在，实现没写。
 
-**不写快照。** 快照是加速恢复的，不是正确性来源；这一版 context 完全由 journal 投影出来，
-重启后照样能接着跑。
-
-`ContextCompressor` 是接口：`should_compress` 与 `compress` 都收 `(messages, state)`、返回
-新的那一份。v1 用 `NullCompressor` —— 恒假与恒等。接口留着是因为压缩要同时改 messages 与
-state，塞进 `ContextManager` 会让那一个类两个职责。
-
-### 3.3 `ModelProvider`
+### 3.5 `ModelProvider`
 
 `ModelProvider` 只有一个方法：`complete(request, *, on_delta=None)`。
 
-`complete` 是**阻塞**的：一次调用一次返回。请求带着 `messages` 与 `tools`，返回带着
-`content` 与 `tool_calls`（两者可以同时非空 —— 有的模型一边说话一边要调工具，两样都要落进
-assistant 那一轮）。`reasoning` 原样带回来，不加工。
+`complete` 是**阻塞**的。请求带着 `messages` 与 `tools`，返回带着 `content` 与
+`tool_calls`（两者可以同时非空）。`reasoning` 原样带回来，不加工。provider 只回答
+「模型说了什么」，不回答「结果怎么用」—— 换一个 provider 不改 `AgentBrain` 一行。
 
-`ModelProvider` 只回答「模型说了什么」，不回答「结果怎么用」。`AgentBrain` 拿到
-`LlmResponse` 之后落盘、派发 —— 换一个 provider 不改 `AgentBrain` 一行。
+`OpenAICompatibleProvider` 是 v1 唯一的实现：`POST {api_base}/chat/completions`，用
+`httpx`。`ToolCallRef` 的扁平 `{id, name, arguments}` 在这一层被包成 OpenAI 要的形状，
+`arguments` 从对象序列化成字符串，进 core 时再解析回对象。
 
-`OpenAICompatibleProvider` 是 v1 唯一的实现：`POST {api_base}/chat/completions`，用 `httpx`。
+一个工具都没有时 `tools` 整个键不出现。失败一律抛 `LlmError`：没有 api key、
+`api_base` 为空、网络错误、非 2xx、超时、响应体形状不对，`arguments` 不是合法 JSON
+也算 —— 当成空参数放过去，工具会拿着一个静默错误的入参跑完。
 
-`ToolCallRef` 的扁平 `{id, name, arguments}` 在这一层被包成 OpenAI 要的
-`{id, type, function: {name, arguments}}`，`arguments` 从对象序列化成字符串，进 core 时再解析
-回对象。core 里存的永远是扁平那份，所以 journal payload 与 `Message.extra` 永远逐字节相同。
-
-一个工具都没有时 `tools` 整个键不出现 —— 有些厂家见到空数组会报错。失败一律抛 `LlmError`：
-没有 api key、`api_base` 为空、网络错误、非 2xx、超时、响应体不是预期形状，`arguments` 不是
-合法 JSON 也算 —— 当成空参数放过去，工具会拿着一个静默错误的入参跑完，失败点落在工具里，
-看不出是这里出的问题。
-
-### 3.4 流式
+### 3.6 流式
 
 **流的是等待过程，不是落盘。** `on_delta` 给了就走 SSE：每收到一段就交一次回调，
-攒完仍然返回一个和 `stream=false` 形状完全一致的 `LlmResponse`。所以落盘、`tool.call` 派发、
-`system.agent_step` 收尾全在返回值之后，**两种模式下是同一段代码**。流式只让客户端在等待
-期间有东西可看，不改动任何一条记录。
+攒完仍然返回一个和 `stream=false` 形状完全一致的 `LlmResponse`。所以落盘、`tool.call`
+派发、`system.agent_step` 收尾全在返回值之后，**两种模式下是同一段代码**。
 
 三件事的粒度不一样：
 
-1. **`content` 与 `reasoning` 边收边吐。** 两路分开，客户端要能把「正在想」和「正在答」分开
-   显示 —— 合在一起就没法排版了。
-2. **`tool_calls` 攒完整再解析。** `arguments` 是增量 JSON，中途不是合法对象，半截参数对
-   任何一方都没有用处。**按 `index` 归并**，不靠顺序也不靠「上一条还没结束」这种推断：各家
-   切得不一样（OpenAI 切成好几段，MiniMax 一个 chunk 整段发完），`index` 是唯一稳定的身份。
-3. **回调里的异常吞掉。** 送不出去的一段增量不是模型调用失败，返回值仍然是完整的那一份。
+1. **`content` 与 `reasoning` 边收边吐。** 两路分开，客户端要能把「正在想」和「正在答」
+   分开显示。
+2. **`tool_calls` 攒完整再解析。** `arguments` 是增量 JSON，中途不是合法对象。
+   **按 `index` 归并**，不靠顺序：OpenAI 切成好几段，MiniMax 一个 chunk 整段发完，
+   `index` 是唯一稳定的身份。
+3. **回调里的异常吞掉。** 送不出去的一段增量不是模型调用失败。
 
-增量以 `assistant.delta` 事件直推客户端，**不落盘**（规则 2）。断线重连的兜底是完整的
-`assistant.message`，所以 delta 丢了不影响对话完整性。
+增量以 `assistant.delta` 事件直推客户端，**不落盘**（规则 4）。断线重连的兜底是完整的
+`assistant.message`。
 
-### 3.5 `AgentBrain`
+### 3.7 对外投递
 
-`AgentBrain(Brain)` 只有 `step(scope, record)` 一个入口。
-
-`step` 的顺序固定：记 `system.agent_step{start}` → build → 调模型 → 落
-`assistant.message` → emit → 每个 tool call 落 `tool.call` → emit → `tool_system.execute`。
-**每一步都先落盘再做下一步。** 模型调用失败不落 `assistant.message`，抛出去由 `Intake`
-记 `system.agent_step{error}`。
-
-落盘用的幂等键：`assistant.message` 用 `msg:<step_id>`，`tool.call` 用
-`tool.call:<invocation_id>`，`system.agent_step` 用 `step:<step_id>:<phase>`。同一
-`step_id` 重跑不会写出两行。
-
-**单线程假设。** 每个 session 一条消费线程，`step` 就跑在那条线程上 —— 阻塞的模型调用只挡住
-那一条会话。`Brain` 自己不起线程，也不管理并发。
-
-### 3.6 `JournalIntake`
-
-`Intake` 的 v1 实现，一个 scope 一个消费线程。`handle` 把 command 落盘再入队，映射是一张表：
-command type → (record type, payload, 幂等键前缀)。`ping` 不产生记录，直接回 `pong`。
-`run.cancel` 落成 `system.cancel` 进 system 队列。`permission.decide` **抛
-`WireProtocolError`** —— 它还没接进 journal，静默吞掉的话，客户端点了「同意」什么也不会发生，
-也查不出是哪一环掉的。
-
-`poll` 出队后路由，三条队列的读取顺序固定 `user` → `tool` → `system`，每条最多取一条就处理。
-**取一条处理一条**：一次 `poll` 把三条队列全清空，会让排在后面的 system 指令被一串模型调用
-饿死。
-
-`EventRouter` 的 v1 实现 `TypeRouter`：`user.message` 与 `tool.result` → `TO_BRAIN`，其余
-→ `BY_RULE`。`BY_RULE` 只有一条规则：`system.cancel` 记一笔
-`system.agent_step{phase: "cancelled"}` —— 还没有 run 的概念，没有可中止的对象，记一笔是为了
-让 trace 看得见这次控制面指令被消费过。
-
-### 3.7 `ToolResultRouter`
-
-`ToolResultRouter(AgentEventSink)` 的 `emit` 就是三件事：**落盘 → 入队 → 递给下游**。
-
-工具系统的终态事件是从工作线程里发出来的，谁都不负责把它变成一条记录。结果不落盘，下一次
-`build` 就看不见这次调用发生过 —— agent 不知道工具跑了、也不知道跑成了什么。
-
-它是 sink 的装饰器，装在工具系统那一侧。`tool.terminal` 之外的事件原样穿过：
-`assistant.message` 与 `tool.call` 由 `AgentBrain` 自己落盘（它就是生产者），这里再写一遍
-就是两条记录。
-
-### 3.8 对外投递
-
-`OutboundHub(OutboundTransport)`：按 scope 分流，每个 scope 一条有界 `deque`（长度由
-`send_queue_size` 定），`send` 把帧排进去，返回 `SendResult`。满了它**自己不断** —— 断连接是
-策略，由 sink 那一层决定。`attach` 顺带起一个 `pump` 任务把队列写出去；换连接就换一个
-`pump`，`detach` 把它停掉。
-
-队列用 `deque` 而不是 `asyncio.Queue`：判断「装不下了」必须同步发生在调用方那个线程里。跨线程
-靠一个只用来叫醒的唤醒队列，帧不经过它。
+`OutboundHub(OutboundTransport)`：按 scope 分流，每个 scope 一条有界 `deque`，`send`
+把帧排进去，返回 `SendResult`。满了它**自己不断** —— 断连接是策略，由 sink 那一层决定。
+队列用 `deque` 而不是 `asyncio.Queue`：判断「装不下了」必须同步发生在调用方那个线程里。
 
 `WsEventSink(AgentEventSink)`：`emit` 把事件转成 `EventFrame` 再 `send`；收到
 `QUEUE_FULL` 就 `close(scope, CloseReason.SLOW_CONSUMER)` 然后**继续** —— 事件已经送不出
-去了，但 core 的流程不能因为一个慢客户端停住。`NO_CONNECTION` 什么都不做。
+去了，但 core 的流程不能因为一个慢客户端停住。
 
-`SessionAuthenticator` 的 v1 实现在 bootstrap：一段配置的 token 换固定身份。生产环境由
-Hymio 提供。
+工具系统的终态事件有一个 relay：**先投客户端，再进 tool 队列**。反过来的话，消费线程
+会被入队叫醒、抢在投递完成之前跑完这一步，界面上就出现一段先有 `assistant.message`、
+后有 `tool.terminal` 的错位。投递失败照旧入队 —— 客户端少看一行是它的事，agent 少等
+一个结果是另一回事。它不落盘，那是 brain 的活。
 
 ## 4 实现方案
 
 | 模块 | 位置 |
 | --- | --- |
 | 配置类型 | `core/protocol/datatype/config.py` |
+| `Inbound` / 队列名 | `core/protocol/datatype/inbound.py`、`queue.py` |
 | LLM 类型 / 接口 / 实现 | `core/protocol/datatype/llm.py`、`core/protocol/interface/llm.py`、`core/llm/` |
-| ContextManager / Compressor | `core/context/` |
-| AgentBrain | `core/agent/brain.py` |
-| JournalIntake / TypeRouter / ToolResultRouter | `core/intake/` |
+| `EventBuffer` 接口 / 实现 | `core/protocol/interface/buffer.py`、`core/buffer/` |
+| ContextManager / 投影 | `core/context/`、`core/journal/messages.py` |
+| `SessionConsumer` / relay | `core/consumer.py` |
+| `AgentBrain` | `core/agent/brain.py` |
+| 共享依赖包 | `core/runtime.py` |
 | WebSocket 传输与 sink | `core/outbound/` |
 | 装配、配置加载、ws server | `bootstrap/` |
 | 演示工具 | `extensions/tools/` |
 | 启动脚本、终端客户端 | `scripts/` |
 
-**ws server 是 asyncio 的，core 不是。** 两个方向的桥各一处：上行把 `Command` 交给
-`Intake.handle`，落盘写文件是阻塞的，用 `asyncio.to_thread` 让开事件循环；下行是 `OutboundHub`
-的发送队列。core 不 import `websockets`。
+**ws server 是 asyncio 的，core 不是。** 上行把 `Command` 转成 `Inbound` 放进队列就返回，
+不做任何阻塞操作；下行是 `OutboundHub` 的发送队列。core 不 import `websockets`。
 
 ## 5 失败与恢复
 
 | 场景 | 行为 |
 | --- | --- |
-| 模型调用失败（网络 / 超时 / 非 2xx / `arguments` 不是合法 JSON） | 抛 `LlmError`。不落 `assistant.message`，记 `system.agent_step{error}`。队列里这条已经出队，不会自动重试 |
+| 模型调用失败（网络 / 超时 / 非 2xx / `arguments` 非法） | 抛 `LlmError`。不落 `assistant.message`，记 `system.agent_step{error}` |
 | 一段增量投递失败 | 吞掉，模型调用继续。完整消息照样落盘、照样到达 |
-| 工具派发被拒（`BatchExecution` 里 `REJECTED`） | 工具系统自己发终态事件，走 tool 队列回到 `Brain`。`Brain` 不管 |
+| 工具派发被拒 | 工具系统自己发终态事件，走 tool 队列回到 `Brain`。`Brain` 不管 |
 | 客户端在 `step` 中途断开 | 不影响。落盘与派发都不经过连接 |
 | 发送队列满 | `sink` 断开那条连接，事件丢掉，不阻塞 core |
 | 同一 session 两条连接 | 后来的顶掉前一条，前一条收到 `close{session_replaced}` |
-| credential 不认 | `close{unauthorized}` 后断开，不回落到匿名 |
-| 进程重启 | context 完全由 journal 重放恢复。**队列是空的** —— 已落盘但没被消费的输入不会自动重投 |
+| 崩溃时 buffer 里有东西 | `scopes()` 捞回来重跑那一步。幂等键挡住重复写 |
+| 工具结果永远不齐 | 距第一个结果到达 n 秒强制醒一次，缺的那些投影成 `unresolved` 占位 |
+| 进程重启 | context 完全由 journal 重放恢复。**队列是空的** —— 还没进 buffer 的输入不补 |
 
 ## 6 跨仓库协议变更
 
-1. `AgentEvent` 的 `tool` / `tool_call_id` / `invocation_id` 变成可选（三个字段仍然存在，
-   消息事件取 `None`）。`ToolEvent` / `PermissionEvent` 的形状不变。
-2. 新增 `MessageEvent`（消息事件的类型），走同一个 `AgentEventSink`。
-3. 新增事件 type `assistant.message` 与 `tool.call` 的对外投递：客户端要能处理
-   `event_type` 为这两者的帧。
-4. 新增 `assistant.delta`（**只投递、不落盘**）。payload 是 `{step_id, channel, text,
-   seq}`：`channel` 取 `content` 或 `reasoning`，两路分开，客户端要能把「正在想」和
-   「正在答」分开显示。客户端按 delta 追加渲染，断线重连时以完整的 `assistant.message`
-   为准。
+对客户端可见的部分不变：`assistant.message` / `tool.call` / `tool.terminal` /
+`assistant.delta` 的帧格式、`command` 的信封与 payload，一概没动。落盘时机从入站挪到
+brain，客户端看到的帧序列不变。
+
+新增 `assistant.delta` 的 `channel` 取 `content` 或 `reasoning`，两路分开，客户端按
+delta 追加渲染，断线重连时以完整的 `assistant.message` 为准。
 
 ## 7 待决事项
 
-- 压缩。接口在，实现没写；触发线 `compress_at_ratio` 与 `max_step_tokens` 都在配置里，
-  但都没有人读 —— 上下文超长时模型报错，原样抛出去，模型与工具互相踢皮时也没有闸。
-- 工具结果来不齐：`tool.call` 发出去了、结果没回来，run 就停在那。
-- LLM 调用的重试与 fallback。`outcome_unknown` 在工具侧有，模型侧还没有。
-- 重启后未消费的输入怎么重投，见 [feature-event-runtime](feature-event-runtime.md) 7。
-- 多 provider 与按工具选模型，现在配置里只有一个 provider。
+- **Supervisor 与 `system.invoke`。** system 队列现在没有事件源。`run.cancel` 落成
+  `system.cancel` 之后要有人周期性地来问「有没有待中止的 run」，那是 Supervisor 的活。
+- **buffer 换 SQLite。** `EventBuffer` 的接口里没有路径，只有 scope；实现从文件换成
+  SQLite 时契约不动。
+- **压缩。** 接口在，实现没写；`compress_at_ratio` 与 `max_step_tokens` 都在配置里，
+  都没有人读。
+- **LLM 调用的重试与 fallback。** `outcome_unknown` 在工具侧有，模型侧还没有。
+- **重启后队列里没消费的输入怎么重投**，见
+  [feature-event-runtime](feature-event-runtime.md) 7。

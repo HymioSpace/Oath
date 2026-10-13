@@ -4,6 +4,9 @@
 
 一个 session 一个消费线程：线程在 `session.open` 时起，`Brain.step` 就在这条线程上跑，
 所以模型调用的阻塞只挡住那一条会话。
+
+装配顺序是有依赖的：`queue` → `sink` → `tools` → `AgentContext` → `brain` /
+`consumer`。`AgentContext` 只在最后组装一次，中间产物都是局部变量。
 """
 
 from __future__ import annotations
@@ -14,18 +17,21 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from core.agent import AgentBrain
+from core.buffer import FileEventBuffer
+from core.consumer import SessionConsumer, ToolEventRelay
 from core.context import ContextManager, NullCompressor
-from core.intake import JournalIntake, ToolResultRouter, TypeRouter
 from core.journal.impl import FileJournal
 from core.llm import OpenAICompatibleProvider
 from core.outbound import OutboundHub, WsEventSink
 from core.protocol.datatype.config import OathConfig
+from core.protocol.datatype.inbound import of_command
 from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.wire import Command
 from core.protocol.error import PermissionDeniedError
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
-from core.protocol.interface.intake import Intake, SessionAuthenticator, SessionIdentity
 from core.protocol.interface.permission import PermissionPolicy
+from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
 from core.protocol.interface.tool import Tool, ToolSystem
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
@@ -35,8 +41,8 @@ from core.tool.permission.impl import FilePermissionStore
 from core.tool.registry import ToolRegistry
 from core.utils.encoding import JsonObject
 
-#: 空闲多久之后醒一次看一眼有没有新输入。等不是必须的，队列空就是空。
-_WORKER_TICK: Final = 0.2
+#: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
+_WORKER_JOIN_TIMEOUT: Final = 2.0
 
 
 class TokenAuthenticator(SessionAuthenticator):
@@ -97,9 +103,9 @@ class Runtime:
         queue = InMemoryEventQueue()
         self.hub = OutboundHub(loop, send_queue_size=config.server.send_queue_size)
         outbound: AgentEventSink = WsEventSink(self.hub)
-        # 工具系统的终态事件从工作线程来，没人替它落盘 —— 这一层补上，
-        # 顺带把它放回 tool 队列，下一次 step 才接得上。brain 发的事件原样穿过。
-        sink: AgentEventSink = ToolResultRouter(self.journal, queue, outbound)
+        # 工具终态事件从工作线程来：直推客户端，再进 tool 队列。**不落盘** ——
+        # 工具系统不知道这一轮是什么，落盘是 brain 读到那一批之后的判断。
+        sink: AgentEventSink = ToolEventRelay(queue, outbound)
 
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         for tool in tools or []:
@@ -124,9 +130,28 @@ class Runtime:
             config=config.agent,
         )
         self.brain: Brain = AgentBrain(self.ctx, OpenAICompatibleProvider(config.agent.provider))
-        self.intake: Intake = JournalIntake(self.ctx, self.brain, TypeRouter())
+        self.consumer = SessionConsumer(
+            self.ctx, self.brain, FileEventBuffer(data_root / "buffers")
+        )
         self._workers: dict[Scope, SessionWorker] = {}
         self._workers_lock = threading.Lock()
+
+    # -- 上行 --------------------------------------------------------------
+
+    def open_session(self, command: Command) -> Scope:
+        """验 credential，绑定 session。认不出就抛错 —— 不回落到匿名账号。"""
+        identity = self.authenticator.authenticate(str(command.payload.get("credential", "")))
+        return Scope(user_id=identity.user_id, session_id=identity.session_id)
+
+    def submit(self, command: Command, scope: Scope) -> None:
+        """把一条 command 排进队列。返回即代表排上了。
+
+        **不落盘。** 上行不碰 journal：那条记录由 `Brain` 读到这一批之后才写，键挂在
+        command id 上。
+        """
+        inbound = of_command(command)
+        if inbound is not None:
+            self.ctx.queue.put(scope, inbound)
 
     # -- session 生命周期 ---------------------------------------------------
 
@@ -137,20 +162,13 @@ class Runtime:
                 return
             stop = threading.Event()
             thread = threading.Thread(
-                target=self._consume, args=(scope, stop), name=f"oath-session-{scope}", daemon=True
+                target=self.consumer.run,
+                args=(scope, stop),
+                name=f"oath-session-{scope}",
+                daemon=True,
             )
             self._workers[scope] = SessionWorker(scope=scope, thread=thread, stop=stop)
             thread.start()
-
-    def _consume(self, scope: Scope, stop: threading.Event) -> None:
-        while not stop.is_set():
-            try:
-                if self.intake.wait(scope, timeout=_WORKER_TICK):
-                    self.intake.poll(scope)
-            except Exception:
-                # 一条输入处理失败不能让线程死掉 —— 剩下的输入还在队列里。
-                # 失败已经由 `AgentBrain` 记成 `system.agent_step{error}`。
-                continue
 
     def close(self) -> None:
         with self._workers_lock:
@@ -158,9 +176,11 @@ class Runtime:
             self._workers.clear()
         for worker in workers:
             worker.stop.set()
+        # 先断队列：消费线程正阻塞在 `wait` 上，不叫醒它就只能靠 join 超时。
+        self.ctx.queue.close(wait=True)
         for worker in workers:
-            worker.thread.join(timeout=2.0)
-        self.intake.close(wait=True)
+            worker.thread.join(timeout=_WORKER_JOIN_TIMEOUT)
+        self.brain.close(wait=True)
         self.ctx.tools.shutdown(wait=True)
         self.hub.shutdown()
         self.journal.close()

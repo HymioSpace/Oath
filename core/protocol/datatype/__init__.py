@@ -15,6 +15,7 @@ from core.protocol.datatype.config import (
 )
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
+from core.protocol.datatype.inbound import Batch, Inbound, InboundKind, of_command
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -49,7 +50,7 @@ from core.protocol.datatype.permission import (
     PermissionVerdict,
     expired,
 )
-from core.protocol.datatype.queue import INPUT_QUEUE, QueueName, queue_of
+from core.protocol.datatype.queue import QUEUE_OF_KIND, QueueName, queue_of
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
@@ -88,7 +89,7 @@ __all__ = [
     "MAX_INVOCATION_ID_LENGTH",
     "COMMAND_SCHEMAS",
     "PAYLOAD_SCHEMAS",
-    "INPUT_QUEUE",
+    "QUEUE_OF_KIND",
     "RESULT_KEY_PREFIX",
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
@@ -97,6 +98,7 @@ __all__ = [
     "AgentEvent",
     "AgentState",
     "AppendResult",
+    "Batch",
     "BatchExecution",
     "Cursor",
     "CloseReason",
@@ -106,8 +108,11 @@ __all__ = [
     "EventFrame",
     "EventRecord",
     "EventType",
+    "of_command",
     "QueueName",
     "FrameType",
+    "Inbound",
+    "InboundKind",
     "LlmFinishReason",
     "LlmRequest",
     "LlmResponse",

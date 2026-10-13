@@ -52,6 +52,9 @@ class AgentConfig:
     max_step_tokens: int = 16
     #: 派给工具系统的单次执行超时。
     tool_timeout_seconds: float = 30.0
+    #: 一轮里的工具结果等多久就不等了。**从第一个结果到达起算**，不是从派发起算。
+    #: 到期之后 brain 照样跑一轮，缺的那些在投影里是 `unresolved` 占位。
+    tool_round_timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +111,7 @@ class OathConfig:
                 "compress_at_ratio": self.agent.compress_at_ratio,
                 "max_step_tokens": self.agent.max_step_tokens,
                 "tool_timeout_seconds": self.agent.tool_timeout_seconds,
+                "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
             },
         }
 
