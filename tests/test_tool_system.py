@@ -1,7 +1,7 @@
 """工具系统：派发、并发、超时、状态、事件。
 
-并发相关的断言全部用闸门（`Event` / `Barrier`），不用 sleep —— sleep 断言的是
-「等了这么久应该跑完了」，闸门断言的是「它们确实同时在跑」。
+并发相关的断言全部用 `threading.Event` / `Barrier`，不用 sleep —— sleep 断言的是
+「等了这么久应该跑完了」，`Event` / `Barrier` 断言的是「它们确实同时在跑」。
 """
 
 from __future__ import annotations

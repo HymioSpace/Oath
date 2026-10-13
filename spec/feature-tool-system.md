@@ -719,8 +719,8 @@ TTL 是 core 侧策略（构造参数 `ttl_seconds`，默认 300 秒），与 `t
   只拒同批的那一项；`recover()` 在一批 allow / deny / ask 之后投影出三条 tool 消息且
   没有一条是 `unresolved`、`tool_call_id` 与 assistant 轮里的逐字节对齐。
 
-并发相关的断言全部用闸门（`Event` / `Barrier`）而不是 sleep —— sleep 断言的是「等了
-这么久应该跑完了」，闸门断言的是「它们确实同时在跑」。
+并发相关的断言全部用 `threading.Event` / `Barrier` 而不是 sleep —— sleep 断言的是
+「等了这么久应该跑完了」，`Event` / `Barrier` 断言的是「它们确实同时在跑」。
 
 检查项：
 

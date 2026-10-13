@@ -1,7 +1,7 @@
 """工具系统的测试夹具：假工具、记录型 sink、权限策略、等待工具。
 
-用闸门（`threading.Event` / `Barrier`）而不是 sleep 断言并发：sleep 断言的是
-「等了这么久应该跑完了」，闸门断言的是「它们确实同时在跑」。
+用 `threading.Event` / `Barrier` 而不是 sleep 断言并发：sleep 断言的是
+「等了这么久应该跑完了」，`Event` / `Barrier` 断言的是「它们确实同时在跑」。
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ class StaticTool(Tool):
 
 
 class GatedTool(Tool):
-    """卡在闸门上，直到测试放行。
+    """卡在 `threading.Event` 上，直到测试放行。
 
     `entered` 每进一个就 +1，`release` 放行全部。用来断言「execute 返回时还没跑完」
     和「一批里的调用同时在跑」。
@@ -144,7 +144,7 @@ def _tool_events(events: list[AgentEvent]) -> Iterator[ToolEvent]:
 class RecordingSink(AgentEventSink):
     """记录全部事件（终态与审批事件走同一个口），可选在投递时抛错。
 
-    事件是跨线程投递的，所以等待靠闸门（`Condition`）而不是轮询 —— 等的是
+    事件是跨线程投递的，所以等待靠 `Condition` 而不是轮询 —— 等的是
     「事件真的到了」这个事实，不是一个时长猜出来的窗口。
     """
 
