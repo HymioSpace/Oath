@@ -2,8 +2,9 @@
 
 两条通路，都只跟 journal 打交道：
 
-- **入站**：接收 command 落进 journal，返回游标给传输层去 ack。它到这一步就结束 ——
-  一条记录落盘时不带任何调度结论。
+- **入站**：接收 command 落进 journal。它到这一步就结束 —— 一条记录落盘时不带任何
+  调度结论，也不回什么给传输层：连接本身可靠有序，落盘这件事由它引发的下一个事件
+  作证。
 - **消费**：从三条队列取记录，逐条问 `EventRouter` 走规则还是走 `Brain`，然后推进游标。
 
 **它没有外部副作用。** append 按 command id 幂等，崩在中途不会留下半吊子的状态 ——
@@ -20,7 +21,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Final
 
-from core.protocol.datatype.cursor import Cursor
 from core.protocol.datatype.journal import Record
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command
@@ -83,11 +83,11 @@ class Intake(ABC):
         ...
 
     @abstractmethod
-    def handle(self, command: Command, scope: Scope) -> Cursor | None:
-        """落一条 command，返回它的游标，供传输层 ack。
+    def handle(self, command: Command, scope: Scope) -> None:
+        """落一条 command。
 
-        返回 None 表示这条 command 不落盘（`ping`）。成功即代表已持久化；抛错表示
-        没落成，调用方不得 ack。
+        返回即代表已持久化；抛错表示没落成。有些 command 不产生记录（`ping`），
+        那不算错。
         """
         ...
 

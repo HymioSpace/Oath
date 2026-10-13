@@ -18,7 +18,7 @@ from core.protocol.datatype import (
     Scope,
     WireVersion,
 )
-from core.protocol.datatype.wire import ack, close_frame, error_frame, pong
+from core.protocol.datatype.wire import close_frame, error_frame, pong
 from core.protocol.error import WireProtocolError
 from core.utils.encoding import JsonObject, JsonValue
 
@@ -179,10 +179,14 @@ def test_ping_takes_no_payload() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_ack_and_pong_echo_the_command_id() -> None:
-    assert ack("c-1")["id"] == "c-1"
-    assert ack("c-1")["type"] == FrameType.ACK
+def test_pong_echoes_the_command_id() -> None:
+    assert pong("c-1")["id"] == "c-1"
     assert pong("c-1")["type"] == FrameType.PONG
+
+
+def test_there_is_no_ack_frame() -> None:
+    """WebSocket 本身可靠有序，command 到了不需要再说一遍。"""
+    assert not hasattr(FrameType, "ACK")
 
 
 def test_error_frame_separates_code_from_message() -> None:

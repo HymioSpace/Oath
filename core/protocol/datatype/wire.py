@@ -8,7 +8,7 @@
 地方。
 
 上行 `type` 取 `CommandType`（command 自己的闭合集合），下行取 `FrameType`（event /
-ack / pong / error / close）。加一个 command 是破坏性变更：老客户端遇到
+pong / error / close）。加一个 command 是破坏性变更：老客户端遇到
 不认识的 type 必须当协议错误断开，而不是跳过 —— command 有副作用，跳过等于
 让两端的认知分叉。
 
@@ -19,6 +19,10 @@ ack / pong / error / close）。加一个 command 是破坏性变更：老客户
 下行是**活的投递**，不是 journal 的转发：`event` 帧不带游标，断线期间发生的事件不补发。
 客户端自己就是它已渲染内容的存储方，让 oath 拿 journal 当消息总线只会把投递能力绑死在
 日志扫描上。
+
+**没有 ack 帧。** WebSocket 本身可靠有序，command 到了这件事不需要再说一遍。落盘这件事
+也不另开一帧去报：客户端收到它引发的事件就是证据，收不到就按没落盘处理 —— 重发带上
+幂等键，journal 会去重。
 """
 
 from __future__ import annotations
@@ -26,7 +30,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Final
 
-from core.protocol.datatype.cursor import Cursor
 from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.journal import PayloadSchema
 from core.protocol.error import WireProtocolError
@@ -48,8 +51,6 @@ class FrameType:
 
     #: oath → 客户端。一条事件。
     EVENT: Final = "event"
-    #: oath → 客户端。command 收到了。`id` 回指。
-    ACK: Final = "ack"
     #: oath → 客户端。`ping` 的回声。
     PONG: Final = "pong"
     #: oath → 客户端。command 收到了但没办成，或帧本身不合法。
@@ -214,19 +215,6 @@ class EventFrame:
         }
 
 
-def ack(command_id: str, cursor: Cursor | None = None) -> JsonObject:
-    """command 收到了，**并且已经落盘**。
-
-    `cursor` 是刚落的那条记录在 journal 里的位置 —— Oath 自己的记账位置。客户端发
-    `user.message` 时已经知道自己发了什么，要的是「它落在哪儿」：这句 ack 说的就是
-    「进了 journal，跑不掉」，所以 ack 不落 journal，它就是传输层的一帧。
-    """
-    frame: JsonObject = {"v": WireVersion.CURRENT, "type": FrameType.ACK, "id": command_id}
-    if cursor is not None:
-        frame["cursor"] = cursor.to_json()
-    return frame
-
-
 def pong(command_id: str) -> JsonObject:
     """`ping` 的回声。兼作应用层心跳：连接两侧据此知道对方还活着。"""
     return {
@@ -297,7 +285,6 @@ __all__ = [
     "EventFrame",
     "FrameType",
     "WireVersion",
-    "ack",
     "close_frame",
     "error_frame",
     "pong",
