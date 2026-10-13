@@ -502,7 +502,7 @@ def test_valid_arguments_pass_through(registry: ToolRegistry, sink: RecordingSin
 
 
 def test_same_invocation_runs_once(registry: ToolRegistry, sink: RecordingSink) -> None:
-    """同一个调用重复派发不重复执行 —— 这是不重复施加外部副作用的那道闸。"""
+    """同一个调用重复派发不重复执行 —— 外部副作用不会跑两遍。"""
     ts = build(registry, sink)
     gate = threading.Event()
     tool = GatedTool("gated", gate=gate)
