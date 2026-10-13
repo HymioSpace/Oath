@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.feed import EventFeed
 from core.protocol.interface.ingress import (
@@ -14,21 +15,22 @@ from core.protocol.interface.ingress import (
 )
 from core.protocol.interface.journal import Journal
 from core.protocol.interface.permission import PermissionPolicy
-from core.protocol.interface.runtime import Runtime
+from core.protocol.interface.queue_runner import QueueRunner
 from core.protocol.interface.tool import Tool, ToolSystem
 from core.protocol.interface.transport import OutboundTransport, SendResult
 
 __all__ = [
     "AgentEventSink",
+    "Brain",
     "EventFeed",
     "EventRouter",
     "Ingress",
     "Journal",
     "OutboundTransport",
     "PermissionPolicy",
+    "QueueRunner",
     "RoutingDecision",
     "RoutingOutcome",
-    "Runtime",
     "SendResult",
     "SessionAuthenticator",
     "SessionIdentity",

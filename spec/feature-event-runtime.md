@@ -1,4 +1,4 @@
-# Feature — 事件运行时（队列、Ingress、Runtime、对外 event 流）
+# Feature — 事件运行时（队列、Ingress、QueueRunner、Brain、对外 event 流）
 
 状态：Implementing
 
@@ -11,8 +11,9 @@ journal 已经有了，工具系统也有了，但两者之间没有通路：现
 
 1. **三条队列**（user / tool / system）—— runtime 的输入从哪来。
 2. **Ingress** —— 接收入站事件、落 journal、决定要不要交给 runtime。
-3. **Runtime** —— context build → LLM → tool call → compress，跑 agent 的那个东西。
-4. **对外 event 流** —— 客户端通过一条 WebSocket 既能发 user event，也能收 oath event。
+3. **QueueRunner** —— 消费三条队列：取记录、分发、推进游标。
+4. **Brain** —— context build → LLM → tool call → compress，决定跑什么。
+5. **对外 event 流** —— 客户端通过一条 WebSocket 既能发 user event，也能收 oath event。
 
 这一轮只搭基础设施。**判断是否给 agent、context 怎么 build、LLM 怎么调、怎么压缩，
 都不实现** —— 这些是策略，保留 interface 即可。
@@ -26,7 +27,8 @@ journal 已经有了，工具系统也有了，但两者之间没有通路：现
 flowchart TD
     C[Client: 一条 WebSocket] -->|command: user.message / permission.decide| I[Ingress]
     I -->|append| J[(journal)]
-    I -->|EventRouter 决定要不要唤醒| R[Runtime]
+    I -->|EventRouter 决定要不要唤醒| QR[QueueRunner]
+    QR -->|分发记录| BR[Brain]
 
     TS[ToolSystem] -->|终态事件| S[AgentEventSink]
     PM[PermissionManager] -->|审批事件| S
@@ -35,7 +37,7 @@ flowchart TD
     J --> F1[Feed: user queue]
     J --> F2[Feed: tool queue]
     J --> F3[Feed: system queue]
-    F1 & F2 & F3 --> R
+    F1 & F2 & F3 --> QR
 
     J --> F4[Feed: outbound 流]
     F4 --> C
@@ -50,27 +52,41 @@ flowchart TD
    干什么」，不是「runtime 干了什么」。
 3. **消费位置是游标，不是时间戳。** 与 journal 一致：墙钟会回拨，做位置标记会静默
    丢事件。
-4. **推不动就断开，不阻塞 core。** 慢客户端的连接会被断开；因为有游标，重连能续上，
+4. **游标归 `QueueRunner`，决策归 `Brain`。** 前者的失败语义是「没副作用、可以重来」，
+   后者是「可能已经调过模型」。两者混在一个类里，游标什么时候推进就说不清了。
+5. **推不动就断开，不阻塞 core。** 慢客户端的连接会被断开；因为有游标，重连能续上，
    丢的不是数据而是延迟。
 
 ## 接口与数据
 
-### 三个系统
+### 四个系统
 
 | 名字 | 职责 | 依赖 |
 | --- | --- | --- |
-| `Ingress` | 接收入站事件 → 落 journal → 路由决策 → 唤醒 Runtime | `Journal` / `EventRouter` / `EventFeed` |
-| `Runtime` | context build → LLM → tool call → compress → fold 状态 | `Journal` / 三条 `EventFeed` / `ToolSystem` |
-| `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `EventFeed` |
+| `Ingress` | 接收入站事件 → 落 journal → 路由决策 → 唤醒 QueueRunner | `Journal` / `EventRouter` |
+| `QueueRunner` | 消费三条队列：取记录 → 分发 → 推进游标 → 等下一条 | 三条 `EventFeed` / `Brain` |
+| `Brain` | context build → LLM → tool call → compress → fold 状态 | `Journal` / `ToolSystem` |
+| `OutboundStream` | 把 journal 里的记录推给已连接的客户端 | `Journal` / `EventFeed` / `OutboundTransport` |
 
-前两个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 Runtime 时。
+前三个是接口，v1 不实现 —— 这一轮搭的是通路，策略留到有第一个 `Brain` 时。
 
-不叫 Agent 是因为 `AgentState` / `agent step` / `agent runtime` 这些名字已经在用了，
-再叫 Agent 会分不清谁是什么。`Runtime` 就是「跑 agent 的那个循环」。
+三个名字都是被占用过的词，所以一个都不能用：
 
-`Ingress` 与 `Runtime` 的分工是**持久化 vs 执行**：Ingress 只管让事件**可读且有序**，
-Runtime 只管让它**有意义**。判断「这条要不要给 agent」是 Ingress 的路由决策，
-但那是策略 —— `EventRouter` 是个接口，v1 没有实现。
+- 不叫 `Runtime` —— 整个 Oath 就是 runtime，`CoreRuntime` 已经占了。
+- 不叫 `Dispatcher` —— 对外流里推帧的那个线程已经叫 dispatcher。
+- 不叫 `Agent` —— `AgentState` / `agent step` / `AgentEvent` 都在用它指「agent 这个
+  实体本身」。
+
+**`QueueRunner` 与 `Brain` 分开是因为失败语义不同。** `QueueRunner` 没有副作用：取记录、
+分发、推进游标，崩了下次重来就行。`Brain` 可能已经调过模型、派发过工具，崩了之后哪些
+能重放是策略。所以游标由 `QueueRunner` 推进，`Brain.step` 返回之后才算处理完 —— 返回
+之后再崩，记录已经 commit，重放会重复调模型。
+
+分工一句话：**`QueueRunner` 决定「现在该不该跑」，`Brain` 决定「跑什么」。**
+
+`Ingress` 与它们分工是**持久化 vs 执行**：Ingress 只管让事件**可读且有序**，后面两个
+只管让它**有意义**。判断「这条要不要给 agent」是 Ingress 的路由决策，但那是策略 ——
+`EventRouter` 是个接口，v1 没有实现。
 
 ### 队列：`EventFeed`
 
@@ -199,7 +215,7 @@ journal 游标顺序推。它用自己的 `EventFeed` 实例，不共享 runtime
 ### 审批事件还没进 journal
 
 `permission.requested` / `permission.resolved` 现在只在 `permissions.jsonl` 里，
-所以这一版的 feed 看不到它们。Runtime 消费审批结果时先直接问 `PermissionManager`。
+所以这一版的 feed 看不到它们。`Brain` 消费审批结果时先直接问 `PermissionManager`。
 
 要统一得把审批事件也写进 journal，幂等键沿用 `perm.req:` / `perm.res:` 前缀 ——
 journal 的「同键异 payload 抛错」恰好就是「两个审批人同时点同意，第二个人的裁定无效」。
@@ -216,8 +232,9 @@ journal 的幂等语义承担。记在待决事项里。
 | 断线重连带过期的游标 | 从该游标之后续推；游标指向日志末尾之后就是没有新事件，不是错 |
 | `commit` 往回推 | 抛 `CursorError`。往回推会让已处理过的记录重来 |
 | 内部队列游标丢了（重启） | 回到起点，事件重放。fold 是纯函数，重放安全 |
-| Runtime 处理中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
-| `Runtime` 抛异常 | Ingress 不吞：事件已落 journal，Runtime 起来后会重放 |
+| `QueueRunner` 分发中崩了 | 已 commit 的记录不重放，未 commit 的重放。属于 fold 幂等性，不在 core 保证范围 |
+| `Brain` 崩在半路 | 副作用已经发生的不重放。哪些不能重放是策略，`core` 不替它判断 |
+| `Brain.step` 抛异常 | `QueueRunner` 不吞也不 commit：这条记录下次重来 |
 
 ## 跨仓库协议变更
 
@@ -232,8 +249,9 @@ journal 的幂等语义承担。记在待决事项里。
 
 - 审批事件进 journal、`permissions.jsonl` 退场（见上）。
 - `OutboundTransport` 的具体实现，以及渠道接入时的鉴权方式。
-- Runtime 的 context build 策略、压缩触发条件、并发控制。
-- `Ingress` 与 `Runtime` 都还只是接口。`Ingress` 的落盘那一半不算策略，但它同时要
-  依赖 `SessionAuthenticator`、`EventRouter` 与权限系统，等第一个 Runtime 落地时一起
-  做，否则会先写出一版路由策略再推翻。
-- 内部队列游标的持久化时机 —— 现在位置丢了只是重放，等 Runtime 真正跑起来后看代价。
+- `Brain` 的 context build 策略、压缩触发条件、并发控制。
+- `Ingress` / `QueueRunner` / `Brain` 都还只是接口。`Ingress` 的落盘那一半与
+  `QueueRunner` 的取用逻辑都不算策略，但它们同时要依赖 `SessionAuthenticator`、
+  `EventRouter` 与权限系统，等第一个 `Brain` 落地时一起做，否则会先写出一版路由策略
+  再推翻。
+- 内部队列游标的持久化时机 —— 现在位置丢了只是重放，等 `Brain` 真正跑起来后看代价。

@@ -55,7 +55,7 @@ flowchart TD
     Workers --> Inbox
     Log --> Supervisor[Independent Supervisor]
     Supervisor --> Inbox
-    Log --> Views[Runtime / trace projections]
+    Log --> Views[Brain / trace projections]
     Views --> Biz[Management API]
 ```
 

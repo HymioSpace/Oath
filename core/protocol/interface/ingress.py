@@ -1,7 +1,7 @@
 """`Ingress` —— 入站事件的入口。
 
 职责只有一件：**让入站事件变成 journal 里可读、有序的记录，并决定要不要唤醒
-runtime**。它不执行任何东西 —— 那是 `Runtime` 的事。
+runtime**。它不执行任何东西 —— 那是 `Brain` 的事。
 
 两者的分工是持久化 vs 执行。放在 Ingress 的是「这条要不要让 agent 看见」这个
 决定，接口层面叫 `EventRouter`。v1 没有实现：判断该不该给 agent 是策略，会随产品
@@ -69,7 +69,7 @@ class EventRouter(ABC):
     """这条入站记录要不要交给 runtime。
 
     v1 没有实现。接口存在的理由是：runtime 要被唤醒这件事必须有唯一的决定点，
-    不能散落在 Ingress 与 Runtime 各自的 if 里。
+    不能散落在 Ingress 与 QueueRunner 各自的 if 里。
     """
 
     @abstractmethod
