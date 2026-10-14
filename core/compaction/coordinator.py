@@ -11,7 +11,6 @@ import threading
 import uuid
 
 from core.compaction.boundary import cut_index
-from core.compaction.tokens import estimate
 from core.compaction.view import APPLIED, PENDING, compacted, usable_artifact
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype.config import AgentConfig
@@ -20,6 +19,7 @@ from core.protocol.datatype.scope import Scope
 from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.event import AgentEventSink
 from core.utils.encoding import utc_now_iso
+from core.utils.tokens import estimate
 
 _log = logging.getLogger(__name__)
 

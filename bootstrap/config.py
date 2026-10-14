@@ -22,6 +22,15 @@ from core.protocol.datatype.config import (
 
 _ENV_RE: Final = re.compile(r"\$\{([^}]+)\}")
 
+#: 已知 coding agent 的技能目录。这里只记路径 —— 它们各自的文件格式不解析，共同的
+#: 那部分就是 `SKILL.md`。Codex 的内置技能多一层 `.system`。
+_AGENT_SKILL_DIRS: Final = (
+    ".claude/skills",
+    ".agents/skills",
+    ".codex/skills",
+    ".codex/skills/.system",
+)
+
 
 def _expand(value: Any) -> Any:
     if isinstance(value, str):
@@ -59,13 +68,29 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
             str(entry.get("session_id", "")),
         )
 
+    # 目录类的字段在 TOML 里是字符串，读进来就得转成 Path / tuple —— 声明的形状
+    # 只有这一处保证。coding agent 的技能目录在这里展开成绝对路径：程序自己拼的
+    # `~` 只有装配期知道，core 不读 home。
+    agent_fields = {
+        k: v
+        for k, v in agent_raw.items()
+        if k not in ("system_prompt", "provider", "skill_dir", "skill_scan_dirs")
+    }
+    defaults = AgentConfig()
+    agent_fields["skill_dir"] = Path(agent_raw.get("skill_dir", defaults.skill_dir))
+    agent_fields["skill_scan_dirs"] = (
+        Path.cwd() / ".claude" / "skills",
+        *(Path.home() / name for name in _AGENT_SKILL_DIRS),
+        *(Path(path) for path in agent_raw.get("skill_scan_dirs", ())),
+    )
+
     return OathConfig(
         data_root=Path(data.get("data_root", "./data")),
         server=ServerConfig(**server_raw),
         agent=AgentConfig(
             system_prompt=agent_raw.get("system_prompt", ""),
             provider=ModelProviderConfig(**provider_raw),
-            **{k: v for k, v in agent_raw.items() if k not in ("system_prompt", "provider")},
+            **agent_fields,
         ),
         credentials=credentials,
     )

@@ -82,6 +82,7 @@ worker 取得物理执行槽位后，先保存 running 再执行。工具定义�
 
 成功结果的正文超过阈值时先落 detail store，终态里的 `content` 换成保头留尾的文本，
 另带 `detail_key` 与 `original_chars`。全文由内置工具 `detail_read` 取回，它的结果不截断。
+内置工具 `skill` 同理不截断：它读的是 core 自己索引的技能正文，模型点名要的东西截掉就没有意义了。
 规则见 [Compaction](feature-compaction.md)。
 
 一次事务同时更新调用终态和 accepted 输入；没有“结果保存了，但不知道该投递什么”的空隙。

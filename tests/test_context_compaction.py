@@ -7,9 +7,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from core.compaction import CompactionCoordinator, LlmCompactor, cut_index, estimate
+from core.compaction import CompactionCoordinator, LlmCompactor, cut_index
 from core.compaction.llm import transcript
-from core.compaction.tokens import estimate_text
 from core.compaction.view import APPLIED, PENDING
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
@@ -18,6 +17,7 @@ from core.protocol.datatype.llm import LlmRequest, LlmResponse
 from core.protocol.datatype.scope import Scope
 from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.llm import DeltaSink, ModelProvider
+from core.utils.tokens import estimate, estimate_text
 from tests._support.intake_fixtures import until
 
 SCOPE = Scope("u1", "s1")

@@ -195,6 +195,29 @@ def test_to_json_only_names_the_environment_variable(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
+# 技能目录
+# --------------------------------------------------------------------------
+
+
+def test_the_agent_skill_directories_are_discovered(tmp_path: Path) -> None:
+    """默认就要扫 coding agent 已经装好的技能，配置里的排在后面。"""
+    config = load_config(_write(tmp_path, MINIMAL + '\n[agent]\nskill_scan_dirs = ["./extra"]\n'))
+
+    dirs = config.agent.skill_scan_dirs
+    assert Path.cwd() / ".claude" / "skills" in dirs
+    assert Path.home() / ".claude" / "skills" in dirs
+    assert Path.home() / ".codex" / "skills" in dirs
+    assert dirs[-1] == Path("./extra")
+
+
+def test_the_skill_directory_falls_back_to_the_extensions_layout(tmp_path: Path) -> None:
+    assert load_config(_write(tmp_path, MINIMAL)).agent.skill_dir == Path("./extensions/skills")
+    assert load_config(
+        _write(tmp_path, MINIMAL + '\n[agent]\nskill_dir = "./skills"\n')
+    ).agent.skill_dir == Path("./skills")
+
+
+# --------------------------------------------------------------------------
 # from_dict 直接调
 # --------------------------------------------------------------------------
 

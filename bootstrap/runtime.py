@@ -32,6 +32,7 @@ from core.protocol.interface.session import SessionAuthenticator, SessionIdentit
 from core.protocol.interface.tool import Tool
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
+from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 from core.utils.encoding import JsonObject
@@ -104,8 +105,10 @@ class Runtime:
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
         details = FileDetailStore(data_root / "details")
+        skills = SkillSystem(config.agent.skill_dir, scan_dirs=config.agent.skill_scan_dirs)
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))
+        registry.register(SkillTool(skills))
         for tool in tools or []:
             registry.register(tool)
         tool_system = ThreadedToolSystem(
@@ -115,7 +118,9 @@ class Runtime:
             store=store,
             queue=queue,
             shrinker=ResultShrinker(
-                details, config.agent.tool_result_detail_chars, whole=frozenset({DETAIL_READ})
+                details,
+                config.agent.tool_result_detail_chars,
+                whole=frozenset({DETAIL_READ, SKILL}),
             ),
         )
         self.ctx = AgentContext(
@@ -125,6 +130,7 @@ class Runtime:
             sink=outbound,
             tools=tool_system,
             context_manager=ContextManager(self.journal, config.agent),
+            skills=skills,
             config=config.agent,
         )
         model = provider or OpenAICompatibleProvider(config.agent.provider)

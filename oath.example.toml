@@ -19,6 +19,16 @@ system_prompt = """
 max_output_tokens = 2048
 temperature = 0.7
 
+# 项目自己的技能目录。每个技能是里面的一个子目录，含 SKILL.md（YAML frontmatter
+# 加 markdown 正文）。frontmatter 里的 priority 越大越晚被丢掉；没写的按 0 算。
+skill_dir = "./extensions/skills"
+# 技能索引进 system prompt 的 token 预算。装不下就按优先级丢，丢掉的仍然能被
+# skill 工具搜到。
+skill_index_tokens = 1024
+# 额外扫的技能目录。配置里的排在 ~/.claude/skills、~/.codex/skills 等已装好的
+# coding agent 技能目录之后 —— 同名时先到先赢。
+skill_scan_dirs = []
+
 [agent.provider]
 model = "gpt-4o-mini"
 api_base = "https://api.openai.com/v1"

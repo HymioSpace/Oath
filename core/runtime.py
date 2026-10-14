@@ -8,6 +8,7 @@ from core.context import ContextManager
 from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.interface import AgentEventSink, EventQueue, Journal, ToolSystem
+from core.skill.system import SkillSystem
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +28,8 @@ class AgentContext:
     tools: ToolSystem
     #: 把 journal 投影成一次模型请求。
     context_manager: ContextManager
+    #: 启动时扫好的技能索引，只读。
+    skills: SkillSystem
     config: AgentConfig
 
 

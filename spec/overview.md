@@ -1,6 +1,6 @@
 # Oath 整体架构
 
-状态：单进程运行链路与三级压缩已实现；Supervisor、多机 HA 待实现。
+状态：单进程运行链路、三级压缩与技能索引已实现；Supervisor、多机 HA 待实现。
 
 ## 定位
 
@@ -39,6 +39,7 @@ flowchart TD
 | core/context | 固定 tool 槽位、迟到结果通知；journal 查询视图 |
 | core/compaction | 历史压缩：切点、阈值、产物生效 |
 | core/detail | 超阈值结果的全文存储、截断与 detail_read |
+| core/skill | 技能索引、优先级预算与 skill 工具 |
 | core/tool | 注册、完整批次、权限裁定、执行资格、deadline 与真实终态 |
 | core/llm | provider adapter，当前支持 OpenAI-compatible API |
 | core/outbound | 在线事件与客户端背压 |
@@ -79,5 +80,6 @@ queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown�
 后续建设。压缩产物落在一张表里，一个 scope 同时只有备好的和生效的两份。单机 JSONL 不等于多机高可用，不承诺第三方副作用 exactly-once。
 
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
-[Compaction](feature-compaction.md)、[Journal](feature-journal.md)、[客户端接入](manual.md) 与
+[Compaction](feature-compaction.md)、[Skill](feature-skill.md)、[Journal](feature-journal.md)、
+[客户端接入](manual.md) 与
 [场景推演](intake-cases.md)。

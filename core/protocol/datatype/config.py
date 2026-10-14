@@ -57,6 +57,13 @@ class AgentConfig:
     #: 压缩结果的规模上限，也是压缩调用的输出上限。
     compress_summary_tokens: int = 1024
 
+    #: 项目自己的技能目录。进 system prompt 末尾的技能索引。
+    skill_dir: Path = Path("./extensions/skills")
+    #: 技能索引进 system prompt 的 token 预算。装不下就按优先级丢。
+    skill_index_tokens: int = 1024
+    #: 额外扫到的技能目录。它们只能被 skill 工具搜到，不进 system prompt。
+    skill_scan_dirs: tuple[Path, ...] = ()
+
     #: 一次 run 的推理预算，工具返回触发的新 step 也计入。
     max_run_steps: int = 32
     max_run_seconds: float = 3600
@@ -80,6 +87,7 @@ class AgentConfig:
             "tool_result_detail_chars",
             "compress_keep_recent",
             "compress_summary_tokens",
+            "skill_index_tokens",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -91,6 +99,7 @@ class AgentConfig:
             "tool_result_detail_chars",
             "compress_keep_recent",
             "compress_summary_tokens",
+            "skill_index_tokens",
         ):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} 必须是正整数")
@@ -158,6 +167,9 @@ class OathConfig:
                 "compress_sync_at_ratio": self.agent.compress_sync_at_ratio,
                 "compress_keep_recent": self.agent.compress_keep_recent,
                 "compress_summary_tokens": self.agent.compress_summary_tokens,
+                "skill_dir": str(self.agent.skill_dir),
+                "skill_index_tokens": self.agent.skill_index_tokens,
+                "skill_scan_dirs": [str(path) for path in self.agent.skill_scan_dirs],
                 "tool_timeout_seconds": self.agent.tool_timeout_seconds,
                 "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
                 "max_run_steps": self.agent.max_run_steps,

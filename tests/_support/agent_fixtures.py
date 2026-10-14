@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from core.context import ContextManager
@@ -26,11 +27,14 @@ from core.protocol.interface.queue import EventQueue
 from core.protocol.interface.tool import ToolSystem
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
+from core.skill import SkillSystem
 
-#: 模型与 key 都是占位 —— 测的是接线，没有 provider 会真的去调它。
+#: 模型与 key 都是占位 —— 测的是接线，没有 provider 会真的去调它。技能目录指向一个
+#: 不存在的位置：索引必须为空，测试不能读开发者本机的技能目录。
 DEFAULT_CONFIG = AgentConfig(
     system_prompt="你是助手",
     provider=ModelProviderConfig(model="m1", api_base="http://x", api_key_env="TEST_KEY"),
+    skill_dir=Path("/nonexistent/skills"),
 )
 
 
@@ -83,6 +87,7 @@ def agent_ctx(
     tools: ToolSystem | None = None,
     queue: EventQueue | None = None,
     config: AgentConfig | None = None,
+    skills: SkillSystem | None = None,
 ) -> AgentContext:
     config = config or DEFAULT_CONFIG
     return AgentContext(
@@ -92,6 +97,7 @@ def agent_ctx(
         sink=sink or SilentSink(),
         tools=tools or NoTools(),
         context_manager=ContextManager(journal, config),
+        skills=skills or SkillSystem(config.skill_dir),
         config=config,
     )
 
