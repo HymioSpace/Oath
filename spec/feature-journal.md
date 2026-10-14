@@ -224,9 +224,9 @@ RuntimeStore 是 Journal 上的 scope 事务层，所有 runtime 组件共享同
 在短临界区复制状态、执行纯数据 change、计算 table/key 的变化，追加一条 runtime.commit；
 fsync 成功后发布缓存。记录版本从 1 连续递增，缺失或乱序拒绝恢复。
 
-表为 inputs、batches、calls、steps、meta、conversation、controls。修改保存 key 的完整新值，
+表为 inputs、batches、calls、steps、meta、conversation、controls、compactions。修改保存 key 的完整新值，
 不允许删除 key；输入完成通过 phase=done 表达。changes 是事务 delta，不是 AgentState 快照。
-审批裁定与 queued、工具终态与可靠输入、claim 与固定模型请求各自属于同一条提交记录。
+审批裁定与 queued、工具终态与可靠输入、claim 与请求草稿各自属于同一条提交记录；最终模型请求另以 step.request 提交。
 reason 如 step.input / tool.terminal 表示提交原因；这些不再额外追加另一份裸事件作为恢复依据。
 
 append 报错时丢弃缓存，下一次重新读取，处理 fsync 已成功但返回失败的歧义。

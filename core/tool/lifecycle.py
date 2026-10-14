@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.buffer.journal_buffer import accept_input
+from core.detail.shrink import Detail
 from core.journal.runtime_store import State
 from core.protocol.datatype.inbound import Inbound, InboundKind
 from core.protocol.datatype.tool import ToolEventType
@@ -22,6 +23,7 @@ def terminal(
     content: Any = None,
     error: str | None = None,
     error_kind: str | None = None,
+    detail: Detail | None = None,
 ) -> None:
     if call["status"] in TERMINAL:
         return
@@ -37,6 +39,9 @@ def terminal(
     }
     if error is None:
         payload["content"] = content
+        if detail is not None:
+            payload["detail_key"] = detail.key
+            payload["original_chars"] = detail.original_chars
     else:
         payload["error"] = {
             "kind": error_kind or outcome,

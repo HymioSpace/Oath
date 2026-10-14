@@ -188,10 +188,10 @@ presented 提交、step 释放 owner 与启动恢复时通知各 consumer 重新
 ### 5.2 drain 是持久化认领
 
 在一个短的 scope 事务中，冻结三个 buffer 当前全部未认领事件。
-`runtime.commit(reason=step.input)` 保存 step_id、输入 ID 集合、trigger、完整请求和固定槽位。
+`runtime.commit(reason=step.input)` 保存 step_id、输入 ID 集合、trigger、请求草稿和固定槽位。
 输入 IDs 精确表达所有权，不依赖额外 cutoff。提交成功后新事件归下一步。
 
-当前 context 为纯数据组装，与 claim 同事务保存完整请求；未来重型 context 操作需读取固定版本。
+claim 保存固定请求草稿；锁外压缩后通过 step.request 保存最终请求。重试只读取已固定请求。
 `step.input` 同时固定 presented_by_step。prepared step 崩溃后继续同一份输入，不重新 drain。
 完成时提交 `step.completed`，仅将本步 input IDs 标为 done，可重复执行；当前不物理删除历史。
 禁止“模型结束时 clear 当前整个 buffer”：那会删除模型运行期间新来的消息。
@@ -292,9 +292,8 @@ Hymio / 客户端：审批绑定 scope + invocation_id；批准表示提交原�
 重连查询待审批、执行与 step 状态；用原 invocation 恢复授权卡，不能只依赖在线推送找回请求。
 工具与 trace 事件新增 batch_id、event_id、source；展示区分等待批准、已批准排队、实际完成。
 模型 tool_call_id 不变；Nostalgia 消费结构化事实时不能把 reminder 当成真实执行结果。
-
-buffer timeout 已确定采用首个结果起固定截止；具体时长是配置项。
 用户 / system 的其它唤醒策略分别定义，不能通过新增统一 Intake scheduler 接管三个 consumer。
-RuntimeStore 通过一条 runtime.commit 保存跨表变化：inputs、batches、calls、steps、meta、conversation、controls。
+RuntimeStore 通过一条 runtime.commit 保存跨表变化：inputs、batches、calls、steps、meta、conversation、controls、compactions。
 工具终态和可靠输入、裁定和 queued、claim 和槽位均各自原子提交，不另写权限 / buffer 文件。
-执行器暂不支持外部 operation 对账；大型结果引用、日志裁剪、事务快照和多进程 fencing 另行实现。
+执行器暂不支持外部 operation 对账；日志裁剪、事务快照和多进程 fencing 另行实现。
+压缩见 [Compaction](feature-compaction.md)：按 scope 判断，不改已固定的槽位。

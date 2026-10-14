@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from core.context import ContextManager, NullCompressor
+from core.context import ContextManager
 from core.protocol.datatype import Cursor, CursorKind
 from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.config import AgentConfig
@@ -11,30 +11,11 @@ from core.protocol.datatype.message import Message
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolDefinition
 from core.protocol.interface import Journal
-from core.protocol.interface.context import ContextCompressor
 from core.utils.encoding import JsonObject
 
 # --------------------------------------------------------------------------
 # 夹具
 # --------------------------------------------------------------------------
-
-
-class _RecordingCompressor(ContextCompressor):
-    """记下被问过几次、压过没有。"""
-
-    def __init__(self) -> None:
-        self.asked = 0
-        self.compressed = 0
-
-    def should_compress(self, messages: list[Message], state: AgentState) -> bool:
-        self.asked += 1
-        return False
-
-    def compress(
-        self, messages: list[Message], state: AgentState
-    ) -> tuple[list[Message], AgentState]:
-        self.compressed += 1
-        return messages, state
 
 
 def _append(journal: Journal, scope: Scope, type_: str, payload: JsonObject, key: str) -> None:
@@ -136,26 +117,3 @@ def test_context_carries_the_state(journal: Journal, scope: Scope) -> None:
     context = ContextManager(journal, AgentConfig()).build(scope, ())
 
     assert context.state.scope == scope
-
-
-# --------------------------------------------------------------------------
-# 压缩
-# --------------------------------------------------------------------------
-
-
-def test_compressor_is_asked_before_use(journal: Journal, scope: Scope) -> None:
-    recorder = _RecordingCompressor()
-    _append(journal, scope, EventType.USER_MESSAGE, {"content": "hi"}, "u1")
-
-    ContextManager(journal, AgentConfig(), compressor=recorder).build(scope, ())
-
-    assert recorder.asked == 1
-    assert recorder.compressed == 0
-
-
-def test_null_compressor_never_compresses(journal: Journal, scope: Scope) -> None:
-    _append(journal, scope, EventType.USER_MESSAGE, {"content": "hi"}, "u1")
-
-    context = ContextManager(journal, AgentConfig(), compressor=NullCompressor()).build(scope, ())
-
-    assert [m.content for m in context.messages] == ["hi"]

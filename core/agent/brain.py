@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from core.buffer.journal_buffer import buffered
+from core.compaction.coordinator import CompactionCoordinator
+from core.compaction.tokens import estimate_text
 from core.context.intake import build_messages
 from core.journal.runtime_store import State
 from core.protocol.datatype import Message, Scope, ToolCallRequest, ToolDefinition
@@ -20,7 +22,7 @@ from core.protocol.datatype.message import MessageEvent, MessageEventType
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
-from core.utils.encoding import utc_now_iso
+from core.utils.encoding import canonical_json, utc_now_iso
 
 _log = logging.getLogger(__name__)
 
@@ -36,9 +38,12 @@ class _Worker:
 
 
 class AgentBrain(Brain):
-    def __init__(self, ctx: AgentContext, provider: ModelProvider) -> None:
+    def __init__(
+        self, ctx: AgentContext, provider: ModelProvider, compaction: CompactionCoordinator
+    ) -> None:
         self._ctx, self._provider = ctx, provider
         self._store = ctx.store
+        self._compaction = compaction
         self._lock = threading.Lock()
         self._workers: dict[Scope, _Worker] = {}
         self._stop = threading.Event()
@@ -131,7 +136,8 @@ class AgentBrain(Brain):
                 "attempts": 0,
                 "error": "run 预算已用尽，请显式继续" if exhausted else None,
                 "response": None,
-                "request": {
+                "request": None,
+                "request_draft": {
                     "messages": request_messages,
                     "tools": definitions,
                     "model": config.provider.model,
@@ -201,7 +207,35 @@ class AgentBrain(Brain):
                     worker.triggers.update(triggers)
                 worker.signal.set()
 
+    def _prepare_request(self, scope: Scope, step: State) -> State:
+        if step["request"] is not None:
+            return step
+        draft = step["request_draft"]
+        messages = draft["messages"]
+        # system prompt 已在 draft；Coordinator 负责加入固定开销，不能重复计入。
+        overhead = estimate_text(canonical_json(draft["tools"])) + draft["max_output_tokens"]
+        prompt = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        self._compaction.prepare(scope, overhead=overhead, system_prompt=prompt)
+        if self._stop.is_set():
+            return step
+
+        def freeze(state: State) -> State:
+            current = state["steps"][step["step_id"]]
+            if current["request"] is None:
+                prefix = messages[:1] if messages and messages[0]["role"] == "system" else []
+                history = messages[len(prefix) :]
+                request = {**draft, "messages": prefix + self._compaction.view(history, state)}
+                current["request"] = request
+                current["request_draft"] = None
+            return cast(State, current)
+
+        return self._store.transact(scope, "step.request", freeze)
+
     def _execute(self, scope: Scope, step: State) -> None:
+        if step["response"] is None:
+            step = self._prepare_request(scope, step)
+        if self._stop.is_set():
+            return
         step_id = step["step_id"]
         if step["response"] is None:
             if step["attempts"] >= self._ctx.config.llm_max_attempts:

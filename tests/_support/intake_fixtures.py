@@ -5,20 +5,24 @@ from __future__ import annotations
 import copy
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
 
 from core.agent import AgentBrain
 from core.buffer.journal_buffer import JournalEventBuffer
+from core.compaction import CompactionCoordinator
 from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
 from core.context import ContextManager
+from core.detail import DETAIL_READ, DetailReadTool, ResultShrinker
+from core.detail.impl import FileDetailStore
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype import Scope, ToolCallRequest
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.inbound import Inbound, InboundKind
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
+from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.llm import DeltaSink, ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.tool import Tool
@@ -74,6 +78,15 @@ class ScriptedProvider(ModelProvider):
         return self.requests[count - 1]
 
 
+class NeverCompactor(Compactor):
+    """压不了。阈值没到的时候压缩本来就不该发生。"""
+
+    def compress(
+        self, messages: Sequence[Mapping[str, Any]], *, budget_tokens: int
+    ) -> list[dict[str, Any]] | None:
+        return None
+
+
 class Harness:
     def __init__(
         self,
@@ -83,6 +96,7 @@ class Harness:
         policy: PermissionPolicy | None = None,
         responses: Sequence[ScriptedResponse] = (),
         config: AgentConfig | None = None,
+        compactor: Compactor | None = None,
         admission_timeout: float = 0.2,
         approval_ttl: float = 10,
         max_concurrency: int = 8,
@@ -93,7 +107,9 @@ class Harness:
         self.queue = InMemoryEventQueue()
         self.sink = RecordingSink()
         self.config = config or AgentConfig(tool_round_timeout_seconds=0.5, llm_retry_delay=0.01)
+        self.details = FileDetailStore(root / "details")
         self.registry = ToolRegistry(default_timeout_seconds=self.config.tool_timeout_seconds)
+        self.registry.register(DetailReadTool(self.details))
         for tool in tools:
             self.registry.register(tool)
         self.tools = ThreadedToolSystem(
@@ -105,11 +121,17 @@ class Harness:
             admission_timeout=admission_timeout,
             approval_ttl=approval_ttl,
             max_concurrency=max_concurrency,
+            shrinker=ResultShrinker(
+                self.details,
+                self.config.tool_result_detail_chars,
+                whole=frozenset({DETAIL_READ}),
+            ),
         )
         self.buffers = JournalEventBuffer(
             self.store, tool_buffer_timeout=self.config.tool_round_timeout_seconds
         )
         self.provider = ScriptedProvider(responses)
+        self.compactor = compactor or NeverCompactor()
         self.ctx = AgentContext(
             self.journal,
             self.store,
@@ -119,7 +141,10 @@ class Harness:
             ContextManager(self.journal, self.config),
             self.config,
         )
-        self.brain = AgentBrain(self.ctx, self.provider)
+        self.compaction = CompactionCoordinator(
+            self.store, self.compactor, self.config, sink=self.sink
+        )
+        self.brain = AgentBrain(self.ctx, self.provider, self.compaction)
         self.consumers = (
             UserConsumer(self.ctx, self.brain, self.buffers),
             ToolConsumer(self.ctx, self.brain, self.buffers),
@@ -182,6 +207,7 @@ class Harness:
         for thread in self.threads:
             thread.join(2)
         self.brain.close()
+        self.compaction.shutdown()
         self.tools.shutdown()
         self.journal.close()
 

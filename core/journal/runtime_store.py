@@ -17,7 +17,7 @@ from core.utils.encoding import JsonObject
 
 State = dict[str, Any]
 T = TypeVar("T")
-TABLES = ("inputs", "batches", "calls", "steps", "meta", "conversation", "controls")
+TABLES = ("inputs", "batches", "calls", "steps", "meta", "conversation", "controls", "compactions")
 
 
 def initial_state() -> State:

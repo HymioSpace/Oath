@@ -10,8 +10,11 @@ from typing import Final
 
 from core.agent import AgentBrain
 from core.buffer.journal_buffer import JournalEventBuffer
+from core.compaction import CompactionCoordinator, LlmCompactor
 from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
-from core.context import ContextManager, NullCompressor
+from core.context import ContextManager
+from core.detail import DETAIL_READ, DetailReadTool, ResultShrinker
+from core.detail.impl import FileDetailStore
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
@@ -100,11 +103,20 @@ class Runtime:
         self.hub = OutboundHub(loop, send_queue_size=config.server.send_queue_size)
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
+        details = FileDetailStore(data_root / "details")
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
+        registry.register(DetailReadTool(details))
         for tool in tools or []:
             registry.register(tool)
         tool_system = ThreadedToolSystem(
-            registry, outbound, policy or AllowAllPolicy(), store=store, queue=queue
+            registry,
+            outbound,
+            policy or AllowAllPolicy(),
+            store=store,
+            queue=queue,
+            shrinker=ResultShrinker(
+                details, config.agent.tool_result_detail_chars, whole=frozenset({DETAIL_READ})
+            ),
         )
         self.ctx = AgentContext(
             journal=self.journal,
@@ -112,12 +124,21 @@ class Runtime:
             queue=queue,
             sink=outbound,
             tools=tool_system,
-            context_manager=ContextManager(self.journal, config.agent, compressor=NullCompressor()),
+            context_manager=ContextManager(self.journal, config.agent),
             config=config.agent,
         )
-        self.brain: Brain = AgentBrain(
-            self.ctx, provider or OpenAICompatibleProvider(config.agent.provider)
+        model = provider or OpenAICompatibleProvider(config.agent.provider)
+        self.compaction = CompactionCoordinator(
+            store,
+            LlmCompactor(
+                model,
+                model=config.agent.provider.model,
+                max_output_tokens=config.agent.max_output_tokens,
+            ),
+            config.agent,
+            sink=outbound,
         )
+        self.brain: Brain = AgentBrain(self.ctx, model, self.compaction)
         self.buffers = JournalEventBuffer(
             store, tool_buffer_timeout=config.agent.tool_round_timeout_seconds
         )
@@ -174,6 +195,12 @@ class Runtime:
             "error": step.get("error") or state["meta"].get("intake_error"),
             "calls": list(state["calls"].values()),
             "messages": state["conversation"].get("messages", []),
+            "compaction": {
+                key: {
+                    field: value.get(field) for field in ("compression_id", "covers", "created_dt")
+                }
+                for key, value in state["compactions"].items()
+            },
             "input_errors": [
                 {"input_id": key, "error": entry["error"]}
                 for key, entry in state["inputs"].items()
@@ -220,6 +247,7 @@ class Runtime:
                     "session %s 的消费线程没能在 %ss 内退出", worker.scope, _WORKER_JOIN_TIMEOUT
                 )
         self.brain.close(wait=True)
+        self.compaction.shutdown()
         self.ctx.tools.shutdown(wait=True)
         self.hub.shutdown()
         self.journal.close()
