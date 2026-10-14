@@ -1,6 +1,6 @@
 # Feature — Journal（追加日志、状态存储与恢复）
 
-状态：Implemented
+状态：Implemented。运行事务与固定消息视图遵循 [Intake](feature-intake.md)。
 
 ## 背景与目标
 
@@ -66,8 +66,8 @@ flowchart TD
 
 ## 接口与数据
 
-字段名统一 snake_case。时间值一律 RFC 3339 UTC 字符串（如 `2026-10-12T08:31:04Z`），不用裸
-epoch —— 浮点秒在跨语言比较里有精度陷阱。
+字段名统一 snake_case。记录时间使用 RFC 3339 UTC 字符串；RuntimeStore 的 deadline
+使用 Unix 秒，恢复等待后转换为 monotonic 计时，不能拿它代替日志 cursor。
 
 ### 记录：事件日志（events）
 
@@ -100,6 +100,7 @@ payload，跨语言必须能生成逐字节一致的记录。
 | `tool.call` | `{tool_call_id, invocation_id, tool, arguments}` | 发起一次工具调用 |
 | `tool.result` | `{tool_call_id, invocation_id, outcome, ...}` | 这次调用的终态 |
 | `system.agent_step` | `{step_id, phase}` | step 生命周期审计 |
+| `runtime.commit` | `{version, reason, changes}` | scope 内原子状态与事实提交 |
 
 闭合集合，加新成员按破坏性变更处理：先定 payload 字段，再升协议版本走双读。
 
@@ -217,30 +218,25 @@ journal.commit_state(state)                        # 下次 recover 更快
 **journal 不 fold pending。** fold 要知道「`tool.result` 的 outcome 如何改变 state」，那是
 agent runtime 的业务语义。
 
-### messages 投影规则
+### RuntimeStore 与消息视图
 
-只有 `MESSAGE_TYPES` 里的三种进 messages（`system.agent_step` 不进）：
+RuntimeStore 是 Journal 上的 scope 事务层，所有 runtime 组件共享同一个实例。
+在短临界区复制状态、执行纯数据 change、计算 table/key 的变化，追加一条 runtime.commit；
+fsync 成功后发布缓存。记录版本从 1 连续递增，缺失或乱序拒绝恢复。
 
-| 记录 | 投影出的消息 |
-| --- | --- |
-| `user.message` | `{role: "user", content}` |
-| `assistant.message` | `{role: "assistant", content, reasoning, tool_calls?}` |
-| `tool.call` + `tool.result` | `{role: "tool", content, tool_call_id, outcome}` |
+表为 inputs、batches、calls、steps、meta、conversation、controls。修改保存 key 的完整新值，
+不允许删除 key；输入完成通过 phase=done 表达。changes 是事务 delta，不是 AgentState 快照。
+审批裁定与 queued、工具终态与可靠输入、claim 与固定模型请求各自属于同一条提交记录。
+reason 如 step.input / tool.terminal 表示提交原因；这些不再额外追加另一份裸事件作为恢复依据。
 
-一条 `tool.call` 先占一个位置，对应的 `tool.result` 到达时填进去。因此：
+append 报错时丢弃缓存，下一次重新读取，处理 fsync 已成功但返回失败的歧义。
+恢复只 fold 已提交的 delta，不执行模型或工具。当前扫描所有 runtime.commit，不使用事务快照加速。
+Journal.scopes 枚举所有会话；不能仅靠有 buffer 的 session 判断恢复范围。
 
-- **配对走 `invocation_id`，填进 tool 消息的 `tool_call_id` 取自 `tool.call` 记录** ——
-  模型只认后者，它必须与 assistant 轮的 `tool_calls[i].id` 逐字节相同。
-- **同一调用多次出结果只留最后一条。** 对话里不会堆出多条 tool 消息。
-- **未完成的 `tool.call` 产出一条 `unresolved: true` 的 tool 消息**（`content` 为空串）。
-  丢掉它会产出「assistant 轮带着 `tool_calls` 却没有结果」的坏数组。
-- **无对应 `tool.call` 的 `tool.result` 不投影。** 凭空造一条没有配对的 tool 消息比缺一条更糟。
-- **槽位由 `assistant.message` 的 `tool_calls` 声明，不由 `tool.call` 记录开。** 中间崩了、
-  `tool.call` 还没写，留下的数组照样合法；`tool.call` 后来认领同一个槽位。
-- **槽位已经关掉的 `tool.result` 不填进去**，攒成一条 `<events>` 补告挂在**全部消息之后**。
-
-`project_messages(records, cursor_end=None)` 也可直接调用，`None` 表示投影全部。投影顺序
-= 游标顺序，不看时间戳。
+有 runtime conversation 的日志，messages 投影返回截止 cursor 最近的固定视图：
+原 tool 槽位不回填，晚到真实结果以 user role 追加。它是查询视图，末尾可仍是工具声明；
+下一次 Brain 请求必须经 Intake 关闭槽位。没有 runtime conversation 的独立事件日志，
+project 仍可将 user / assistant / tool.call + tool.result 转为查询消息，不能代替 step 的请求快照。
 
 ### 错误
 
@@ -283,7 +279,7 @@ fsync 过的上一条记录一起截掉。崩溃落在 `write()` 之后、`fsync
 
 - **恢复是 O(总记录数) 的全量扫描。** 快照省的是 state 的重算，不省日志扫描。
 - **JSONL 只支持单进程单写者。** 多进程同时写一个 session 的文件会交错写 —— 不加文件锁，
-  不支持的场景不假装支持。
+  不支持的场景不假装支持。关闭 Journal 后旧 worker 不可重新打开写入。
 - **幂等索引常驻内存**，与事件条数线性相关。
 - **不做日志裁剪**，`events.jsonl` 无限增长。
 

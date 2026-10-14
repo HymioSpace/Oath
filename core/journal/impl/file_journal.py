@@ -276,11 +276,22 @@ class FileJournal(Journal):
         self._truncate_torn_tail = truncate_torn_tail
         self._handles: dict[Scope, _ScopeHandle] = {}
         self._lock = threading.Lock()
+        self._closed = False
 
     # -- 生命周期 ---------------------------------------------------------
 
+    def scopes(self) -> tuple[Scope, ...]:
+        if not self._root.exists():
+            return ()
+        return tuple(
+            Scope(user_id=p.parent.parent.name, session_id=p.parent.name)
+            for p in sorted(self._root.glob("*/*/events.jsonl"))
+            if p.is_file()
+        )
+
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             for handle in self._handles.values():
                 handle.close()
             self._handles.clear()
@@ -292,6 +303,8 @@ class FileJournal(Journal):
         self.close()
 
     def _handle(self, scope: Scope) -> _ScopeHandle:
+        if self._closed:
+            raise RuntimeError("Journal 已关闭")
         handle = self._handles.get(scope)
         if handle is None:
             # Scope 构造时已校验字符集，所以这里拼路径是安全的。

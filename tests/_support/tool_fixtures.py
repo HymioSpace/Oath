@@ -21,17 +21,14 @@ from core.protocol.datatype import (
 )
 from core.protocol.datatype.permission import (
     PermissionEvent,
-    PermissionRecord,
     PermissionVerdict,
 )
-from core.protocol.error import PermissionStoreError
 from core.protocol.interface import (
     AgentEventSink,
     PermissionPolicy,
     Tool,
     ToolSystem,
 )
-from core.tool.permission import DEFAULT_TTL_SECONDS, PermissionManager, PermissionStore
 from core.utils.encoding import JsonObject
 
 EMPTY_SCHEMA: JsonObject = {"type": "object", "properties": {}}
@@ -216,46 +213,6 @@ class RecordingSink(AgentEventSink):
             }
 
 
-class MemoryPermissionStore(PermissionStore):
-    """内存实现。测试大部分只需要「记下来就行」，落盘语义由专门的套件覆盖。"""
-
-    def __init__(self) -> None:
-        self._current: dict[tuple[str, str, str], PermissionRecord] = {}
-        self._lock = threading.Lock()
-
-    def record(self, record: PermissionRecord) -> None:
-        with self._lock:
-            key = _record_key(record)
-            if key in self._current:
-                raise PermissionStoreError(f"{key} 已有权限记录")
-            self._current[key] = record
-
-    def resolve(self, record: PermissionRecord) -> bool:
-        with self._lock:
-            key = _record_key(record)
-            known = self._current.get(key)
-            if known is None or known.is_resolved:
-                return False
-            self._current[key] = record
-            return True
-
-    def get(self, scope: Scope, invocation_id: str) -> PermissionRecord | None:
-        with self._lock:
-            return self._current.get((scope.user_id, scope.session_id, invocation_id))
-
-    def pending(self, scope: Scope) -> tuple[PermissionRecord, ...]:
-        with self._lock:
-            return tuple(
-                record
-                for record in self._current.values()
-                if record.scope == scope and not record.is_resolved
-            )
-
-
-def _record_key(record: PermissionRecord) -> tuple[str, str, str]:
-    return (record.scope.user_id, record.scope.session_id, record.invocation_id)
-
-
 class VerdictPolicy(PermissionPolicy):
     """按工具名给判定值，默认值给没列出的工具。记录每次被问过什么。"""
 
@@ -281,22 +238,6 @@ class BrokenPolicy(PermissionPolicy):
 
     def check(self, scope: Scope, tool: str, arguments: JsonObject) -> str:
         raise RuntimeError("策略服务连不上（测试）")
-
-
-def permission_manager(
-    policy: PermissionPolicy | None = None,
-    *,
-    store: PermissionStore | None = None,
-    sink: AgentEventSink | None = None,
-    ttl_seconds: float = DEFAULT_TTL_SECONDS,
-) -> PermissionManager:
-    """装配一个 `PermissionManager`。默认内存存储 + 记录型 sink。"""
-    return PermissionManager(
-        store if store is not None else MemoryPermissionStore(),
-        policy if policy is not None else VerdictPolicy(),
-        sink if sink is not None else RecordingSink(),
-        ttl_seconds=ttl_seconds,
-    )
 
 
 def deny(tools: frozenset[str] | set[str]) -> VerdictPolicy:
@@ -332,14 +273,12 @@ __all__ = [
     "BrokenPolicy",
     "EchoTool",
     "GatedTool",
-    "MemoryPermissionStore",
     "RaisingTool",
     "RecordingSink",
     "StaticTool",
     "VerdictPolicy",
     "definition",
     "deny",
-    "permission_manager",
     "wait_entered",
     "wait_terminal",
 ]

@@ -114,6 +114,27 @@ def project(records: list[Record], cursor_end: Cursor | None = None) -> list[Mes
     - 槽位已经关掉的 `tool.result` 不填进去，攒成一条 `<events>` 补告挂在最后。
     - 其余 type（`system.agent_step`）不投影，只留在日志里。
     """
+    # Runtime 提交携带已经固定的模型视图；原始结果的到达不会回填这些槽位。
+    runtime_messages = None
+    for record in records:
+        if cursor_end is not None and record.cursor.value > cursor_end.value:
+            break
+        if record.type == EventType.RUNTIME_COMMIT:
+            changes = record.payload.get("changes")
+            conversation = changes.get("conversation") if isinstance(changes, dict) else None
+            if isinstance(conversation, dict) and "messages" in conversation:
+                runtime_messages = conversation["messages"]
+    if isinstance(runtime_messages, list):
+        return [
+            Message(
+                role=str(m["role"]),
+                content=str(m["content"]),
+                extra={k: v for k, v in m.items() if k not in {"role", "content"}},
+            )
+            for m in runtime_messages
+            if isinstance(m, dict)
+        ]
+
     out: list[Message | None] = []
     slots = _Slots()
     late: list[LateResult] = []

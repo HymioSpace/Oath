@@ -1,11 +1,6 @@
-"""`Inbound` —— 还没进对话历史的一件事。
+"""可靠接纳的输入通知。producer 先保存 source_id 与 payload，再通知内存队列。
 
-队列里装的就是它。它没有游标、没有幂等键，因为**还没落盘**：落盘是 `Brain` 读完
-这一批之后的判断，不是传输层的副作用。producer（WebSocket、工具系统、Supervisor）
-只往队列里放东西，谁都不往 journal 里写。
-
-`kind` 是闭合的三种，每一种都有固定的队列 —— 不像记录那样「产物干脆不列」，因为
-producer 侧只发输入，压根没有产物。
+三个 consumer 分别持久化 receipt；Brain 原子认领，不决定输入是否应当落盘。
 """
 
 from __future__ import annotations
@@ -23,7 +18,7 @@ class InboundKind:
 
     #: 用户说了什么。有它就醒。
     USER: Final = "user"
-    #: 一次工具调用的终态结果。它自己不该醒，得等这一轮齐了。
+    #: 工具真实终态，ToolConsumer 按批次可见结果、呈现状态和 deadline 判断唤醒。
     TOOL_RESULT: Final = "tool_result"
     #: 控制面指令与 Supervisor 的定时唤醒。
     INVOKE: Final = "invoke"
@@ -89,15 +84,8 @@ class Batch:
 
 
 def of_command(command: Command) -> Inbound | None:
-    """把一条 command 翻成入站事件。
-
-    返回 `None` 表示这条不产生输入：`ping` 是心跳、`session.open` 是握手，两者在
-    绑定的过程中就回过执事了。
-
-    还接不上的 command（`permission.decide`）抛 `WireProtocolError` —— 静默吞掉的
-    时候，客户端点了「同意」什么也没发生，也查不出是哪一环掉的。
-    """
-    if command.type == CommandType.PING:
+    """用户输入与控制命令分别进入 user / system；查询与心跳不产生输入。"""
+    if command.type in {CommandType.PING, CommandType.SESSION_STATUS}:
         return None
     if command.type == CommandType.USER_MESSAGE:
         return Inbound(
@@ -107,15 +95,15 @@ def of_command(command: Command) -> Inbound | None:
             source_id=command.id,
             occur_dt=utc_now_iso(),
         )
-    if command.type == CommandType.RUN_CANCEL:
-        payload: JsonObject = {"run_id": command.id}
-        reason = command.payload.get("reason")
-        if isinstance(reason, str):
-            payload["reason"] = reason
+    if command.type in {
+        CommandType.RUN_CANCEL,
+        CommandType.PERMISSION_DECIDE,
+        CommandType.STEP_RETRY,
+    }:
         return Inbound(
             kind=InboundKind.INVOKE,
             source=command.type,
-            payload=payload,
+            payload=dict(command.payload),
             source_id=command.id,
             occur_dt=utc_now_iso(),
         )

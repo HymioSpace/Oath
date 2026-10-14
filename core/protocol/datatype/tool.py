@@ -60,14 +60,16 @@ def is_valid_invocation_id(value: str) -> bool:
 
 
 class ToolStatus:
-    """一次执行的进程内状态。
+    """一次调用的持久化状态。
 
-    与 `ToolOutcome` 分开：终态的取值与 outcome 一致，但 `pending` / `running`
-    不是 outcome —— 工具还没结束的时候没有 outcome 可说。
+    终态的取值与 ToolOutcome 一致；admitting / waiting_approval / queued / running
+    都是中间状态，没有 outcome。
     """
 
+    ADMITTING: Final = "admitting"
+    CANCELLED: Final = ToolOutcome.CANCELLED
     #: 已接纳，线程还没拿到。
-    PENDING: Final = "pending"
+    QUEUED: Final = "queued"
     #: 工具正在执行。
     RUNNING: Final = "running"
     #: 工具正常返回。
@@ -76,10 +78,10 @@ class ToolStatus:
     FAILED: Final = ToolOutcome.FAILED
     #: core 到 deadline 就不再等待。工具线程**可能还在跑**。
     TIMEOUT: Final = ToolOutcome.TIMEOUT
-    #: 工具跑过了，但终态事件没送出去 —— 结果存在过，只是丢了。
+    #: 工具可能执行过，但没有可靠结果；通知丢失不构成 unknown。
     OUTCOME_UNKNOWN: Final = ToolOutcome.OUTCOME_UNKNOWN
     #: 工具**没执行**：权限判定是 ask，在等人批。没有东西出错，所以不是失败。
-    AWAITING_APPROVAL: Final = ToolOutcome.AWAITING_APPROVAL
+    WAITING_APPROVAL: Final = "waiting_approval"
 
     #: 终态 → outcome 的映射。非终态不在表里。
     OUTCOMES: Final[dict[str, str]] = {
@@ -87,7 +89,7 @@ class ToolStatus:
         FAILED: ToolOutcome.FAILED,
         TIMEOUT: ToolOutcome.TIMEOUT,
         OUTCOME_UNKNOWN: ToolOutcome.OUTCOME_UNKNOWN,
-        AWAITING_APPROVAL: ToolOutcome.AWAITING_APPROVAL,
+        CANCELLED: ToolOutcome.CANCELLED,
     }
 
     #: 全部终态。到达其中之一后，这条执行的结果不可再被改写。
@@ -159,13 +161,7 @@ class ToolHandleState:
     ACCEPTED: Final = "accepted"
     #: 同一个调用已经在执行中，返回同一次执行，不重复执行外部副作用。
     DEDUPLICATED: Final = "deduplicated"
-    #: 当场被拒，终态即 `FAILED`，不发线程。
-    REJECTED: Final = "rejected"
-    #: 权限判定是 ask。没进执行表、没发线程，终态即 `AWAITING_APPROVAL`；
-    #: 审批请求已经发出去了，批没批由 agent 那边接。
-    PENDING_APPROVAL: Final = "pending_approval"
-
-    ALL: Final = frozenset({ACCEPTED, DEDUPLICATED, REJECTED, PENDING_APPROVAL})
+    ALL: Final = frozenset({ACCEPTED, DEDUPLICATED})
 
 
 # --------------------------------------------------------------------------
@@ -242,6 +238,8 @@ class ToolCallRequest:
     arguments: JsonObject
     tool_call_id: str
     invocation_id: str | None = None
+    batch_id: str = ""
+    run_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +300,9 @@ class ToolExecution:
     submitted_dt: str
     started_dt: str | None = None
     finished_dt: str | None = None
+    batch_id: str = ""
+    source: str = "brain"
+    event_id: str | None = None
 
     @property
     def is_terminal(self) -> bool:

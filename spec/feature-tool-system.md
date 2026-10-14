@@ -1,254 +1,114 @@
 # Feature — 工具系统
 
-状态：Implemented
-
-## 背景与目标
-
-agent 要动手就得调工具。工具系统是这段宿主能力：把可用的工具告诉模型、把模型点名的
-调用跑起来、把每次调用的终态变成一条持久事件。
-
-一次模型请求可能返回一批调用，它们互相独立，所以**一定并行**，一个也不能串行等。
-工具可能跑几秒到几分钟，所以派发接口立即返回执行标识，真正的执行在后台。
-
-不包含：provider 请求格式的转换（模型适配层）、重试策略、启动时的悬挂调用对账、
-审批通过后由谁重新派发（agent runtime）、审批事件对外投递的实现（`spec/todo.md`）。
+状态：Implemented（单进程线程执行器）。批次唤醒见 [Intake](feature-intake.md)。
 
 ## 总览
 
-一句话：**工具系统把模型点名的调用变成一条终态事件，并保证每个调用恰好落一条。**
-
-并行、超时、权限、去重都只为这一句服务。
+**先登记完整批次，再裁定接纳；提交资格、执行状态和真实终态都先保存。**
+业务工具只提供定义与 execute，权限、deadline、通知和恢复由 core 管理。
 
 ```mermaid
 flowchart TD
-    R[模型返回一批 tool_calls] --> A[execute: 逐项接纳<br/>去重 → 工具存在 → 权限 → 入参 → 名额]
-    A -->|被拒| T1[终态 FAILED]
-    A -->|权限 ask| T2[终态 AWAITING_APPROVAL<br/>不执行，发审批请求]
-    A -->|接纳| P[入线程池，立即返回]
-    P -->|工具返回| T3[终态 SUCCEEDED / FAILED]
-    P -->|到 deadline 还没返回| T4[终态 TIMEOUT<br/>迟到结果丢弃]
-    P -.->|投递失败| T5[终态 OUTCOME_UNKNOWN]
-    T1 & T2 & T3 & T4 --> E[emit 终态事件]
+    B[保存 batch 全部成员] --> P[异步权限和参数检查]
+    P --> A[整批接纳提交，冻结 initial_submitted]
+    A -->|allow| Q[queued]
+    A -->|ask| W[waiting_approval]
+    A -->|deny / 错误| T[真实终态]
+    W -->|system approved| Q
+    W -->|denied / expired / cancel| T
+    Q --> R[持久化 running → 执行]
+    R --> T
+    T --> I[同事务保存可靠输入]
+    I --> N[通知 tool queue / UI]
 ```
 
-四条贯穿全文的规则：
+贯穿全文的规则：原调用身份和参数不变；一个 invocation 一个终态；等待批准不占执行线程；
+在线通知失败不改写结果；未知外部结果不能自动重跑。
 
-1. **派发只收批次、立即返回。** 返回时没有一个工具跑完，返回值只回答「谁被接下、谁当场
-   被拒」。
-2. **一批里的调用一定并行。** 它们互相独立，串行等于把延迟乘以批次数。
-3. **终态唯一且不可改写。** 超时后姗姗来迟的成功不会翻成 `SUCCEEDED`。
-4. **执行前先问权限。** `ask` 的调用不执行、不占名额，落一条 `awaiting_approval` 终态
-   把模型那个槽位填上。
+## 1 接口与身份
 
-## 接口与数据
-
-### 工具定义与调用标识
-
-`ToolDefinition`（wire 形态，provider 无关）：`name` / `description` /
-`input_schema`。`name` 必须匹配 `^[a-z][a-z0-9_]{0,63}$` —— 函数调用协议把名字直接拼进
-请求体，含点或连字符的名字会被 provider 拒收。校验在注册期做一次。
-
-一次调用牵两个标识，来源不同，不能合并：
-
-| 标识 | 谁生成 | 干什么 |
-| --- | --- | --- |
-| `tool_call_id` | 模型 API | 对齐 assistant 轮的 `tool_calls[i].id` 与 tool 消息 |
-| `invocation_id` | Oath | 状态查询的键，也是 `tool.call` ↔ `tool.result` 的配对键 |
-
-`tool_call_id` **原样透传，一个字符都不改**：provider 靠这对值配一对不上就拒收整条
-请求。拿 `invocation_id` 顶替它是错的 —— 那是 Oath 生成的串，provider 不认。
-`invocation_id` 由 Oath 生成，只约束长度（要拼进 `tool.result` 的幂等键）。
-
-### `Tool` —— 扩展实现的接口
+ToolRegistry 校验定义与 timeout，definitions 按名称排序。Tool 提供：
 
 ```python
-class Tool(ABC):
-    @property
-    @abstractmethod
-    def definition(self) -> ToolDefinition: ...
-    @abstractmethod
-    def execute(self, invocation: ToolInvocation) -> ToolResult: ...
+definition: ToolDefinition
+execute(invocation: ToolInvocation) -> ToolResult
 ```
 
-扩展只提供业务动作和内容。权限、超时、并发、状态迁移、投递都在 core 那一侧。业务
-失败**抛 `ToolExecutionError`**（返回值等于成功）。
+ToolInvocation 包含 scope、invocation_id、原参数与 monotonic deadline；工具可据此设置自己的
+I/O timeout。正常返回为成功，业务异常使用 ToolExecutionError。
 
-`ToolResult` 只有 `content` 一个字段 —— `tool.result` payload 除两个 id 与 `outcome`
-外只允许 `content` 与 `error`，扩展自己塞元数据会破掉「事件 payload 恰好是合法
-`tool.result` payload」。
+ToolSystem 提供 submit_batch、execute、batch_status、status、apply_permission、cancel、recover_scope。
+`submit_batch` 要求完整、非空且身份唯一的批次；返回登记回执，不等待权限检查或执行完成。
+相同 batch_id + manifest 返回原批次；不同内容或侵占已有 invocation_id 报错。
+`execute` 是独立调用入口，可生成缺省 invocation_id；Brain 使用显式稳定身份的 submit_batch。
 
-超时挂在注册项上（`registry.register(tool, timeout_seconds=...)`），不是扩展声明的属性
-—— 扩展说「我跑多久」等于让它决定自己什么时候被放弃。`definitions()` 按名字排序：同一份
-工具集在不同进程里必须序列化成逐字节相同的请求体。
+scope 固定为 user/session，模型 tool_call_id 仅用于消息配对。
+外部客户端审批和查询使用 invocation_id；source 由 core 决定，不接受客户端声明。
 
-### 派发
+## 2 接纳与初次集合
 
-```python
-class ToolSystem(ABC):
-    def definitions(self) -> tuple[ToolDefinition, ...]: ...
-    def execute(self, scope: Scope, requests: Sequence[ToolCallRequest]) -> BatchExecution: ...
-    def status(self, scope: Scope, invocation_id: str) -> ToolExecution | None: ...
-    def shutdown(self, *, wait: bool = True) -> None: ...
-```
+batch 声明先保存所有成员及 admission_deadline。权限策略在锁外异步返回 allow / deny / ask，
+参数用注册时同一份 JSON Schema 校验。策略线程数有界，异常、容量不足和接纳超时变为逐项失败。
+整批接纳提交之前不执行工具，也不展示部分授权卡。
 
-- **入参就是一批。** 单个调用 = 长度为 1 的批次。
-- **逐项独立。** 一项被拒不影响同批其他项。整批只在一个地方抛异常：入参本身不合法
-  （空批次、id 超长）。
-- **并发有上限。** 超过 `max_pending` 的项当场被拒（`kind=busy`）。立即返回的接口不能
-  阻塞，默默排到无限长会让一个失控请求吃光内存。
+接纳时一次冻结 initial_submitted：初次由 brain 提交的 queued 项。它包含排队尚未运行的项，
+不含 ask、立即拒绝和随后 system 提交的项。工具状态变化不改写这个集合。
+批次成员、状态和终态 event_id 可通过 batch_status 一致读取。
 
-`deduplicated`：同一个 `(scope, invocation_id)` 未终结时返回同一次执行 —— 外部副作用
-不会因为重发一次请求就跑两遍。
+## 3 审批与执行
 
-### 状态与终态
+PermissionManager 使用同一个 RuntimeStore；不另建审批文件。ask 保存 waiting_approval、
+pending 和 approval_deadline，持久化之后发 permission.requested 给 UI。
 
-| 终态 | 何时 |
+system consumer 将裁定交 apply_permission：
+
+- 同一 command_id 幂等；已结束 / 已裁定调用不重复获得执行资格。
+- 重新检查 TTL 和 run 取消状态。
+- approved：裁定与 queued + execution deadline + source=system 原子保存。
+- denied / expired：保存裁定与真实失败终态，source=system。
+
+批准执行原 invocation 和原参数，不经模型重新生成 toolcall。批准本身不唤醒 Brain。
+ToolConsumer 收到终态后按自己的批次规则判断；system 提交项不改变首次等待集合。
+
+worker 取得物理执行槽位后，先保存 running 再执行。工具定义若与接纳时快照不同则不执行。
+排队和运行共用有限 execution deadline；审批等待用独立 TTL。
+线程无法安全强杀，timeout 后物理槽位仍占用到该线程返回，避免不断产生挂起线程。
+
+## 4 唯一终态与可靠通知
+
+终态取 succeeded、failed、timeout、cancelled、outcome_unknown。
+终态包含 invocation_id、tool_call_id、batch_id、run_id、source、event_id、outcome 与结果 / 错误。
+事件身份固定为 `result:<invocation_id>`。
+
+一次事务同时更新调用终态和 accepted 输入；没有“结果保存了，但不知道该投递什么”的空隙。
+通知可重复，consumer 按 event_id dedup；没有 receipt 的终态继续重投。投递到 UI 失败只影响在线展示。
+晚到 worker 返回不能改写 timeout / cancelled / unknown，也不能发第二个终态。
+
+工具状态查询和重新连接的 session.status 是当前事实来源；UI 不依赖授权卡在线推送是否恰好收到。
+工具事件是执行事实；reminder 是 Brain 固定的消息视图，两者不能互相覆盖。
+
+## 5 失败与恢复
+
+启动枚举 journal 所有 scope，恢复批次、调用、审批、输入与 deadline，包括没有 buffer 的待审批 session。
+
+| 持久化状态 | 恢复 |
 | --- | --- |
-| `SUCCEEDED` | 工具正常返回 |
-| `FAILED` | 接纳阶段判完（未知工具 / 权限拒 / 入参不合 schema），或 `execute` 抛异常 |
-| `TIMEOUT` | core 到 deadline，工具还没返回 |
-| `OUTCOME_UNKNOWN` | 工具**跑过了**，但终态事件投递失败 |
-| `AWAITING_APPROVAL` | 工具**没执行**：权限判定 `ask`，在等人批 |
+| admitting | 等已保存的接纳决定；缺失决定由 admission deadline 有限收尾 |
+| waiting_approval | 恢复原请求和 TTL；过期命令经 system queue 裁定 |
+| queued | 原调用尚未取得执行资格，可在 deadline 内派发 |
+| running | 外部结果无法确认，保存 outcome_unknown，不自动再执行 |
+| 终态 | 只重投尚无 receipt 的原事件，不改结果 |
 
-`OUTCOME_UNKNOWN` 不能被别的状态顶替：记成 `FAILED` 或 `TIMEOUT` 会让上层以为工具
-没跑过而重试一个可能已经生效的副作用。
+cancel 先保存 run 标志；未开始调用 cancelled，运行中调用 outcome_unknown。
+取消与取得执行资格在 scope 事务里有顺序；已开始的第三方副作用不承诺撤回。
 
-`status()` 查不到返回 `None`（这是查询不是命令），**跨 scope 一律查不到**。当场被拒
-的调用没有执行记录 —— 没有东西被执行过。
+维护线程按 scope 退避故障，其他 scope 可继续；consumer 自身重查可靠输入，漏通知不导致永久等待。
+存储失败不返回虚假成功。Journal 关闭后旧线程不能重新打开写入。
 
-### 事件与投递口
+## 6 限制与跨仓库影响
 
-```python
-class AgentEvent(ABC):      # type / scope / tool_call_id / invocation_id /
-                            # tool / payload / idempotency_key / occur_dt
-class ToolEvent(AgentEvent): outcome
-class PermissionEvent(AgentEvent): status
+执行器使用有界 daemon threads，不是可强杀沙箱。外部 operation 查询 / 对账接口尚未接入，
+因此 running 恢复统一使用保守 unknown。外部 exactly-once 需要工具和第三方系统共同支持。
 
-class AgentEventSink(ABC):
-    def emit(self, event: AgentEvent) -> None: ...
-```
-
-**系统层面只有一个 sink。** 工具终态与审批事件是同一件事的两头，分成两个投递口只会让
-实现方写两份几乎一样的代码，而下游拿到的事件流还是同一条。投递是同步的，`emit` 抛错
-必须当场知道 —— 实现内部可以排队可以重试，但失败信号必须同步传回。
-
-`ToolEvent.payload` 逐字段对齐 `PAYLOAD_SCHEMAS[(tool.result, 1)]`，sink 可以直接
-`journal.append(...)`，零翻译。加事件类型时加子类，不要往基类加字段。
-
-**不变量：每个进入 `execute` 的项恰好产生一个终态事件。** 当场被拒的项也发 —— agent
-拿不到 `tool.result` 就填不上模型留下的 `tool_calls` 空位。
-
-### 权限
-
-`PermissionPolicy.check(scope, tool, arguments) -> str` 返回 `allow` / `deny` / `ask`。
-
-**拒绝不是异常，是返回值。** 「要问人」和「拒绝」都是正常结果。抛异常意味着**策略实现
-自己出错了**，core fail closed —— 宁可误杀不可误放。`check` 不接收 `invocation_id`：它
-回答「这个主体能不能调这个工具」，不是「这一次具体调用行不行」。
-
-`ask` 的结果是一条**永久历史**：LLM 的 message 数组里每个 tool call 必须配一条 tool
-result，而 context 是 append-only 的。所以「正在等待批准」当场就是终态结果，审批回来
-之后**不再补第二条 tool result**，结论以一条 user message 追加在后面。
-
-`ask` 的调用不进执行表、不占 worker、不占 `max_pending`。名额的本义是保护 worker 与
-执行表，待审批两者都不占；审批状态查 `PermissionManager`。
-
-审批记录（`PermissionRecord`）含 `arguments` / `status` / `expires_dt` / `decided_by` /
-`reason`，存的是**判权限时看到的那份参数** —— 审批的人要看的就是它们。判权限与工具真正
-跑起来之间隔着排队与执行，调用方手上那个 dict 还活着，所以记一份拷贝而不是引用。
-
-`PermissionStore`（`record` / `resolve` / `get` / `pending`）只保证**当前状态**、
-**裁定只生效一次**、**跨 scope 查不到**。
-
-## 实现方案
-
-接纳顺序固定为 **去重 → 工具存在 → 权限 → 入参 → 名额**：先便宜的、再判定性的，最后
-才占稀缺资源。权限排在入参前面 —— 它问的是「这个主体能不能调这个工具」，拿不合法参数
-去问没有意义，还可能把参数泄露给不该看它的策略实现。接纳阶段判完的失败不进线程池。
-
-执行在 `ThreadPoolExecutor` 里跑；超时由独立的 watchdog 线程判，不占用 worker。
-
-### 超时：core 不再等待，不终止线程
-
-Python 没有安全的线程终止手段，强杀会让 `finally` 不跑、锁不释放、连接不关。任何
-「到点就杀掉线程」的实现都是在假装能取消。
-
-- watchdog 线程持条件变量等最近的 deadline。到点判 `TIMEOUT`、发终态事件。
-- 工具线程返回时在锁内检查执行项是否已有终态：有就**丢弃返回值**。
-- 排队未开始的项到点后，worker 取到它发现已有终态，直接跳过。
-
-所以 `TIMEOUT` 的含义是**core 在这一刻不知道这个工具有没有生效**。能不能重试由上层按
-副作用性质判断，工具系统不替它决定。
-
-### 权限的实现
-
-`core/tool/permission/` 独立成子模块，依赖方向单向 `core/tool/impl/` →
-`core/tool/permission/` → `core/protocol/`。它是工具系统的一个环节，不是可选配件 ——
-所以 `ToolSystem` 的构造参数没有 `PermissionManager` 就构造不出来。
-
-`authorize()` 的分支：
-
-1. 已关闭 → 抛 `PermissionDeniedError`。
-2. 已有记录 → 回放上次结果。
-3. 调策略。抛异常 → `PermissionDeniedError`（fail closed）；返回未约定的值 →
-   `PermissionError`（接口违约，不能猜）。
-4. `ask` → 落记录 → 压进 deadline 堆 → **当场发** `permission.requested`。一个等人批的请求没被告知
-   出去就永远等不到。先压进堆再发事件是刻意的：投递方可能同步回一个裁定，那时 watchdog
-   醒来必须已经看到这条请求不再需要管，否则会拿过期裁定盖掉人的同意。
-
-**重发**同一个 `invocation_id` 不重新问策略，回放记录：`approved → allow`、`pending →
-ask`、`denied` / `expired → deny`。换工具、换 `tool_call_id`、**换参数**都抛
-`PermissionError`：人批的是某一次具体调用连同它的参数，拿同一个 id 换一组参数回来，
-放行的就是一次没人看过的事。参数按 canonical JSON 比 —— 键序不同是同一组参数。存储
-顺带当了决策缓存。
-
-**有效期**由 watchdog 判，不靠查询时比时间 —— 否则一个没人再碰的请求永远挂着，而挂着就
-等于「随时可能被批准」。`_expire` 判之前重新读一次存储，已裁定的直接返回。`expires_dt`
-是墙钟（要给人看），watchdog 用 monotonic 调度。
-
-**存储布局** `<root>/<user_id>/<session_id>/permissions.jsonl`，每行一次写入。当前状态是
-打开时顺序 fold 出来的内存索引，「裁定只生效一次」由 fold 保证。落盘照抄 journal 的硬
-做法：`O_APPEND | O_CREAT`、`canonical_json` + `\n`、返回前 fsync、写失败 `ftruncate`
-回原长度、只有最后一行可能截断、损坏的中间行抛错而不是跳过（跳过的正是「谁批过什么」）。
-**单进程单写者**，不加文件锁。
-
-## 失败与恢复
-
-| 场景 | 行为 |
-| --- | --- |
-| 未知工具 / 权限拒 / 入参不合 schema / 队列满 | 接纳时 `FAILED`，发终态事件，不进线程池 |
-| 权限这一步没能完成（存储故障 / 策略违约） | 接纳时 `FAILED` + `kind=permission_error`，发终态事件。**不抛出去** |
-| 权限判定 `ask` | 不执行，`AWAITING_APPROVAL`，发终态事件，不进执行表 |
-| 策略抛异常 | fail closed 按拒绝处理，原始原因进错误消息 |
-| 同一审批被裁定两次 | 第二次返回 `False`，不写盘不发事件 |
-| 裁定来自别的 scope | 返回 `False`，不泄露该 id 是否存在 |
-| `decide` 收到非终态 | 抛 `PermissionError`（调用方的 bug） |
-| 审批到期但已被裁定 | `_expire` 重新读存储已终结就什么都不做 |
-| 终态事件投递失败 | 状态 `OUTCOME_UNKNOWN`，无事件。**不重试** |
-| 存储文件末尾半行 / 中间行损坏 | 丢弃并截断 / 抛 `PermissionStoreError` |
-| 进程重启 | 执行表清空；待审批请求还在文件里，但 watchdog 不追「重启前就在等」的 |
-
-最后两行是已知缺口：v1 不做启动对账（需要「哪些 `tool.call` 还没有对应 `tool.result`」的
-扫描语义），也不做启动时的过期扫描。
-
-## 跨仓库协议变更
-
-Hymio / Nostalgia / 客户端要跟着改的三处：
-
-1. `ToolOutcome` 新增 `awaiting_approval`。下游读到不认识的值应按未知值处理，不要当成
-   `succeeded`。
-2. `ToolErrorKind` 新增 `permission_error`，与 `permission_denied` 分开：前者「判定为
-   拒绝」，后者「这一步没能完成」。两者都收敛成该项被拒不往外抛。
-3. `tool.call` / `tool.result` 的 payload 加 `tool_call_id` 为必填。
-
-投递口只有一个 `AgentEventSink`（`emit` 收基类 `AgentEvent`），应用侧实现一个就够。
-
-## 待决事项
-
-- **待审批要不要单独设上限**：现在不占 `max_pending`。线上出现一次请求生成几百个待审批
-  调用时再讨论。
-- **重试策略**：`OUTCOME_UNKNOWN` 的可重试性怎么声明。
-- **`ToolResult.content` 的体积**：截断策略与 blob 外置，等 journal 的 blob 方案。
-- **失败结果给模型看的样子**：`tool.result` 没有 `content` 时投影会塞整段 JSON。改投影层
-  渲染人话，还是失败时也填一段可读 `content`，等模型适配层一起定。
-- **审批会签**：`decided_by` 是自由字符串，等 Hymio 身份模型定。
+Hymio 审批卡显示原工具、参数、有效期和 invocation；重连查询恢复状态。批准 ACK 仅表示命令接纳，
+不能显示“执行成功”。Nostalgia 和 trace 消费方读取 runtime.commit 中保存的终态事实或状态 API。

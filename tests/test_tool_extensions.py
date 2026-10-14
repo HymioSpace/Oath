@@ -6,26 +6,50 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from core.journal.impl import FileJournal
+from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype import Scope, ToolCallRequest, ToolStatus
+from core.queue import InMemoryEventQueue
 from core.tool import ToolRegistry
 from core.tool.impl import ThreadedToolSystem
 from core.utils.encoding import canonical_json, parse_timestamp
 from extensions.tools import ClockTool, TextTemplateTool
-from tests._support.tool_fixtures import RecordingSink, permission_manager, wait_terminal
+from tests._support.tool_fixtures import RecordingSink, VerdictPolicy, wait_terminal
 
 SCOPE = Scope(user_id="u1", session_id="s1")
 
 
-def build() -> tuple[ThreadedToolSystem, ToolRegistry, RecordingSink]:
+def build(
+    tmp_path: Path,
+) -> tuple[ThreadedToolSystem, ToolRegistry, RecordingSink, FileJournal]:
+    """装配一组对象。
+
+    `journal` 一并返回：关停是具体实现的生命周期，而 `RuntimeStore.journal`
+    上只有 `Journal` 接口 —— 要关的是这里自己造出来的那个对象。
+    """
     registry = ToolRegistry()
     sink = RecordingSink()
     registry.register(ClockTool(), timeout_seconds=5.0)
     registry.register(TextTemplateTool(), timeout_seconds=5.0)
-    return ThreadedToolSystem(registry, sink, permission_manager()), registry, sink
+    journal = FileJournal(tmp_path)
+    return (
+        ThreadedToolSystem(
+            registry,
+            sink,
+            VerdictPolicy(),
+            store=RuntimeStore(journal),
+            queue=InMemoryEventQueue(),
+        ),
+        registry,
+        sink,
+        journal,
+    )
 
 
-def test_both_tools_register_and_appear_in_the_summary() -> None:
-    system, registry, _ = build()
+def test_both_tools_register_and_appear_in_the_summary(tmp_path: Path) -> None:
+    system, registry, _, journal = build(tmp_path)
     try:
         assert registry.names() == ("current_time", "render_template")
         definitions = system.definitions()
@@ -33,11 +57,12 @@ def test_both_tools_register_and_appear_in_the_summary() -> None:
         assert all(d.description for d in definitions)
         assert all(d.input_schema["type"] == "object" for d in definitions)
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_clock_returns_a_parsable_utc_timestamp() -> None:
-    system, _, _ = build()
+def test_clock_returns_a_parsable_utc_timestamp(tmp_path: Path) -> None:
+    system, _, _, journal = build(tmp_path)
     try:
         system.execute(
             SCOPE,
@@ -55,12 +80,13 @@ def test_clock_returns_a_parsable_utc_timestamp() -> None:
         moment = parse_timestamp(execution.result.content)
         assert moment.tzinfo is not None
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_clock_rejects_arguments_it_never_declared() -> None:
+def test_clock_rejects_arguments_it_never_declared(tmp_path: Path) -> None:
     """`additionalProperties: false` 让模型编出来的参数在接纳阶段就被挡掉。"""
-    system, _, _ = build()
+    system, _, _, journal = build(tmp_path)
     try:
         handle = system.execute(
             SCOPE,
@@ -73,13 +99,14 @@ def test_clock_rejects_arguments_it_never_declared() -> None:
                 )
             ],
         ).handles[0]
-        assert handle.state == "rejected"
+        assert wait_terminal(system, SCOPE, handle.invocation_id).status == "failed"
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_template_renders_placeholders() -> None:
-    system, _, _ = build()
+def test_template_renders_placeholders(tmp_path: Path) -> None:
+    system, _, _, journal = build(tmp_path)
     try:
         system.execute(
             SCOPE,
@@ -99,12 +126,13 @@ def test_template_renders_placeholders() -> None:
         assert execution.result is not None
         assert execution.result.content == "你好，小明。今天是 周一。"
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_template_renders_non_string_values_as_json() -> None:
+def test_template_renders_non_string_values_as_json(tmp_path: Path) -> None:
     """走 canonical JSON 而不是 `str()` —— 后者给布尔写成 True。"""
-    system, _, _ = build()
+    system, _, _, journal = build(tmp_path)
     try:
         system.execute(
             SCOPE,
@@ -121,11 +149,12 @@ def test_template_renders_non_string_values_as_json() -> None:
         assert execution.result is not None
         assert execution.result.content == canonical_json({"a": [1, True]})
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_template_tolerates_spaces_inside_placeholders() -> None:
-    system, _, _ = build()
+def test_template_tolerates_spaces_inside_placeholders(tmp_path: Path) -> None:
+    system, _, _, journal = build(tmp_path)
     try:
         system.execute(
             SCOPE,
@@ -142,12 +171,13 @@ def test_template_tolerates_spaces_inside_placeholders() -> None:
         assert rendered is not None
         assert rendered.content == "x"
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()
 
 
-def test_missing_placeholder_is_a_tool_error_not_a_blank_field() -> None:
+def test_missing_placeholder_is_a_tool_error_not_a_blank_field(tmp_path: Path) -> None:
     """缺失就报错。渲染成空串会让一个 bug 看起来像一个故意留白的字段。"""
-    system, _, sink = build()
+    system, _, sink, journal = build(tmp_path)
     try:
         system.execute(
             SCOPE,
@@ -167,4 +197,5 @@ def test_missing_placeholder_is_a_tool_error_not_a_blank_field() -> None:
         assert execution.error.kind == "tool_error"
         assert sink.wait_for(1)[0].payload["outcome"] == "failed"
     finally:
-        system.shutdown(wait=False)
+        system.shutdown(wait=True)
+        journal.close()

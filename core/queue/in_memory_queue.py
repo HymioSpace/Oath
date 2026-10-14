@@ -23,6 +23,7 @@ class InMemoryEventQueue(EventQueue):
         self._buckets: dict[tuple[str, str, str], deque[Inbound]] = {}
         self._cond = threading.Condition()
         self._closed = False
+        self._revisions: dict[tuple[Scope, str], int] = {}
 
     # -- 入队 --------------------------------------------------------------
 
@@ -32,6 +33,8 @@ class InMemoryEventQueue(EventQueue):
                 return
             key = (scope.user_id, scope.session_id, queue_of(item.kind))
             self._buckets.setdefault(key, deque()).append(item)
+            rev_key = (scope, queue_of(item.kind))
+            self._revisions[rev_key] = self._revisions.get(rev_key, 0) + 1
             self._cond.notify_all()
 
     # -- 出队 --------------------------------------------------------------
@@ -55,20 +58,47 @@ class InMemoryEventQueue(EventQueue):
             bucket = self._buckets.get((scope.user_id, scope.session_id, queue))
             return len(bucket) if bucket else 0
 
-    def wait(self, scope: Scope, *, timeout: float | None = None) -> bool:
+    def revision(self, scope: Scope, queue: str) -> int:
         with self._cond:
-            while not self._has_pending_locked(scope):
-                if self._closed:
-                    return False
-                # 判空与等待在同一把锁里，所以不会漏掉 put：put 要拿同一把锁。
-                if not self._cond.wait(timeout):
-                    return False
-            return True
+            return self._revisions.get((scope, queue), 0)
 
-    def _has_pending_locked(self, scope: Scope) -> bool:
-        return any(
-            self._buckets.get((scope.user_id, scope.session_id, queue)) for queue in QueueName.ALL
-        )
+    def notify(self, scope: Scope) -> None:
+        with self._cond:
+            for queue in QueueName.ALL:
+                key = (scope, queue)
+                self._revisions[key] = self._revisions.get(key, 0) + 1
+            self._cond.notify_all()
+
+    def wait(
+        self,
+        scope: Scope,
+        *,
+        queue: str | None = None,
+        timeout: float | None = None,
+        after: int | None = None,
+    ) -> bool:
+        if queue is not None and queue not in QueueName.ALL:
+            raise UnknownQueueError(queue)
+        queues = QueueName.ALL if queue is None else (queue,)
+        with self._cond:
+            return (
+                self._cond.wait_for(
+                    lambda: (
+                        self._closed
+                        or any(
+                            self._buckets.get((scope.user_id, scope.session_id, name))
+                            for name in queues
+                        )
+                        or (
+                            queue is not None
+                            and after is not None
+                            and self._revisions.get((scope, queue), 0) != after
+                        )
+                    ),
+                    timeout=timeout,
+                )
+                and not self._closed
+            )
 
     # -- 生命周期 ----------------------------------------------------------
 
