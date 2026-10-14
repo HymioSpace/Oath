@@ -60,7 +60,9 @@ batch、invocation、event 与 outcome；等待批准是视图 reminder，不是
 
 模型请求保存 messages、工具定义、model、temperature、max_output_tokens、extra_params。
 重试与恢复读取同一份请求；新输入留在 buffer。凭据和 transport 配置由部署提供，不写请求快照。
-ContextManager 另提供 journal 查询 / compressor 接口；执行链暂不接入压缩，需要保护固定槽位后再实现。
+
+`conversation.messages` 存全文；发给模型的视图由 CompactionCoordinator 按已生效的压缩产物重组。
+认领事务只做这个重组，阈值判断和压缩调用都发生在事务之前。见 [Compaction](feature-compaction.md)。
 
 ## 4 模型与后处理
 
@@ -94,6 +96,7 @@ provider 自身必须有有限 I/O timeout；Brain 不能安全强杀任意第�
 
 - JSONL + RuntimeStore 只支持单进程 writer，不提供多机 owner lease / fencing。
 - 未保存的模型响应可能重试并重复计费；未保存响应中的工具不会执行。
-- 输入、conversation 与工具结果当前保留在日志；压缩、大结果 blob、裁剪和分页另行实现。
+- 输入、conversation 与工具结果在日志里保留全文；压缩与截断只改发给模型的那一份。
+- 日志全量保留，长会话的存储与恢复成本尚未做裁剪和分页。
 - Hymio 客户端处理 step.status 与 session.status；失败后提供显式 retry，不能用新消息偷偷跳过失败步。
 - Nostalgia 若读取工具事实，应读取真实终态，不能将 reminder 当成执行结果。

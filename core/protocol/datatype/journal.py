@@ -160,9 +160,22 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
     (EventType.TOOL_CALL, 1): PayloadSchema(
         required=frozenset({"tool_call_id", "invocation_id", "tool", "arguments"})
     ),
+    # `detail_key` / `original_chars` 只在结果超过阈值时出现：正文被截断，全文在
+    # detail store 里按这个 key 取回。
     (EventType.TOOL_RESULT, 1): PayloadSchema(
         required=frozenset({"tool_call_id", "invocation_id", "outcome"}),
-        optional=frozenset({"content", "error", "batch_id", "run_id", "source", "event_id"}),
+        optional=frozenset(
+            {
+                "content",
+                "error",
+                "batch_id",
+                "run_id",
+                "source",
+                "event_id",
+                "detail_key",
+                "original_chars",
+            }
+        ),
     ),
     # `trigger` 是这一轮被什么唤醒的：没有它，trace 里分不清「用户问了」和「工具回来
     # 了」，两者的排查方式不一样。

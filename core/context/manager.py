@@ -16,7 +16,6 @@ from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.message import Message
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolDefinition
-from core.protocol.interface.context import ContextCompressor
 from core.protocol.interface.journal import Journal
 
 _BEGINNING = Cursor(CursorKind.LINE, 0)
@@ -38,16 +37,9 @@ class Context:
 class ContextManager:
     """从 journal 拼 context。"""
 
-    def __init__(
-        self,
-        journal: Journal,
-        config: AgentConfig,
-        *,
-        compressor: ContextCompressor | None = None,
-    ) -> None:
+    def __init__(self, journal: Journal, config: AgentConfig) -> None:
         self._journal = journal
         self._config = config
-        self._compressor = compressor
 
     def build(self, scope: Scope, tools: tuple[ToolDefinition, ...]) -> Context:
         """拼出截至此刻的完整对话。
@@ -63,9 +55,6 @@ class ContextManager:
         recovery = self._journal.recover(scope)
         messages = project(list(self._journal.read_range(scope, _BEGINNING)))
         state = recovery.state
-
-        if self._compressor is not None and self._compressor.should_compress(messages, state):
-            messages, state = self._compressor.compress(messages, state)
 
         return Context(
             messages=self._with_system_prompt(messages),

@@ -19,6 +19,7 @@ from typing import cast
 from jsonschema import validate
 
 from core.buffer.journal_buffer import accept_input
+from core.detail.shrink import ResultShrinker
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype.inbound import Inbound, InboundKind
 from core.protocol.datatype.permission import PermissionEvent, PermissionEventType
@@ -65,6 +66,7 @@ class ThreadedToolSystem(ToolSystem):
         max_pending: int = DEFAULT_MAX_PENDING,
         approval_ttl: float = 300,
         admission_timeout: float = 5,
+        shrinker: ResultShrinker | None = None,
     ) -> None:
         for name, value in (
             ("max_concurrency", max_concurrency),
@@ -78,6 +80,7 @@ class ThreadedToolSystem(ToolSystem):
             raise ValueError("执行和接纳容量必须是正整数")
         self.store, self._queue = store, queue
         self._registry, self._sink = registry, sink
+        self._shrinker = shrinker
         self._max_pending, self._ttl, self._admission_timeout = (
             max_pending,
             approval_ttl,
@@ -521,6 +524,12 @@ class ThreadedToolSystem(ToolSystem):
                 if not isinstance(result, ToolResult):
                     raise TypeError("工具必须返回 ToolResult")
                 canonical_json(result.content)
+                # 截断在事务之外完成：写 detail 是文件 I/O，不能在 scope 锁里做。
+                content, detail = (
+                    (result.content, None)
+                    if self._shrinker is None
+                    else self._shrinker.shrink(call["tool"], scope, invocation_id, result.content)
+                )
 
                 def finish(state: State) -> None:
                     current = state["calls"][invocation_id]
@@ -534,7 +543,7 @@ class ThreadedToolSystem(ToolSystem):
                     ):
                         _terminal(state, current, "timeout", error="执行期限已到，结果迟到")
                     else:
-                        _terminal(state, current, "succeeded", content=result.content)
+                        _terminal(state, current, "succeeded", content=content, detail=detail)
 
                 self.store.transact(scope, "tool.terminal", finish)
             except Exception as exc:

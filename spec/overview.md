@@ -1,6 +1,6 @@
 # Oath 整体架构
 
-状态：单进程运行链路已实现；Supervisor、多机 HA 和高级 context 管理待实现。
+状态：单进程运行链路与三级压缩已实现；Supervisor、多机 HA 待实现。
 
 ## 定位
 
@@ -36,7 +36,9 @@ flowchart TD
 | core/buffer | 持久化输入接纳、receipt、输入阶段 |
 | core/consumer.py | user / tool / system 各自消费和唤醒规则 |
 | core/agent | 固定请求、模型调用、持久化响应与后处理 |
-| core/context | 固定 tool 槽位、迟到结果通知；journal 查询与压缩接口 |
+| core/context | 固定 tool 槽位、迟到结果通知；journal 查询视图 |
+| core/compaction | 历史压缩：切点、阈值、产物生效 |
+| core/detail | 超阈值结果的全文存储、截断与 detail_read |
 | core/tool | 注册、完整批次、权限裁定、执行资格、deadline 与真实终态 |
 | core/llm | provider adapter，当前支持 OpenAI-compatible API |
 | core/outbound | 在线事件与客户端背压 |
@@ -73,8 +75,9 @@ queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown�
 模型失败有限重试，预算耗尽或永久错误暂停原 step；客户端显式 step.retry。
 重连通过 session.status 恢复视图，在线 delta 不重放。线程执行器不承诺终止外部副作用。
 
-当前全量日志恢复和状态复制适合原型规模；事务快照、context 压缩、大结果引用、分页、外部 operation
-对账与多进程 fencing 后续建设。单机 JSONL 不等于多机高可用，不承诺第三方副作用 exactly-once。
+当前全量日志恢复和状态复制适合原型规模；事务快照、分页、外部 operation 对账与多进程 fencing
+后续建设。压缩产物落在一张表里，一个 scope 同时只有备好的和生效的两份。单机 JSONL 不等于多机高可用，不承诺第三方副作用 exactly-once。
 
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
-[Journal](feature-journal.md)、[客户端接入](manual.md) 与 [场景推演](intake-cases.md)。
+[Compaction](feature-compaction.md)、[Journal](feature-journal.md)、[客户端接入](manual.md) 与
+[场景推演](intake-cases.md)。

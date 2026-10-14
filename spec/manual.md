@@ -76,12 +76,14 @@ step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；
 | assistant.delta | step_id, channel, text, seq |
 | assistant.message | step_id, content, reasoning, tool_calls, usage |
 | permission.requested | invocation_id, batch_id, tool, arguments, expires_at |
-| tool.terminal | event_id, invocation_id, tool_call_id, batch_id, run_id, source, outcome, content? / error? |
+| tool.terminal | event_id, invocation_id, tool_call_id, batch_id, run_id, source, outcome, content? / error?, detail_key?, original_chars? |
 | step.status | status, error, step_id? |
 | intake.rejected | input_id, error |
 | session.status | 当前快照 |
 
 tool.terminal outcome 为 succeeded / failed / timeout / cancelled / outcome_unknown。
+结果正文超过阈值时 content 是截断后的文本，detail_key 指到全文，original_chars 是原长度；
+助手用内置工具 detail_read 取回全文，它的结果不再截断。
 source=system 表示原调用经 system 裁定 / 控制产生；不意味着该结果应立即独自唤醒模型。
 unknown / timeout 不证明外部动作没有发生，客户端不能据此自动重做副作用。
 

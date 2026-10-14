@@ -46,8 +46,16 @@ class AgentConfig:
 
     #: 上下文窗口的 token 数。用来判断该不该压缩。
     context_window: int = 128_000
-    #: 用量占窗口的比例到这个数就该压缩。**v1 没有人读它** —— 接口在，实现没写。
-    compress_at_ratio: float = 0.8
+    #: 单条工具结果超过这个字符数就保头留尾，全文存进 detail store。
+    tool_result_detail_chars: int = 4000
+    #: 用量到窗口的这个比例就在后台备一份压缩产物，不生效。
+    compress_async_at_ratio: float = 0.4
+    #: 到这个比例就必须把 context 压到能发。同一个请求只压一次。
+    compress_sync_at_ratio: float = 0.9
+    #: 压缩保留末尾这么多条消息。
+    compress_keep_recent: int = 12
+    #: 压缩结果的规模上限，也是压缩调用的输出上限。
+    compress_summary_tokens: int = 1024
 
     #: 一次 run 的推理预算，工具返回触发的新 step 也计入。
     max_run_steps: int = 32
@@ -68,6 +76,10 @@ class AgentConfig:
             "llm_retry_delay",
             "tool_timeout_seconds",
             "tool_round_timeout_seconds",
+            "context_window",
+            "tool_result_detail_chars",
+            "compress_keep_recent",
+            "compress_summary_tokens",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -75,6 +87,12 @@ class AgentConfig:
         for name in ("max_run_steps", "llm_max_attempts"):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} 必须是正整数")
+        for name in ("compress_async_at_ratio", "compress_sync_at_ratio"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"{name} 必须落在 (0, 1]")
+        if self.compress_sync_at_ratio <= self.compress_async_at_ratio:
+            raise ValueError("同步阈值必须高于异步阈值")
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +146,11 @@ class OathConfig:
                 "max_output_tokens": self.agent.max_output_tokens,
                 "temperature": self.agent.temperature,
                 "context_window": self.agent.context_window,
-                "compress_at_ratio": self.agent.compress_at_ratio,
+                "tool_result_detail_chars": self.agent.tool_result_detail_chars,
+                "compress_async_at_ratio": self.agent.compress_async_at_ratio,
+                "compress_sync_at_ratio": self.agent.compress_sync_at_ratio,
+                "compress_keep_recent": self.agent.compress_keep_recent,
+                "compress_summary_tokens": self.agent.compress_summary_tokens,
                 "tool_timeout_seconds": self.agent.tool_timeout_seconds,
                 "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
                 "max_run_steps": self.agent.max_run_steps,

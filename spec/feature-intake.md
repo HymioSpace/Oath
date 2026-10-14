@@ -292,9 +292,8 @@ Hymio / 客户端：审批绑定 scope + invocation_id；批准表示提交原�
 重连查询待审批、执行与 step 状态；用原 invocation 恢复授权卡，不能只依赖在线推送找回请求。
 工具与 trace 事件新增 batch_id、event_id、source；展示区分等待批准、已批准排队、实际完成。
 模型 tool_call_id 不变；Nostalgia 消费结构化事实时不能把 reminder 当成真实执行结果。
-
-buffer timeout 已确定采用首个结果起固定截止；具体时长是配置项。
 用户 / system 的其它唤醒策略分别定义，不能通过新增统一 Intake scheduler 接管三个 consumer。
-RuntimeStore 通过一条 runtime.commit 保存跨表变化：inputs、batches、calls、steps、meta、conversation、controls。
+RuntimeStore 通过一条 runtime.commit 保存跨表变化：inputs、batches、calls、steps、meta、conversation、controls、compactions。
 工具终态和可靠输入、裁定和 queued、claim 和槽位均各自原子提交，不另写权限 / buffer 文件。
-执行器暂不支持外部 operation 对账；大型结果引用、日志裁剪、事务快照和多进程 fencing 另行实现。
+执行器暂不支持外部 operation 对账；日志裁剪、事务快照和多进程 fencing 另行实现。
+压缩见 [Compaction](feature-compaction.md)：按 scope 判断，不改已固定的槽位。

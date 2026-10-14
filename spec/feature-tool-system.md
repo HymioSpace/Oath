@@ -80,6 +80,10 @@ worker 取得物理执行槽位后，先保存 running 再执行。工具定义�
 终态包含 invocation_id、tool_call_id、batch_id、run_id、source、event_id、outcome 与结果 / 错误。
 事件身份固定为 `result:<invocation_id>`。
 
+成功结果的正文超过阈值时先落 detail store，终态里的 `content` 换成保头留尾的文本，
+另带 `detail_key` 与 `original_chars`。全文由内置工具 `detail_read` 取回，它的结果不截断。
+规则见 [Compaction](feature-compaction.md)。
+
 一次事务同时更新调用终态和 accepted 输入；没有“结果保存了，但不知道该投递什么”的空隙。
 通知可重复，consumer 按 event_id dedup；没有 receipt 的终态继续重投。投递到 UI 失败只影响在线展示。
 晚到 worker 返回不能改写 timeout / cancelled / unknown，也不能发第二个终态。
