@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from core.compaction import cut_index, estimate
+from core.compaction import cut_index
 from core.compaction.boundary import is_boundary
-from core.compaction.tokens import estimate_text
 from core.context.intake import validate_messages
 from core.detail.impl import FileDetailStore
 from core.detail.shrink import ResultShrinker
@@ -17,6 +16,7 @@ from core.journal.runtime_store import State
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.scope import Scope
 from core.utils.encoding import canonical_json
+from core.utils.tokens import estimate, estimate_text
 from tests._support.intake_fixtures import Harness, until
 from tests.test_context_compaction import CountingCompactor, build, extend, history, seed
 

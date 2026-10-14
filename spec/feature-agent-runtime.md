@@ -58,6 +58,9 @@ context 草稿与认领同事务完成；锁外压缩后，step.request 保存�
 batch、invocation、event 与 outcome；等待批准是视图 reminder，不是工具终态。
 完整序列校验禁止孤立 tool response、未闭合调用和重复 ID。
 
+system message 是 `system_prompt` 加上 [Skill](feature-skill.md) 的技能索引，索引在末尾。
+索引只在认领时组装一次，每一步的请求照常冻结；技能变了也要等下次启动。
+
 模型请求保存 messages、工具定义、model、temperature、max_output_tokens、extra_params。
 重试与恢复读取同一份请求；新输入留在 buffer。凭据和 transport 配置由部署提供，不写请求快照。
 

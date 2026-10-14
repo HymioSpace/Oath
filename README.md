@@ -5,7 +5,7 @@
 core 提供机制：事件运行时、状态机、追加日志、工具生命周期、超时、权限判定、context 组装、
 skill 加载、模型调用。扩展只提供业务内容和动作。日志是所有状态的唯一来源，崩溃后从这里恢复。
 
-**状态**：三 consumer、工具批次、审批执行与 durable drain 已实现。
+**状态**：三 consumer、工具批次、审批执行、durable drain、三级压缩与技能索引已实现。
 当前为单进程 JSONL runtime；语义和恢复边界见 [Intake](spec/feature-intake.md)。
 
 ## 目录
@@ -24,7 +24,7 @@ skill 加载、模型调用。扩展只提供业务内容和动作。日志是�
 | `core/protocol/datatype/` | 数据类型：`Scope` / `Message` / `AgentState` / `Cursor` + journal 专属的记录格式与值对象 |
 | `core/protocol/interface/` | 接口，按模块分文件（`journal.Journal`） |
 | `core/protocol/error.py` | 契约层的异常 |
-| `core/utils/` | 编码与时间戳，不构成契约 |
+| `core/utils/` | 编码、时间戳与 token 估算，不构成契约 |
 | `core/journal/` | 机制：校验、幂等语义、游标运算、messages 投影 |
 | `core/journal/impl/` | 存储后端（v1 只有 JSONL） |
 

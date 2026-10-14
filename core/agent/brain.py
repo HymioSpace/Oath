@@ -13,7 +13,6 @@ from typing import Any, cast
 
 from core.buffer.journal_buffer import buffered
 from core.compaction.coordinator import CompactionCoordinator
-from core.compaction.tokens import estimate_text
 from core.context.intake import build_messages
 from core.journal.runtime_store import State
 from core.protocol.datatype import Message, Scope, ToolCallRequest, ToolDefinition
@@ -23,6 +22,7 @@ from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
 from core.utils.encoding import canonical_json, utc_now_iso
+from core.utils.tokens import estimate_text
 
 _log = logging.getLogger(__name__)
 
@@ -97,6 +97,15 @@ class AgentBrain(Brain):
         self._store.transact(scope, "step.retry", change)
         self.resume(scope)
 
+    def _system_prompt(self) -> str:
+        """system prompt + 技能索引。索引放末尾 —— 模型先读规则，再读可选能力。
+
+        索引是启动时的快照，每一步的请求照常被冻结：技能变了也要等下次启动。
+        """
+        index = self._ctx.skills.list(self._ctx.config.skill_index_tokens)
+        prompt = self._ctx.config.system_prompt
+        return f"{prompt}\n\n{index}" if index else prompt
+
     def _claim(self, scope: Scope, triggers: dict[str, tuple[str, ...]]) -> State | None:
         definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
         config = self._ctx.config
@@ -118,10 +127,9 @@ class AgentBrain(Brain):
             if new_user or not state["meta"].get("run_id"):
                 state["meta"].update(run_id=uuid.uuid4().hex, run_steps=0, run_started=time.time())
             messages = build_messages(state, entries, step_id)
+            system = self._system_prompt()
             request_messages = (
-                [{"role": "system", "content": config.system_prompt}]
-                if config.system_prompt
-                else []
+                [{"role": "system", "content": system}] if system else []
             ) + messages
             exhausted = (
                 state["meta"].get("run_steps", 0) >= config.max_run_steps

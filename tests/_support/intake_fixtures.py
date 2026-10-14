@@ -28,6 +28,7 @@ from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.tool import Tool
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
+from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 from tests._support.tool_fixtures import RecordingSink, VerdictPolicy
@@ -108,8 +109,10 @@ class Harness:
         self.sink = RecordingSink()
         self.config = config or AgentConfig(tool_round_timeout_seconds=0.5, llm_retry_delay=0.01)
         self.details = FileDetailStore(root / "details")
+        self.skills = SkillSystem(root / "skills", scan_dirs=[root / "external-skills"])
         self.registry = ToolRegistry(default_timeout_seconds=self.config.tool_timeout_seconds)
         self.registry.register(DetailReadTool(self.details))
+        self.registry.register(SkillTool(self.skills))
         for tool in tools:
             self.registry.register(tool)
         self.tools = ThreadedToolSystem(
@@ -124,7 +127,7 @@ class Harness:
             shrinker=ResultShrinker(
                 self.details,
                 self.config.tool_result_detail_chars,
-                whole=frozenset({DETAIL_READ}),
+                whole=frozenset({DETAIL_READ, SKILL}),
             ),
         )
         self.buffers = JournalEventBuffer(
@@ -139,6 +142,7 @@ class Harness:
             self.sink,
             self.tools,
             ContextManager(self.journal, self.config),
+            self.skills,
             self.config,
         )
         self.compaction = CompactionCoordinator(

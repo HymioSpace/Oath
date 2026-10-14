@@ -6,7 +6,12 @@ requires-python = ">=3.11"
 # 用到第三方库时在这里加，用哪个加哪个。journal 只需要标准库；工具系统用
 # jsonschema 校验入参 —— 同一份 JSON Schema 既给模型看结构，又做服务端校验；
 # LLM 调用与 WebSocket server 用 httpx / websockets。
-dependencies = ["httpx>=0.27", "jsonschema>=4.23", "websockets>=12.0"]
+dependencies = [
+    "httpx>=0.27",
+    "jsonschema>=4.23",
+    "pyyaml>=6.0.3",
+    "websockets>=12.0",
+]
 
 [dependency-groups]
 dev = [
@@ -15,6 +20,7 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "types-jsonschema>=4.23",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [build-system]
@@ -23,6 +29,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["core"]
+
+[[tool.uv.index]]
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+default = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
