@@ -9,7 +9,15 @@ SSRF、响应体大小上限、重定向策略与超时，这些在权限策略�
 
 from __future__ import annotations
 
+from core.protocol.interface import Tool
 from extensions.tools.clock import ClockTool
+from extensions.tools.demo import EchoTool
 from extensions.tools.text_template import TextTemplateTool
 
-__all__ = ["ClockTool", "TextTemplateTool"]
+
+def demo_tools() -> list[Tool]:
+    """装配时注册的那一组。"""
+    return [ClockTool(), EchoTool(), TextTemplateTool()]
+
+
+__all__ = ["ClockTool", "EchoTool", "TextTemplateTool", "demo_tools"]

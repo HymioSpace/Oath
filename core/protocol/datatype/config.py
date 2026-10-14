@@ -1,0 +1,119 @@
+"""配置的数据类型。
+
+一份配置管三块：模型、server、路径。全部 frozen dataclass，由 `bootstrap` 从
+`oath.toml` 读出来（读法是装配层的事，core 只声明形状）。
+
+**凭证只走环境变量。** 配置里只有 `api_key_env`（环境变量名），没有 `api_key` ——
+配置文件会进 git，写死 key 等于公开它。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from core.utils.encoding import JsonObject
+
+
+@dataclass(frozen=True, slots=True)
+class ModelProviderConfig:
+    """模型服务的接入点。
+
+    `extra_params` 透传给模型 API 的请求体：不同厂家那些名字各异的参数走它，
+    core 不为任何一个厂家开字段。
+
+    三个字段都有空值默认：配置读不全时先装得起来，报错发生在真的去调模型的那一步
+    （`api_base` 为空、api key 取不到），而不是启动时一句看不懂的构造器签名错。
+    """
+
+    model: str = ""
+    api_base: str = ""
+    api_key_env: str = ""
+    timeout_seconds: float = 60.0
+    extra_params: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConfig:
+    """agent 跑一轮要用的参数。"""
+
+    system_prompt: str = ""
+    provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
+    max_output_tokens: int = 2048
+    temperature: float | None = None
+
+    #: 上下文窗口的 token 数。用来判断该不该压缩。
+    context_window: int = 128_000
+    #: 用量占窗口的比例到这个数就该压缩。**v1 没有人读它** —— 接口在，实现没写。
+    compress_at_ratio: float = 0.8
+
+    #: 一次 `step` 里最多调几次模型，防住模型与工具互相踢皮的死循环。
+    max_step_tokens: int = 16
+    #: 派给工具系统的单次执行超时。
+    tool_timeout_seconds: float = 30.0
+    #: 一轮里的工具结果等多久就不等了。**从第一个结果到达起算**，不是从派发起算。
+    #: 到期之后 brain 照样跑一轮，缺的那些在投影里是 `unresolved` 占位。
+    tool_round_timeout_seconds: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class ServerConfig:
+    """WebSocket server 的监听参数。"""
+
+    host: str = "127.0.0.1"
+    port: int = 8765
+    #: 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
+    send_queue_size: int = 256
+    #: 一条连接多久没有任何 command 就断开。
+    idle_timeout_seconds: float = 300.0
+    #: 同时接受多少条连接。
+    max_connections: int = 32
+
+
+@dataclass(frozen=True, slots=True)
+class OathConfig:
+    """一份完整配置。"""
+
+    data_root: Path = field(default_factory=lambda: Path("./data"))
+    server: ServerConfig = field(default_factory=ServerConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
+    #: v1 的演示身份：`credential` → `(user_id, session_id)`。生产由 Hymio 提供。
+    credentials: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    def credential_for(self, token: str) -> tuple[str, str] | None:
+        """查一份 credential 对应的身份。认不出来返回 `None`。"""
+        return self.credentials.get(token)
+
+    def to_json(self) -> dict[str, Any]:
+        """完整配置的 dict 形态。**不含凭证的值** —— 只有环境变量名。"""
+        return {
+            "data_root": str(self.data_root),
+            "server": {
+                "host": self.server.host,
+                "port": self.server.port,
+                "send_queue_size": self.server.send_queue_size,
+                "idle_timeout_seconds": self.server.idle_timeout_seconds,
+                "max_connections": self.server.max_connections,
+            },
+            "agent": {
+                "system_prompt": self.agent.system_prompt,
+                "provider": {
+                    "model": self.agent.provider.model,
+                    "api_base": self.agent.provider.api_base,
+                    "api_key_env": self.agent.provider.api_key_env,
+                    "timeout_seconds": self.agent.provider.timeout_seconds,
+                    "extra_params": dict(self.agent.provider.extra_params),
+                },
+                "max_output_tokens": self.agent.max_output_tokens,
+                "temperature": self.agent.temperature,
+                "context_window": self.agent.context_window,
+                "compress_at_ratio": self.agent.compress_at_ratio,
+                "max_step_tokens": self.agent.max_step_tokens,
+                "tool_timeout_seconds": self.agent.tool_timeout_seconds,
+                "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
+            },
+        }
+
+
+__all__ = ["AgentConfig", "ModelProviderConfig", "OathConfig", "ServerConfig"]

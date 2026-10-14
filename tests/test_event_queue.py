@@ -1,6 +1,6 @@
 """`InMemoryEventQueue` —— 三条内部队列。
 
-重点是三件事：入队顺序、队列与 scope 的隔离、以及只有输入型记录才排队。
+重点是三件事：`drain` 一次取光、队列与 scope 的隔离、以及 kind 决定进哪条队列。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from core.protocol.datatype import Cursor, CursorKind, EventRecord, EventType, Record, Scope
+from core.protocol.datatype import Inbound, InboundKind, Scope
 from core.protocol.error import UnknownQueueError
 from core.queue import InMemoryEventQueue
 
@@ -23,33 +23,20 @@ def queue() -> InMemoryEventQueue:
     return InMemoryEventQueue()
 
 
-def _record(type_: str, line: int, *, key: str | None = None) -> Record:
-    raw: EventRecord = {
-        "user_id": "u1",
-        "session_id": "s1",
-        "type": type_,
-        "payload": {},
-        "payload_schema_version": 1,
-        "idempotency_key": key or f"{type_}-{line}",
-        "occur_dt": None,
-        "commit_dt": "2026-10-13T00:00:00Z",
-    }
-    return Record.of(Cursor(CursorKind.LINE, line), raw)
+def _inbound(kind: str, index: int) -> Inbound:
+    return Inbound(kind=kind, source=f"src-{index}", source_id=f"id-{index}", occur_dt=f"t{index}")
 
 
-def _user(line: int) -> Record:
-    return _record(EventType.USER_MESSAGE, line)
+def _user(index: int) -> Inbound:
+    return _inbound(InboundKind.USER, index)
 
 
-def _tool_result(line: int) -> Record:
-    return _record(EventType.TOOL_RESULT, line)
+def _tool_result(index: int) -> Inbound:
+    return _inbound(InboundKind.TOOL_RESULT, index)
 
 
-def _line_of(queue: InMemoryEventQueue, scope: Scope, name: str = "user") -> int:
-    """取一条并返回它在日志里的位置。"""
-    record = queue.get(scope, name, timeout=0)
-    assert record is not None
-    return record.cursor.value
+def _ids(items: tuple[Inbound, ...]) -> list[str]:
+    return [item.source_id for item in items]
 
 
 # --------------------------------------------------------------------------
@@ -57,42 +44,50 @@ def _line_of(queue: InMemoryEventQueue, scope: Scope, name: str = "user") -> int
 # --------------------------------------------------------------------------
 
 
-def test_get_returns_records_in_order(queue: InMemoryEventQueue, scope: Scope) -> None:
+def test_drain_returns_items_in_order(queue: InMemoryEventQueue, scope: Scope) -> None:
     queue.put(scope, _user(1))
     queue.put(scope, _user(2))
 
-    assert _line_of(queue, scope) == 1
-    assert _line_of(queue, scope) == 2
+    assert _ids(queue.drain(scope, "user", limit=64)) == ["id-1", "id-2"]
 
 
-def test_get_on_an_empty_queue_returns_none(queue: InMemoryEventQueue, scope: Scope) -> None:
-    assert queue.get(scope, "user", timeout=0) is None
+def test_drain_on_an_empty_queue_returns_nothing(queue: InMemoryEventQueue, scope: Scope) -> None:
+    assert queue.drain(scope, "user", limit=64) == ()
 
 
 def test_dequeue_is_final(queue: InMemoryEventQueue, scope: Scope) -> None:
     """取出即出队。没有位置要推进，也没有「处理完才算数」这回事。"""
     queue.put(scope, _user(1))
-    queue.get(scope, "user", timeout=0)
+    queue.drain(scope, "user", limit=64)
 
-    assert queue.get(scope, "user", timeout=0) is None
+    assert queue.drain(scope, "user", limit=64) == ()
     assert queue.pending(scope, "user") == 0
 
 
-def test_type_selects_the_queue(queue: InMemoryEventQueue, scope: Scope) -> None:
+def test_drain_takes_everything_at_once(queue: InMemoryEventQueue, scope: Scope) -> None:
+    """一次取光，不分页 —— 一轮里同时到的结果分批取就是给别的输入插队的机会。"""
+    for index in range(5):
+        queue.put(scope, _tool_result(index))
+
+    assert _ids(queue.drain(scope, "tool", limit=64)) == [f"id-{i}" for i in range(5)]
+
+
+def test_limit_caps_a_batch(queue: InMemoryEventQueue, scope: Scope) -> None:
+    for index in range(5):
+        queue.put(scope, _tool_result(index))
+
+    assert len(queue.drain(scope, "tool", limit=3)) == 3
+    assert queue.pending(scope, "tool") == 2
+
+
+def test_kind_selects_the_queue(queue: InMemoryEventQueue, scope: Scope) -> None:
     queue.put(scope, _user(1))
     queue.put(scope, _tool_result(2))
+    queue.put(scope, _inbound(InboundKind.INVOKE, 3))
 
-    assert _line_of(queue, scope) == 1
-    assert _line_of(queue, scope, "tool") == 2
-
-
-def test_products_are_not_queued(queue: InMemoryEventQueue, scope: Scope) -> None:
-    """`assistant.message` / `tool.call` 是产物：进 journal，但不排队。"""
-    queue.put(scope, _record(EventType.ASSISTANT_MESSAGE, 1))
-    queue.put(scope, _record(EventType.TOOL_CALL, 2))
-
-    assert queue.pending(scope, "user") == 0
-    assert queue.get(scope, "user", timeout=0) is None
+    assert _ids(queue.drain(scope, "user", limit=64)) == ["id-1"]
+    assert _ids(queue.drain(scope, "tool", limit=64)) == ["id-2"]
+    assert _ids(queue.drain(scope, "system", limit=64)) == ["id-3"]
 
 
 def test_queues_do_not_leak_across_scopes(queue: InMemoryEventQueue, scope: Scope) -> None:
@@ -100,38 +95,23 @@ def test_queues_do_not_leak_across_scopes(queue: InMemoryEventQueue, scope: Scop
     queue.put(scope, _user(1))
     queue.put(other, _user(2))
 
-    assert _line_of(queue, scope) == 1
-    assert _line_of(queue, other) == 2
-    assert queue.get(scope, "user", timeout=0) is None
+    assert _ids(queue.drain(scope, "user", limit=64)) == ["id-1"]
+    assert _ids(queue.drain(other, "user", limit=64)) == ["id-2"]
 
 
 def test_unknown_queue_raises(queue: InMemoryEventQueue, scope: Scope) -> None:
     with pytest.raises(UnknownQueueError):
-        queue.get(scope, "nope", timeout=0)
+        queue.drain(scope, "nope", limit=64)
+
+
+def test_unknown_kind_raises(queue: InMemoryEventQueue, scope: Scope) -> None:
+    with pytest.raises(ValueError):
+        queue.put(scope, Inbound(kind="nope", source="x"))
 
 
 # --------------------------------------------------------------------------
 # 等待
 # --------------------------------------------------------------------------
-
-
-def test_get_blocks_until_something_arrives(queue: InMemoryEventQueue, scope: Scope) -> None:
-    got: list[Record] = []
-    entered = threading.Event()
-
-    def consumer() -> None:
-        entered.set()
-        record = queue.get(scope, "user", timeout=5.0)
-        assert record is not None
-        got.append(record)
-
-    thread = threading.Thread(target=consumer)
-    thread.start()
-    assert entered.wait(5.0)
-    queue.put(scope, _user(1))
-    thread.join(5.0)
-
-    assert [r.cursor.value for r in got] == [1]
 
 
 def test_wait_wakes_on_put(queue: InMemoryEventQueue, scope: Scope) -> None:
@@ -181,16 +161,6 @@ def test_wait_ignores_another_scope(queue: InMemoryEventQueue, scope: Scope) -> 
 # --------------------------------------------------------------------------
 
 
-def test_close_unblocks_get(queue: InMemoryEventQueue, scope: Scope) -> None:
-    result: list[Record | None] = []
-    thread = threading.Thread(target=lambda: result.append(queue.get(scope, "user", timeout=5.0)))
-    thread.start()
-    queue.close(wait=False)
-    thread.join(5.0)
-
-    assert result == [None]
-
-
 def test_close_unblocks_wait(queue: InMemoryEventQueue, scope: Scope) -> None:
     result: list[bool] = []
     thread = threading.Thread(target=lambda: result.append(queue.wait(scope, timeout=5.0)))
@@ -202,8 +172,8 @@ def test_close_unblocks_wait(queue: InMemoryEventQueue, scope: Scope) -> None:
 
 
 def test_put_after_close_is_dropped(queue: InMemoryEventQueue, scope: Scope) -> None:
-    """停机后再入队的东西没有消费方，丢掉 —— 它还在 journal 里。"""
+    """停机后再入队的东西没有消费方，丢掉 —— 它既没落盘也没持久化。"""
     queue.close(wait=False)
     queue.put(scope, _user(1))
 
-    assert queue.get(scope, "user", timeout=0) is None
+    assert queue.drain(scope, "user", limit=64) == ()

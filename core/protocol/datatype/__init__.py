@@ -7,8 +7,15 @@ journal 专属的那些。
 from __future__ import annotations
 
 from core.protocol.datatype.agent_state import AgentState
+from core.protocol.datatype.config import (
+    AgentConfig,
+    ModelProviderConfig,
+    OathConfig,
+    ServerConfig,
+)
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
+from core.protocol.datatype.inbound import Batch, Inbound, InboundKind, of_command
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -24,7 +31,13 @@ from core.protocol.datatype.journal import (
     StateRef,
     ToolOutcome,
 )
-from core.protocol.datatype.message import Message
+from core.protocol.datatype.llm import (
+    LlmFinishReason,
+    LlmRequest,
+    LlmResponse,
+    LlmToolCall,
+)
+from core.protocol.datatype.message import Message, MessageEvent, MessageEventType
 from core.protocol.datatype.permission import (
     PERMISSION_REQUESTED_KEY_PREFIX,
     PERMISSION_RESOLVED_KEY_PREFIX,
@@ -37,7 +50,7 @@ from core.protocol.datatype.permission import (
     PermissionVerdict,
     expired,
 )
-from core.protocol.datatype.queue import INPUT_QUEUE, QueueName, queue_of
+from core.protocol.datatype.queue import QUEUE_OF_KIND, QueueName, queue_of
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
@@ -76,14 +89,16 @@ __all__ = [
     "MAX_INVOCATION_ID_LENGTH",
     "COMMAND_SCHEMAS",
     "PAYLOAD_SCHEMAS",
-    "INPUT_QUEUE",
+    "QUEUE_OF_KIND",
     "RESULT_KEY_PREFIX",
     "SCOPE_ID_PATTERN",
     "STATE_PAYLOAD_SCHEMAS",
     "TOOL_NAME_PATTERN",
+    "AgentConfig",
     "AgentEvent",
     "AgentState",
     "AppendResult",
+    "Batch",
     "BatchExecution",
     "Cursor",
     "CloseReason",
@@ -93,9 +108,20 @@ __all__ = [
     "EventFrame",
     "EventRecord",
     "EventType",
+    "of_command",
     "QueueName",
     "FrameType",
+    "Inbound",
+    "InboundKind",
+    "LlmFinishReason",
+    "LlmRequest",
+    "LlmResponse",
+    "LlmToolCall",
     "Message",
+    "MessageEvent",
+    "MessageEventType",
+    "ModelProviderConfig",
+    "OathConfig",
     "PayloadSchema",
     "PermissionEvent",
     "PermissionEventType",
@@ -108,6 +134,7 @@ __all__ = [
     "RecordFormat",
     "Recovery",
     "Scope",
+    "ServerConfig",
     "StateRecord",
     "StateRef",
     "ToolCallRequest",

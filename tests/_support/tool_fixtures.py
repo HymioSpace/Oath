@@ -209,7 +209,11 @@ class RecordingSink(AgentEventSink):
 
     def outcomes(self) -> dict[str, str]:
         with self._lock:
-            return {event.invocation_id: event.outcome for event in _tool_events(self.events)}
+            return {
+                event.invocation_id: event.outcome
+                for event in _tool_events(self.events)
+                if event.invocation_id is not None
+            }
 
 
 class MemoryPermissionStore(PermissionStore):

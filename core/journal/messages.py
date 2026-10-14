@@ -10,7 +10,7 @@ from core.protocol.datatype import Cursor, EventType, Message, Record
 from core.utils.encoding import JsonObject, canonical_json
 
 
-def _tool_content(payload: JsonObject) -> str:
+def tool_content(payload: JsonObject) -> str:
     """工具结果的文本形态。
 
     有 `content` 且是字符串就用它，否则把整个 payload 序列化 —— 结果不能
@@ -76,7 +76,7 @@ def project(records: list[Record], cursor_end: Cursor | None = None) -> list[Mes
             index, tool_call_id = placed
             slots[index] = Message(
                 role="tool",
-                content=_tool_content(record.payload),
+                content=tool_content(record.payload),
                 extra={"tool_call_id": tool_call_id, "outcome": record.payload.get("outcome")},
             )
 
@@ -91,4 +91,4 @@ def project(records: list[Record], cursor_end: Cursor | None = None) -> list[Mes
     return [m for m in slots if m is not None]
 
 
-__all__ = ["project"]
+__all__ = ["project", "tool_content"]
