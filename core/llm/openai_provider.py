@@ -258,11 +258,19 @@ class _StreamAccumulator:
         self._calls: dict[int, _PartialCall] = {}
         self._order: list[int] = []
         self._finish = LlmFinishReason.STOP
+        self._seen_choice = False
         self._usage: JsonObject = {}
 
     def feed(self, chunk: JsonValue) -> None:
         if not isinstance(chunk, dict):
             raise LlmError(f"chunk 必须是对象，得到 {type(chunk).__name__}")
+        error = chunk.get("error")
+        if isinstance(error, dict):
+            # 各家在流里报错的形状不统一，但都带一个能给人看的 message。报错的
+            # 流后面照样会发 `[DONE]` —— 不当场认出来，一段空白的正常结束就会变成
+            # 一条「模型什么也没说」的回答，然后被落进对话历史。
+            message = error.get("message")
+            raise LlmError(f"模型在流里报错: {message if message is not None else error}")
         usage = chunk.get("usage")
         if isinstance(usage, dict):
             self._usage = usage
@@ -273,6 +281,7 @@ class _StreamAccumulator:
         choice = choices[0]
         if not isinstance(choice, dict):
             raise LlmError("choices[0] 必须是对象")
+        self._seen_choice = True
         finish = choice.get("finish_reason")
         if isinstance(finish, str) and finish in _FINISH_REASONS:
             self._finish = _FINISH_REASONS[finish]
@@ -287,6 +296,17 @@ class _StreamAccumulator:
         self._take_calls(delta.get("tool_calls"))
 
     def result(self) -> LlmResponse:
+        """攒完的结果。**一个 `choices` 都没出现过，判成失败。**
+
+        断掉的流会以 `[DONE]` 收尾，各家都这么发，所以光看结束标记看不出问题。而一个
+        空的 `LlmResponse` 会让 agent 以为模型说了空话，然后把这段空话落进对话历史
+        —— 那是静默的坏数据，比一次明明白白的失败难查得多。
+
+        只判「有没有 choices」，不判「收没收尾」：各家收尾的形状并不一致，而一个已经
+        带着 `choices` 的 chunk 说明请求确实被受理了。
+        """
+        if not self._seen_choice:
+            raise LlmError("流里没有任何 choices")
         return LlmResponse(
             content="".join(self._content),
             # 「一截都没有」与「有一段但是空串」在 journal 里长得一样，所以

@@ -74,6 +74,7 @@ from core.protocol.datatype.tool import (
 )
 from core.protocol.datatype.wire import (
     COMMAND_SCHEMAS,
+    MAX_COMMAND_ID_LENGTH,
     CloseReason,
     Command,
     CommandType,
@@ -88,6 +89,7 @@ __all__ = [
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "MAX_INVOCATION_ID_LENGTH",
     "COMMAND_SCHEMAS",
+    "MAX_COMMAND_ID_LENGTH",
     "PAYLOAD_SCHEMAS",
     "QUEUE_OF_KIND",
     "RESULT_KEY_PREFIX",

@@ -19,6 +19,7 @@ import pytest
 from core.buffer import FileEventBuffer
 from core.consumer import SessionConsumer
 from core.protocol.datatype import Batch, Inbound, InboundKind, Scope
+from core.protocol.error import ValidationError
 from core.protocol.interface import Brain, Journal
 from core.queue import InMemoryEventQueue
 from tests._support.agent_fixtures import agent_ctx
@@ -336,6 +337,103 @@ def test_a_failed_step_keeps_the_buffer_and_waits(
 
     assert _ids(buffer.snapshot(scope, "user")) == ["id-1"]
     assert len(queue.timeouts) == 1
+
+
+def test_a_permanently_bad_batch_is_dropped(
+    consumer: tuple[SessionConsumer, _RecordingQueue, FakeBrain, FileEventBuffer], scope: Scope
+) -> None:
+    """重试多少次都是同一个错。留在 buffer 里只会把后来的输入一起拖住 ——
+    每一轮醒来都先撞上它。"""
+    session, queue, _, buffer = consumer
+
+    class _Refusing(FakeBrain):
+        def step(self, scope: Scope, batch: Batch) -> bool:
+            raise ValidationError("这条输入不合法")
+
+    session._brain = _Refusing()
+    buffer.put(scope, "user", (_user(1),))
+
+    session._cycle(scope)
+
+    assert buffer.scopes() == ()
+    assert queue.timeouts == []
+
+
+def test_a_permanent_failure_lets_the_next_batch_through(
+    consumer: tuple[SessionConsumer, _RecordingQueue, FakeBrain, FileEventBuffer], scope: Scope
+) -> None:
+    """丢掉一批不是让这条 session 停摆 —— 后来的输入照走。"""
+    session, queue, _, buffer = consumer
+
+    class _RefusingFirst(FakeBrain):
+        refused = False
+
+        def step(self, scope: Scope, batch: Batch) -> bool:
+            self.batches.append(batch)
+            if not self.refused:
+                self.refused = True
+                raise ValidationError("这条输入不合法")
+            return True
+
+    brain_refusing = _RefusingFirst()
+    session._brain = brain_refusing
+    queue.put(scope, _user(1))
+    session._cycle(scope)
+    assert buffer.scopes() == ()
+
+    queue.put(scope, _user(2))
+    session._cycle(scope)
+
+    assert _ids(brain_refusing.batches[1].user) == ["id-2"]
+    assert buffer.scopes() == ()
+
+
+def _always_fail(*args: object, **kwargs: object) -> None:
+    raise OSError("buffer 写不动了")
+
+
+def test_inputs_that_cannot_be_buffered_go_back_to_the_queue(
+    consumer: tuple[SessionConsumer, _RecordingQueue, FakeBrain, FileEventBuffer], scope: Scope
+) -> None:
+    """搬不进去就放回队列。已经出队的东西没了就是没了 —— 用户说过一句话，
+    而 journal 里没有、队列里也没有，那句话就真的不存在了。"""
+    session, queue, _, buffer = consumer
+    queue.put(scope, _user(1))
+    queue.put(scope, _user(2))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(buffer, "put", _always_fail)
+        session._cycle(scope)  # 不抛 —— 抛出去就是消费线程死掉
+
+    assert _ids(queue.drain(scope, "user", limit=64)) == ["id-1", "id-2"]
+
+
+def test_a_failing_round_does_not_kill_the_thread(
+    journal: Journal, buffer: FileEventBuffer, scope: Scope
+) -> None:
+    """线程死了就是这条 session 再也没有人消费：队列里剩下的输入没人知道
+    它在等什么，buffer 里没 clear 的那批也再也没人来跑。"""
+    attempts: list[Batch] = []
+
+    class _Broken(FakeBrain):
+        def step(self, scope: Scope, batch: Batch) -> bool:
+            attempts.append(batch)
+            raise RuntimeError("这一步炸了")
+
+    queue = InMemoryEventQueue()
+    thread, stop = _run(journal, _Broken(), buffer, queue, scope)
+    queue.put(scope, _user(1))
+    assert _wait_for(lambda: bool(attempts))
+
+    # 还能再吃一批 —— 循环没死。
+    queue.put(scope, _user(2))
+    assert _wait_for(lambda: len(attempts) >= 2)
+    stop.set()
+    queue.close(wait=False)
+    thread.join(5.0)
+
+    assert not thread.is_alive()
+    assert _ids(attempts[1].user) == ["id-1", "id-2"]
 
 
 # --------------------------------------------------------------------------

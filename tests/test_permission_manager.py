@@ -20,6 +20,7 @@ from core.protocol.datatype.permission import (
 from core.protocol.error import PermissionDeniedError, PermissionError
 from core.protocol.interface import PermissionPolicy
 from core.tool.permission import PermissionManager, PermissionStore
+from core.utils.encoding import JsonObject
 from tests._support.tool_fixtures import (
     BrokenPolicy,
     MemoryPermissionStore,
@@ -201,6 +202,57 @@ def test_reusing_an_invocation_id_for_another_call_raises(store: MemoryPermissio
             manager.authorize(SCOPE, "rm", "tc-2", "inv-1", {})
         with pytest.raises(PermissionError):
             manager.authorize(SCOPE, "rm_rf", "tc-1", "inv-1", {})
+    finally:
+        manager.shutdown(wait=False)
+
+
+def test_an_approval_does_not_extend_to_other_arguments(
+    store: MemoryPermissionStore,
+) -> None:
+    """人批的是某一个具体调用，连同它的参数。换一组参数再拿同一个 id 回来，
+    放行的就是一次没人看过的事 —— 转三十五块批过了，拿着同一个 id 转三万五，
+    没人问过。"""
+    sink = RecordingSink()
+    manager = build(store, sink, waiting_policy())
+    try:
+        manager.authorize(SCOPE, "transfer", "tc-1", "inv-1", {"amount": 35})
+        manager.decide(SCOPE, "inv-1", PermissionStatus.APPROVED)
+
+        with pytest.raises(PermissionError):
+            manager.authorize(SCOPE, "transfer", "tc-1", "inv-1", {"amount": 35000})
+    finally:
+        manager.shutdown(wait=False)
+
+
+def test_the_same_arguments_in_another_key_order_still_replay(
+    store: MemoryPermissionStore,
+) -> None:
+    """比的是规范化的 JSON，不是逐字段相等 —— 键序不同是同一组参数。"""
+    sink = RecordingSink()
+    manager = build(store, sink, waiting_policy())
+    try:
+        manager.authorize(SCOPE, "transfer", "tc-1", "inv-1", {"to": "b", "amount": 35})
+        assert (
+            manager.authorize(SCOPE, "transfer", "tc-1", "inv-1", {"amount": 35, "to": "b"})
+            == PermissionVerdict.ASK
+        )
+    finally:
+        manager.shutdown(wait=False)
+
+
+def test_the_record_keeps_the_arguments_asked_about(
+    store: MemoryPermissionStore,
+) -> None:
+    """判权限和工具真正跑起来之间隔着排队与执行。调用方手上那个 dict 还活着，
+    它要是被改了，这条记录描述的就不是被问的那一次了。"""
+    sink = RecordingSink()
+    manager = build(store, sink, waiting_policy())
+    try:
+        arguments: JsonObject = {"path": "/tmp/a"}
+        manager.authorize(SCOPE, "rm", "tc-1", "inv-1", arguments)
+        arguments["path"] = "/tmp/b"
+
+        assert store.get(SCOPE, "inv-1").arguments == {"path": "/tmp/a"}  # type: ignore[union-attr]
     finally:
         manager.shutdown(wait=False)
 

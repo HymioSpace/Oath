@@ -19,6 +19,7 @@ from core.protocol.datatype import (
     ToolCallRequest,
     ToolErrorKind,
     ToolEventType,
+    ToolHandle,
     ToolHandleState,
     ToolOutcome,
     ToolStatus,
@@ -524,6 +525,66 @@ def test_same_invocation_runs_once(registry: ToolRegistry, sink: RecordingSink) 
         assert len(sink.events) == 1
     finally:
         gate.set()
+        ts.shutdown(wait=False)
+
+
+def test_two_concurrent_dispatches_of_one_invocation_run_it_once(
+    registry: ToolRegistry, sink: RecordingSink
+) -> None:
+    """查重和入表之间隔着问权限与校验入参，不是一步。没有占位的话两个派发会一起
+    走过去，工具跑两遍 —— 外部副作用不幂等。"""
+    entered = threading.Event()
+    release = threading.Event()
+
+    class _SlowPolicy(PermissionPolicy):
+        def check(self, scope: Scope, tool: str, arguments: JsonObject) -> str:
+            entered.set()
+            release.wait(5.0)
+            return PermissionVerdict.ALLOW
+
+    ts = build(registry, sink, _SlowPolicy())
+    gate = threading.Event()
+    gate.set()
+    tool = GatedTool("gated", gate=gate)
+    registry.register(tool, timeout_seconds=10.0)
+    request = ToolCallRequest(
+        tool_call_id="tc-dup", tool="gated", arguments={}, invocation_id="dup"
+    )
+    first: list[ToolHandle] = []
+    worker = threading.Thread(target=lambda: first.append(ts.execute(SCOPE, [request]).handles[0]))
+    try:
+        worker.start()
+        assert entered.wait(5.0)  # 第一发正卡在问权限上
+
+        second = ts.execute(SCOPE, [request]).handles[0]
+        assert second.state == ToolHandleState.DEDUPLICATED
+
+        release.set()
+        worker.join(5.0)
+        assert first[0].state == ToolHandleState.ACCEPTED
+        sink.wait_for_tool(1)
+        assert tool.finished == ["dup"]
+        assert len(sink.events) == 1
+    finally:
+        release.set()
+        ts.shutdown(wait=False)
+
+
+def test_a_rejected_call_frees_its_invocation_id(
+    registry: ToolRegistry, sink: RecordingSink
+) -> None:
+    """占位在接纳成功之后才撤。被拒的那次表里没有它，下一次派发要还能拿得到。"""
+    ts = build(registry, sink)
+    try:
+        request = ToolCallRequest(
+            tool_call_id="tc-x", tool="根本没有这个工具", arguments={}, invocation_id="x"
+        )
+        assert ts.execute(SCOPE, [request]).handles[0].state == ToolHandleState.REJECTED
+
+        ts._registry.register(EchoTool("echo"), timeout_seconds=10.0)
+        good = ToolCallRequest(tool_call_id="tc-x", tool="echo", arguments={}, invocation_id="x")
+        assert ts.execute(SCOPE, [good]).handles[0].state == ToolHandleState.ACCEPTED
+    finally:
         ts.shutdown(wait=False)
 
 

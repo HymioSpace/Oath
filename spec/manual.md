@@ -122,12 +122,12 @@ S→C  {"v":1,"type":"ack","id":"c-7d55d4","session_id":"default"}
 
 C→S  {"v":1,"type":"user.message","id":"c-609125","session_id":"default","payload":{"content":"请用 echo 工具回显这句话：链路通了"}}
 
-S→C  event assistant.delta   {"channel":"reasoning","seq":1,"step_id":"a1b2c3-00000001","text":"用户"}
-S→C  event assistant.delta   {"channel":"reasoning","seq":2,"step_id":"a1b2c3-00000001","text":"要求我"}
+S→C  event assistant.delta   {"channel":"reasoning","seq":1,"step_id":"9c41f0a7b2d84e63","text":"用户"}
+S→C  event assistant.delta   {"channel":"reasoning","seq":2,"step_id":"9c41f0a7b2d84e63","text":"要求我"}
 S→C  event assistant.message {"content":"\n\n\n","model":"MiniMax-M2.7","reasoning":"用户要求我使用 echo 工具来回显…","tool_calls":[{"arguments":{"text":"链路通了"},"id":"call_be1996c1","name":"echo"}]}
-S→C  event tool.call         {"arguments":{"text":"链路通了"},"invocation_id":"a1b2c3-00000002","tool":"echo","tool_call_id":"call_be1996c1"}
-S→C  event tool.terminal     {"content":"链路通了","invocation_id":"a1b2c3-00000002","outcome":"succeeded","tool_call_id":"call_be1996c1"}
-S→C  event assistant.delta   {"channel":"content","seq":1,"step_id":"a1b2c3-00000003","text":"链路"}
+S→C  event tool.call         {"arguments":{"text":"链路通了"},"invocation_id":"9c41f0a7b2d84e63-0","tool":"echo","tool_call_id":"call_be1996c1"}
+S→C  event tool.terminal     {"content":"链路通了","invocation_id":"9c41f0a7b2d84e63-0","outcome":"succeeded","tool_call_id":"call_be1996c1"}
+S→C  event assistant.delta   {"channel":"content","seq":1,"step_id":"5d82be10fa673c94","text":"链路"}
 S→C  event assistant.message {"content":"\n\n链路通了","model":"MiniMax-M2.7","reasoning":"The echo tool returned…"}
 ```
 
@@ -136,8 +136,9 @@ S→C  event assistant.message {"content":"\n\n链路通了","model":"MiniMax-M2
 
 配对靠两个 id：`tool_call_id` 是模型给的（assistant 轮 ↔ tool 消息的配对值，原样透传），
 `invocation_id` 是 Oath 生成的（事件之间配对、查状态用）。**别拿 `tool_call_id` 去查状态。**
-Oath 生成的那些 id 形如 `a1b2c3-00000002` —— 前缀是进程实例，后缀是进程内序号，
-重启后不会撞上上一批。当成不透明字符串用就行。
+`invocation_id` 形如 `<step_id>-<序号>`，`step_id` 是这一批输入身份的哈希。同一条命令
+重发算出来的还是同一个 id，所以断线重连、命令重试都不会让同一次调用跑两遍。当成不透明
+字符串用就行。
 
 ## 6 出错
 

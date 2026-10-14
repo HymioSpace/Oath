@@ -190,11 +190,25 @@ def test_a_chunk_without_choices_is_not_an_error() -> None:
     assert result.content == "话"
 
 
-def test_an_empty_stream_still_returns_a_response() -> None:
-    result, seen = _collect()
+def test_a_stream_that_never_carries_a_choice_is_a_failure() -> None:
+    """HTTP 200 + 一个报错帧 + `[DONE]`：请求成功收到了，模型一个字也没说。
 
-    assert result.content == ""
-    assert seen == []
+    当成正常的空回答收下，agent 就把这段空话落进对话历史，然后清掉 buffer ——
+    用户那句话就这么消失了，日志里还留着一条说得过去很正常的记录。
+    """
+    with pytest.raises(LlmError):
+        _collect({"error": {"message": "provider unavailable", "type": "server_error"}})
+
+
+def test_an_empty_stream_is_a_failure() -> None:
+    with pytest.raises(LlmError):
+        _collect()
+
+
+def test_an_error_frame_before_the_answer_is_a_failure() -> None:
+    """先说了半句再报错：半句也不能当答案收下。"""
+    with pytest.raises(LlmError):
+        _collect(_text("半句"), {"error": {"message": "provider unavailable"}})
 
 
 def test_a_delta_that_cannot_be_delivered_does_not_break_the_call() -> None:

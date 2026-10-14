@@ -9,6 +9,15 @@
 每一步都先落盘再做下一步。反过来做就会出现「客户端在界面上看到了、重放时这段对话
 凭空消失」，那是没法查的丢数据。
 
+## 幂等：这一批的 id 是算出来的，不是发出来的
+
+`step_id` 由这一批输入算出，`invocation_id` 由 `step_id` 与调用序号算出。同一批输入
+不管被交上来几次，算出来的都是同一组 id，journal 的幂等键因此把重放挡住：同一个命令
+重发不会调第二次模型、不会派发第二次工具。
+
+**这不只是去重。** 中途崩了之后重跑同一批，`step` 会接着上次的进度往下走：模型说过
+的话已经在 journal 里，就不重新问了，直接拿它声明的调用去补 `tool.call` 与派发。
+
 ## 什么时候醒
 
 | 这一批里有 | 行为 |
@@ -25,16 +34,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import itertools
-import threading
-from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
 
-from core.agent.notice import LateResult, render_notice
-from core.journal.messages import tool_content
 from core.protocol.datatype.cursor import Cursor, CursorKind
-from core.protocol.datatype.inbound import Batch, Inbound
+from core.protocol.datatype.inbound import Batch, Inbound, InboundKind
 from core.protocol.datatype.journal import EventType
 from core.protocol.datatype.llm import LlmRequest
 from core.protocol.datatype.message import MessageEvent, MessageEventType, ToolCallRef
@@ -44,7 +49,7 @@ from core.protocol.datatype.wire import CommandType
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import DeltaSink, ModelProvider
 from core.runtime import AgentContext
-from core.utils.encoding import JsonObject, parse_timestamp, utc_now_iso
+from core.utils.encoding import JsonObject, JsonValue, parse_timestamp, utc_now_iso
 
 #: `tool.call` 幂等键的前缀。
 TOOL_CALL_KEY_PREFIX = "tool.call:"
@@ -53,9 +58,6 @@ RESULT_KEY_PREFIX = "tool.result:"
 #: 用户输入落 `user.message` 时的幂等键前缀。挂上 command id：同一个 command 重发是
 #: 重放，两条不同的消息不会互相顶掉。
 COMMAND_KEY_PREFIX = "cmd:"
-#: 一条只装着迟到结果的 user message 的幂等键前缀。它没有 command id 可挂，靠参与
-#: 构造的那些 `invocation_id` 定住 —— 同一批迟到结果重跑一次得到同一个键。
-NOTICE_KEY_PREFIX = "notice:"
 
 #: 唤醒来源。写进 `system.agent_step`，trace 里靠它分清这一轮是被谁叫醒的。
 _TRIGGER_USER = "user"
@@ -74,38 +76,46 @@ def _invocation(item: Inbound) -> str:
     return str(item.payload.get("invocation_id", ""))
 
 
-def _default_id_gen() -> Callable[[], str]:
-    """进程内唯一的 id。
+def _step_id(batch: Batch) -> str:
+    """这一批的 id。
 
-    **带一个实例前缀。** 计数器每次启动都从 1 开始，裸计数器在重启后会撞上上一个进程
-    写过的 `msg:00000001`：journal 按「同键异 payload」抛错，把一次正常重放变成一次硬
-    失败。前缀让两批 id 永不相交。
+    **由内容算出，不由次数发出来。** 同一批输入重跑一次要算回同一个 id，否则重放
+    就变成了「又发生了一遍」：模型被问第二次、工具被派发第二次，而 journal 里躺着
+    两份互相矛盾的记录。
+
+    参与哈希的是每条输入的**身份**，不是它的正文：`invocation_id` / `command_id`。
+    正文本该由 journal 的幂等指纹管，它已经做得比这里好。
     """
-    prefix = uuid4().hex[:6]
-    counter = itertools.count(1)
-    lock = threading.Lock()
+    digest = hashlib.sha256()
+    for kind, items in (
+        (InboundKind.USER, batch.user),
+        (InboundKind.TOOL_RESULT, batch.tool),
+        (InboundKind.INVOKE, batch.system),
+    ):
+        for item in items:
+            digest.update(f"{kind}:{item.source_id}\n".encode())
+    return digest.hexdigest()[:16]
 
-    def gen() -> str:
-        with lock:
-            return f"{prefix}-{next(counter):08x}"
 
-    return gen
+def _invocation_id(step_id: str, index: int) -> str:
+    """一次调用在这一次 step 里的标识。
+
+    **Oath 自己的 id，不借模型的。** 模型给的 `tool_call_id` 原样透传进 journal，但
+    幂等键与派发键必须是 Oath 的：模型会重发同一个 id，那不该让同一个调用跑两次。
+    """
+    return f"{step_id}-{index}"
 
 
 class _RoundState:
-    """journal 扫一遍得出的几件事，都关于「工具调用」。"""
+    """journal 扫一遍得出的两件事。"""
 
-    __slots__ = ("closed", "tools", "unanswered")
+    __slots__ = ("assistant", "unanswered")
 
-    def __init__(self, unanswered: set[str], closed: set[str], tools: dict[str, str]) -> None:
+    def __init__(self, unanswered: set[str], assistant: JsonObject | None) -> None:
         #: 派发出去、journal 里还没有 `tool.result` 的 `invocation_id`。
         self.unanswered = unanswered
-        #: 槽位已经关闭的 `invocation_id` —— 它的 `tool.call` 之后已经有一条
-        #: `assistant.message`。模型读过一个占位并作答了，结果回来只能另找地方说。
-        self.closed = closed
-        #: `invocation_id` → 工具名。`tool.result` 的 payload 里没有工具名 —— 那是
-        #: 事件顶层的字段，journal 里那份不重复存，要用回 `tool.call` 查。
-        self.tools = tools
+        #: 这一步已经落盘的 `assistant.message` 的 payload。没有就是还没问过模型。
+        self.assistant = assistant
 
 
 class AgentBrain(Brain):
@@ -115,18 +125,9 @@ class AgentBrain(Brain):
     要跑多个 session 就多开线程 —— 共享状态只有 journal，而 journal 自己线程安全。
     """
 
-    def __init__(
-        self,
-        ctx: AgentContext,
-        provider: ModelProvider,
-        *,
-        id_gen: Callable[[], str] | None = None,
-    ) -> None:
+    def __init__(self, ctx: AgentContext, provider: ModelProvider) -> None:
         self._ctx = ctx
         self._provider = provider
-        # id 源是注入的：测试要能定住它，否则幂等键每次都不一样，
-        # 「重放不写新行」这条根本验不了。
-        self._next_id = id_gen or _default_id_gen()
         self._closed = False
 
     # -- 生命周期 ----------------------------------------------------------
@@ -144,18 +145,24 @@ class AgentBrain(Brain):
 
         模型调用失败就抛 —— buffer 里那批东西没动过，下一轮还会被交上来。
         """
-        trigger = self._trigger(scope, batch)
+        if self._closed:
+            # 关掉之后 journal 随时会跟着关。这条线程醒来时不再碰它 —— 让它在
+            # `_emit` 或 `append` 上炸，比写进一份正在被拆的日志强。
+            return False
+
+        step_id = _step_id(batch)
+        state = self._scan(scope, step_id)
+        trigger = self._trigger(batch, state)
         if trigger is None:
             return False
 
-        step_id = self._next_id()
         try:
             # 先落这批输入，再记「这一步开始了」—— trace 里读到的顺序跟事情
             # 发生的顺序一致：先看见了什么，才是被什么叫醒的。
             self._append_inputs(scope, batch)
             self._record_step(scope, step_id, "start", trigger)
             if trigger != _TRIGGER_CANCEL:
-                self._think(scope, step_id)
+                self._think(scope, step_id, state)
         except Exception:
             self._record_step(scope, step_id, "error", trigger)
             raise
@@ -171,12 +178,12 @@ class AgentBrain(Brain):
         if not batch.tool or batch.user or batch.system:
             return None
         arrived = {_invocation(item) for item in batch.tool}
-        state = self._round_state(scope)
-        if not state.unanswered or state.unanswered <= arrived:
+        unanswered = self._scan(scope, _step_id(batch)).unanswered
+        if not unanswered or unanswered <= arrived:
             return None
         return self._seconds_left(batch.tool)
 
-    def _trigger(self, scope: Scope, batch: Batch) -> str | None:
+    def _trigger(self, batch: Batch, state: _RoundState) -> str | None:
         """这批算不算一次输入。返回唤醒来源的名字，不算就返回 None。"""
         if batch.user:
             return _TRIGGER_USER
@@ -186,13 +193,18 @@ class AgentBrain(Brain):
             if all(item.source == CommandType.RUN_CANCEL for item in batch.system):
                 return _TRIGGER_CANCEL
             return _TRIGGER_INVOKE
-        if batch.tool and (
-            _settled(self._round_state(scope), batch.tool) or self._expired(batch.tool)
-        ):
+        if batch.tool and (_settled(state, batch.tool) or self._expired(batch.tool)):
             return _TRIGGER_TOOL
         return None
 
-    def _think(self, scope: Scope, step_id: str) -> None:
+    def _think(self, scope: Scope, step_id: str, state: _RoundState) -> None:
+        # 问过就别再问一次 —— 「问过了但一个工具都不调」也是问过了，靠 `assistant`
+        # 在不在来分辨，靠「有没有 tool_calls」分辨不了。
+        refs = self._ask(scope, step_id) if state.assistant is None else self._refs_from(state)
+        if refs:
+            self._ctx.tools.execute(scope, self._append_tool_calls(scope, refs, step_id))
+
+    def _ask(self, scope: Scope, step_id: str) -> tuple[ToolCallRef, ...]:
         context = self._ctx.context_manager.build(scope, self._ctx.tools.definitions())
         response = self._provider.complete(
             LlmRequest(
@@ -212,8 +224,31 @@ class AgentBrain(Brain):
         self._append_assistant(
             scope, step_id, response.content, response.reasoning, refs, response.usage
         )
-        if refs:
-            self._ctx.tools.execute(scope, self._append_tool_calls(scope, refs))
+        return refs
+
+    def _refs_from(self, state: _RoundState) -> tuple[ToolCallRef, ...]:
+        """已经落盘的 `assistant.message` 声明了哪些调用。
+
+        重跑一步时模型不必再问一遍 —— 说过的话在 journal 里，那才是这一轮真正说过的话。
+        """
+        if state.assistant is None:
+            return ()
+        raw: JsonValue = state.assistant.get("tool_calls")
+        if not isinstance(raw, list):
+            return ()
+        refs = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            arguments = item.get("arguments")
+            refs.append(
+                ToolCallRef(
+                    id=str(item.get("id", "")),
+                    name=str(item.get("name", "")),
+                    arguments=dict(arguments) if isinstance(arguments, dict) else {},
+                )
+            )
+        return tuple(refs)
 
     def _delta_sink(self, scope: Scope, step_id: str) -> DeltaSink:
         """把一段增量变成一条 `assistant.delta` 事件。
@@ -247,17 +282,15 @@ class AgentBrain(Brain):
     def _append_inputs(self, scope: Scope, batch: Batch) -> None:
         """落这一批。**这是这些事实在 journal 里第一次出现的地方。**
 
-        工具结果分两路：槽位还开着的落 `tool.result`，投影会把它填回原来的位置；槽位
-        已经关掉的塞进 user message —— 那个占位是模型已经读过的记录，回头改它就是让
-        记录说谎。
+        每条输入落成它自己那一条记录，一条不多一条不少。用户输入就是用户说的话，
+        工具结果就是工具回的东西 —— 迟到的那个也一样落 `tool.result`，要不要换个说法
+        告诉模型是投影的事。落的时候顺手做一次判断，就把「这条记录长什么样」和「这一
+        批凑巧带上了什么」绑在了一起：同一句话配不配得上同一组工具结果，重放一次
+        就不一定一样。
         """
-        state = self._round_state(scope)
-        fresh: list[Inbound] = []
-        late: list[Inbound] = []
+        for item in batch.user:
+            self._append_user(scope, item)
         for item in batch.tool:
-            (late if _invocation(item) in state.closed else fresh).append(item)
-
-        for item in fresh:
             self._ctx.journal.append(
                 scope,
                 EventType.TOOL_RESULT,
@@ -266,54 +299,10 @@ class AgentBrain(Brain):
                 idempotency_key=f"{RESULT_KEY_PREFIX}{_invocation(item)}",
                 occur_dt=item.occur_dt or None,
             )
-        self._append_notice(scope, batch.user, late, state.tools)
         for item in batch.system:
             self._append_control(scope, item)
 
-    def _append_notice(
-        self,
-        scope: Scope,
-        user_items: tuple[Inbound, ...],
-        late: list[Inbound],
-        tools: dict[str, str],
-    ) -> None:
-        """写 user message：用户输入的正文，加上迟到结果的补告。
-
-        每条用户输入一条记录 —— 幂等键挂在 command id 上，客户端重发同一条会去重，
-        两条不同的消息不会互相顶掉。迟到结果并进第一条；一条用户输入都没有的时候，
-        补告自己就是那一条消息，键由参与它的 `invocation_id` 定住。
-        """
-        results = tuple(
-            LateResult(
-                invocation_id=_invocation(item),
-                tool=tools.get(_invocation(item), ""),
-                text=tool_content(item.payload),
-            )
-            for item in late
-        )
-        if not user_items:
-            if not results:
-                return
-            key = NOTICE_KEY_PREFIX + ",".join(sorted(r.invocation_id for r in results))
-            self._append_user(scope, key, render_notice((), results), "")
-            return
-
-        head, *rest = user_items
-        self._append_user(
-            scope,
-            f"{COMMAND_KEY_PREFIX}{head.source_id}",
-            render_notice([_content(head)], results),
-            head.occur_dt,
-        )
-        for item in rest:
-            self._append_user(
-                scope,
-                f"{COMMAND_KEY_PREFIX}{item.source_id}",
-                render_notice([_content(item)], ()),
-                item.occur_dt,
-            )
-
-    def _append_user(self, scope: Scope, key: str, content: str, occur_dt: str) -> None:
+    def _append_user(self, scope: Scope, item: Inbound) -> None:
         """用户输入不投递客户端 —— 发出去的 `user.message` 没有回声，客户端自己存。
 
         `occur_dt` 是用户按下去的时刻，不是落盘的时刻：两件事之间隔着攒批和等工具，
@@ -322,10 +311,10 @@ class AgentBrain(Brain):
         self._ctx.journal.append(
             scope,
             EventType.USER_MESSAGE,
-            {"content": content},
+            {"content": _content(item)},
             payload_schema_version=1,
-            idempotency_key=key,
-            occur_dt=occur_dt or None,
+            idempotency_key=f"{COMMAND_KEY_PREFIX}{item.source_id}",
+            occur_dt=item.occur_dt or None,
         )
 
     def _append_control(self, scope: Scope, item: Inbound) -> None:
@@ -347,30 +336,23 @@ class AgentBrain(Brain):
 
     # -- 这一轮的形状 ------------------------------------------------------
 
-    def _round_state(self, scope: Scope) -> _RoundState:
-        """扫一遍 journal，得出「这一轮还差谁」「谁的槽位已经关了」「它们是谁的工具」。
+    def _scan(self, scope: Scope, step_id: str) -> _RoundState:
+        """扫一遍 journal：这一轮还差谁，以及这一步已经说过什么。
 
-        单次扫描，三件事共用：它们问的是同一批 `tool.call` 记录。
-
-        槽位什么时候算关：`assistant.message` 落在这些 `tool.call` **之后**。模型那一轮
-        已经读到过这些槽位了 —— 哪怕槽位里当时只是个占位，结果再回来也只能另找地方说。
+        单次扫描，两件事共用：问的是同一批记录，拆成两次扫就多一倍的读盘。
         """
-        calls: set[str] = set()
+        key = f"msg:{step_id}"
         unanswered: set[str] = set()
-        closed: set[str] = set()
-        tools: dict[str, str] = {}
+        assistant: JsonObject | None = None
         for record in self._ctx.journal.read_range(scope, _BEGINNING):
-            if record.type == EventType.TOOL_CALL:
-                invocation_id = str(record.payload.get("invocation_id", ""))
-                if invocation_id not in calls:
-                    calls.add(invocation_id)
-                    unanswered.add(invocation_id)
-                    tools[invocation_id] = str(record.payload.get("tool", ""))
-            elif record.type == EventType.TOOL_RESULT:
+            type_ = record.type
+            if type_ == EventType.TOOL_CALL:
+                unanswered.add(str(record.payload.get("invocation_id", "")))
+            elif type_ == EventType.TOOL_RESULT:
                 unanswered.discard(str(record.payload.get("invocation_id", "")))
-            elif record.type == EventType.ASSISTANT_MESSAGE:
-                closed |= calls
-        return _RoundState(unanswered, closed, tools)
+            elif type_ == EventType.ASSISTANT_MESSAGE and record.idempotency_key == key:
+                assistant = record.payload
+        return _RoundState(unanswered, assistant)
 
     def _seconds_left(self, items: tuple[Inbound, ...]) -> float:
         """从**第一个结果到达**起算还剩几秒。
@@ -415,13 +397,15 @@ class AgentBrain(Brain):
             payload["model"] = self._ctx.config.provider.model
 
         key = f"msg:{step_id}"
-        self._ctx.journal.append(
+        result = self._ctx.journal.append(
             scope,
             EventType.ASSISTANT_MESSAGE,
             payload,
             payload_schema_version=1,
             idempotency_key=key,
         )
+        if result.idempotent_hit:
+            return
         self._emit(
             MessageEvent(
                 type=MessageEventType.ASSISTANT_MESSAGE,
@@ -433,16 +417,18 @@ class AgentBrain(Brain):
         )
 
     def _append_tool_calls(
-        self, scope: Scope, refs: tuple[ToolCallRef, ...]
+        self, scope: Scope, refs: tuple[ToolCallRef, ...], step_id: str
     ) -> list[ToolCallRequest]:
         """每个 tool call 落一条 `tool.call`，并凑出派发请求。
 
-        `invocation_id` 在这里生成，写进落盘记录、也交给工具系统 —— 同一个值，
-        不从游标反推、不从模型给的 id 借用：派发键必须是 Oath 自己的。
+        `invocation_id` 由 `step_id` 与序号算出，写进落盘记录、也交给工具系统 ——
+        同一个值，不从游标反推、不从模型给的 id 借用：派发键必须是 Oath 自己的。
+        它还必须是**算得出来的**：重跑一步要拿回同一个 id，工具系统才会把这次派发
+        认成重复而不是又跑一遍。
         """
         requests: list[ToolCallRequest] = []
-        for ref in refs:
-            invocation_id = self._next_id()
+        for index, ref in enumerate(refs):
+            invocation_id = _invocation_id(step_id, index)
             payload: JsonObject = {
                 "tool_call_id": ref.id,
                 "invocation_id": invocation_id,
@@ -450,21 +436,22 @@ class AgentBrain(Brain):
                 "arguments": ref.arguments,
             }
             key = f"{TOOL_CALL_KEY_PREFIX}{invocation_id}"
-            self._ctx.journal.append(
+            result = self._ctx.journal.append(
                 scope, EventType.TOOL_CALL, payload, payload_schema_version=1, idempotency_key=key
             )
-            self._emit(
-                MessageEvent(
-                    type=MessageEventType.TOOL_CALL,
-                    scope=scope,
-                    tool_call_id=ref.id,
-                    invocation_id=invocation_id,
-                    tool=ref.name,
-                    payload=payload,
-                    idempotency_key=key,
-                    occur_dt=utc_now_iso(),
+            if not result.idempotent_hit:
+                self._emit(
+                    MessageEvent(
+                        type=MessageEventType.TOOL_CALL,
+                        scope=scope,
+                        tool_call_id=ref.id,
+                        invocation_id=invocation_id,
+                        tool=ref.name,
+                        payload=payload,
+                        idempotency_key=key,
+                        occur_dt=utc_now_iso(),
+                    )
                 )
-            )
             requests.append(
                 ToolCallRequest(
                     tool=ref.name,
@@ -525,7 +512,6 @@ def _occurred_at(item: Inbound) -> datetime:
 
 __all__ = [
     "COMMAND_KEY_PREFIX",
-    "NOTICE_KEY_PREFIX",
     "RESULT_KEY_PREFIX",
     "TOOL_CALL_KEY_PREFIX",
     "AgentBrain",

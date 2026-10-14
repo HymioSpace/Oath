@@ -30,9 +30,14 @@ from dataclasses import dataclass
 from typing import Final
 
 from core.protocol.datatype.event import AgentEvent
-from core.protocol.datatype.journal import PayloadSchema
+from core.protocol.datatype.journal import MAX_IDEMPOTENCY_KEY_LENGTH, PayloadSchema
 from core.protocol.error import WireProtocolError
 from core.utils.encoding import JsonObject, JsonValue
+
+#: command id 的长度上限。它要挂进 `user.message` 的幂等键，所以上限从 journal 的键长
+#: 上限反推。**在这里就挡住**：一条落不了盘的输入进了队列，就只能卡着 session 重试
+#: 到天荒地老 —— 后来的输入全被它拖着。
+MAX_COMMAND_ID_LENGTH: Final = MAX_IDEMPOTENCY_KEY_LENGTH - len("cmd:")
 
 
 class WireVersion:
@@ -152,6 +157,10 @@ class Command:
         cmd_id = raw.get("id")
         if not isinstance(cmd_id, str) or not cmd_id:
             raise WireProtocolError(f"命令 id 必须是非空字符串，得到 {cmd_id!r}", code="bad_frame")
+        if len(cmd_id) > MAX_COMMAND_ID_LENGTH:
+            raise WireProtocolError(
+                f"命令 id 超过 {MAX_COMMAND_ID_LENGTH} 字符: {len(cmd_id)}", code="bad_frame"
+            )
         if type_ not in CommandType.ALL:
             raise WireProtocolError(f"未知 command {type_!r}", code="unknown_command")
         session_id = raw.get("session_id")
@@ -298,6 +307,7 @@ def _check_payload(type_: str, payload: JsonValue) -> JsonObject:
 
 __all__ = [
     "COMMAND_SCHEMAS",
+    "MAX_COMMAND_ID_LENGTH",
     "CloseReason",
     "Command",
     "CommandType",

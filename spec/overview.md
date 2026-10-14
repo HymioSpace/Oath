@@ -58,9 +58,9 @@ flowchart TD
 
 - `user_id`：第一层隔离；`session_id`：用户内第二层隔离与串行化边界。所有资源以 `(user_id, session_id)` 定位，同名 session 不得跨用户混用。
 - `run_id`：session 内每次运行的稳定标识，用于关联输入、模型请求、工具、日志与 trace。恢复同一次运行保留 run_id；新运行分配新 run_id。run 不是第三层权限隔离。
-- `step_id`：一次固定 context / 配置下的模型请求及后处理。
+- `step_id`：一次 `step` 的标识，由这一批输入的身份算出。同一批输入交上来几次都是同一个 —— 重放要靠它拿回同一个 id。
 - `tool_call_id`：模型 API 返回的工具调用标识，组对话历史时原样透传，assistant 轮的 `tool_calls[i].id` 与 tool 消息的 `tool_call_id` 必须逐字节相同。
-- `invocation_id`：Oath 自己的一次逻辑工具调用标识。工具状态查询的键，也是 `tool.call` 与 `tool.result` 的配对键；不作为查询键使用时它就是日志里的一个关联 id。
+- `invocation_id`：Oath 自己的一次逻辑工具调用标识，形如 `<step_id>-<序号>`。工具状态查询的键，也是 `tool.call` 与 `tool.result` 的配对键；不作为查询键使用时它就是日志里的一个关联 id。
 - `epoch`：会话 owner 的 fencing 代数；`cursor`：journal 内定位一条日志记录的位置（JSONL 为行号，MySQL 为自增 id），在同一 scope 内严格单调递增，是状态快照的watermark；`state_version`：仅执行状态提交递增的版本，用于并发控制。
 
 日志记录的顺序由 `cursor` 表达，**不由时间戳表达**。`occur_dt` / `commit_dt` 只用于展示与排查 —— 墙钟会回拨、会撞精度，做 watermark 会静默丢数据。
