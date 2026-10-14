@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,13 +49,32 @@ class AgentConfig:
     #: 用量占窗口的比例到这个数就该压缩。**v1 没有人读它** —— 接口在，实现没写。
     compress_at_ratio: float = 0.8
 
-    #: 一次 `step` 里最多调几次模型，防住模型与工具互相踢皮的死循环。
-    max_step_tokens: int = 16
+    #: 一次 run 的推理预算，工具返回触发的新 step 也计入。
+    max_run_steps: int = 32
+    max_run_seconds: float = 3600
+    llm_max_attempts: int = 3
+    llm_retry_delay: float = 0.2
     #: 派给工具系统的单次执行超时。
     tool_timeout_seconds: float = 30.0
     #: 一轮里的工具结果等多久就不等了。**从第一个结果到达起算**，不是从派发起算。
-    #: 到期之后 brain 照样跑一轮，缺的那些在投影里是 `unresolved` 占位。
+    #: 固定窗口到期可唤醒；缺失响应在 step.input 固定为 reminder。
     tool_round_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_run_steps",
+            "max_run_seconds",
+            "llm_max_attempts",
+            "llm_retry_delay",
+            "tool_timeout_seconds",
+            "tool_round_timeout_seconds",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} 必须是有限正数")
+        for name in ("max_run_steps", "llm_max_attempts"):
+            if not isinstance(getattr(self, name), int):
+                raise ValueError(f"{name} 必须是正整数")
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,9 +129,12 @@ class OathConfig:
                 "temperature": self.agent.temperature,
                 "context_window": self.agent.context_window,
                 "compress_at_ratio": self.agent.compress_at_ratio,
-                "max_step_tokens": self.agent.max_step_tokens,
                 "tool_timeout_seconds": self.agent.tool_timeout_seconds,
                 "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
+                "max_run_steps": self.agent.max_run_steps,
+                "max_run_seconds": self.agent.max_run_seconds,
+                "llm_max_attempts": self.agent.llm_max_attempts,
+                "llm_retry_delay": self.agent.llm_retry_delay,
             },
         }
 

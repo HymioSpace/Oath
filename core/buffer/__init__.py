@@ -1,7 +1,5 @@
-"""consumer 侧的持久化攒批缓冲。"""
+"""基于统一 Journal 事务的三个持久化 buffer。"""
 
-from __future__ import annotations
+from core.buffer.journal_buffer import JournalEventBuffer
 
-from core.buffer.impl import FileEventBuffer
-
-__all__ = ["FileEventBuffer"]
+__all__ = ["JournalEventBuffer"]

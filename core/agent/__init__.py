@@ -1,15 +1,5 @@
-"""agent runtime。"""
+"""Agent runtime。"""
 
-from core.agent.brain import (
-    COMMAND_KEY_PREFIX,
-    RESULT_KEY_PREFIX,
-    TOOL_CALL_KEY_PREFIX,
-    AgentBrain,
-)
+from core.agent.brain import AgentBrain
 
-__all__ = [
-    "COMMAND_KEY_PREFIX",
-    "RESULT_KEY_PREFIX",
-    "TOOL_CALL_KEY_PREFIX",
-    "AgentBrain",
-]
+__all__ = ["AgentBrain"]

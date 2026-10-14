@@ -29,6 +29,11 @@ class Journal(ABC):
     """
 
     @abstractmethod
+    def scopes(self) -> tuple[Scope, ...]:
+        """列举已持久化的 scope，恢复不能只扫描非空 buffer。"""
+        ...
+
+    @abstractmethod
     def append(
         self,
         scope: Scope,

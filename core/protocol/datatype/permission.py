@@ -26,7 +26,7 @@ class PermissionVerdict:
     ALLOW: Final = "allow"
     #: 当场拒绝，进 `tool.result{outcome: "failed", error.kind: "permission_denied"}`。
     DENY: Final = "deny"
-    #: 不跑。转成一条待审批，当场出终态事件把模型那个槽位填上。
+    #: 不执行，登记 waiting_approval；需要呈现时由 context 补 reminder，不发终态。
     ASK: Final = "ask"
 
     ALL: Final = frozenset({ALLOW, DENY, ASK})
@@ -56,8 +56,8 @@ class PermissionStatus:
 class PermissionEventType:
     """权限系统发出的事件类型。
 
-    v1 两个：`requested` 发给**外部**（谁去批），`resolved` 发给 **agent**
-    （结果回来了）。
+    requested 用于展示授权卡；执行状态通过查询读取，真实终态进入 tool queue。
+    resolved 是可用的展示事件类型，本执行器不以它唤醒模型。
     """
 
     REQUESTED: Final = "permission.requested"

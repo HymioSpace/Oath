@@ -1,22 +1,14 @@
-"""工具系统的接口：扩展作者实现 `Tool`，调用方用 `ToolSystem`。
+"""工具扩展提供定义与业务动作；ToolSystem 管批次、审批、执行资格和唯一终态。
 
-分工写死在接口形状里：
-
-- `Tool` 只提供**业务动作**和**内容**。没有权限钩子、没有超时属性、没有状态
-  迁移、没有投递 —— 这些一律 core 自己做，不给扩展留「权限扩展」「调度扩展」
-  这类位置。
-- `ToolSystem` 掌握生命周期：定义汇总、批量派发、状态查询。
-- 终态事件从这里出去，但投递口不归这一层 —— 系统只有一个
-  `AgentEventSink`（见 `core/protocol/interface/event.py`），权限的审批事件走
-  同一个口。投递失败由实现抛错，core 据此判定结果未知。
-- 权限不在这里。判定是三值的（allow / deny / ask），带审批流与有效期，
-  是独立的一套机制，见 `core/protocol/interface/permission.py`。
+工具真实终态和可靠输入在同一事务提交，再通知 tool queue 与客户端。
+在线投递失败不改变执行结果。权限策略只返回 allow / deny / ask。
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import Any
 
 from core.protocol.datatype import (
     BatchExecution,
@@ -58,6 +50,29 @@ class ToolSystem(ABC):
     """工具系统的调用面。"""
 
     @abstractmethod
+    def submit_batch(
+        self, scope: Scope, batch_id: str, requests: Sequence[ToolCallRequest]
+    ) -> BatchExecution:
+        """登记完整成员后异步接纳；初次集合只冻结一次。"""
+        ...
+
+    @abstractmethod
+    def batch_status(self, scope: Scope, batch_id: str) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def apply_permission(
+        self, scope: Scope, invocation_id: str, decision: str, command_id: str
+    ) -> bool:
+        """原子裁定并提交原调用；裁定和执行意图不能分开提交。"""
+        ...
+
+    @abstractmethod
+    def cancel(self, scope: Scope, run_id: str | None = None) -> None: ...
+
+    @abstractmethod
+    def recover_scope(self, scope: Scope) -> None: ...
+
+    @abstractmethod
     def definitions(self) -> tuple[ToolDefinition, ...]:
         """汇总当前可用的工具定义，交给 context。
 
@@ -72,7 +87,7 @@ class ToolSystem(ABC):
 
         - 只收批次，没有单条路径：单个调用是长度为 1 的批次。同一批里的调用
           互不依赖，没有理由串行。
-        - 返回时没有一个工具已经跑完。返回值只回答「谁被接下了」「谁当场被拒了」。
+        - 返回值表示批次已登记或已存在；接纳异步进行，结果与状态通过事件和查询读取。
         - 逐项独立：一个项被拒不影响同批其他项。
         - 整批入参不合法（空批次等）才抛 `ToolRequestError`，且不产生任何执行。
 
@@ -94,7 +109,7 @@ class ToolSystem(ABC):
 
     @abstractmethod
     def shutdown(self, *, wait: bool = True) -> None:
-        """停止接收新执行，并按 `wait` 决定是否等执行中的调用收尾。
+        """停止接收和派发，并按 `wait` 决定是否等待维护线程退出。
 
         执行中的调用**不会被终止** —— 没有安全的线程终止手段。进程退出后它们的
         结果由 journal 对账，不是这里的事。

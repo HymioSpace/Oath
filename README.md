@@ -5,8 +5,8 @@
 core 提供机制：事件运行时、状态机、追加日志、工具生命周期、超时、权限判定、context 组装、
 skill 加载、模型调用。扩展只提供业务内容和动作。日志是所有状态的唯一来源，崩溃后从这里恢复。
 
-**状态**：仓库里目前只有 journal 模块有实现，跑在 JSONL 上。事件运行时、工具系统、
-恢复编排和模型接入都还没开始。
+**状态**：三 consumer、工具批次、审批执行与 durable drain 已实现。
+当前为单进程 JSONL runtime；语义和恢复边界见 [Intake](spec/feature-intake.md)。
 
 ## 目录
 
@@ -32,7 +32,7 @@ skill 加载、模型调用。扩展只提供业务内容和动作。日志是�
 手段，进 `core/utils/`。消费方从 `core.protocol.datatype`、
 `core.protocol.error`、`core.protocol.interface` 三个包入口 import，不碰子模块，
 也不走 `core.protocol` 这一层——两个 `__init__.py` 都不重导出符号。
-`bootstrap/`（装配与入口）等有代码时再建。
+`bootstrap/` 负责配置读取、模块装配与运行入口。
 
 「可缺省」指删掉它 runtime 照样启动，而且照样能恢复 —— 因为日志在 `core/` 里。
 
@@ -51,6 +51,8 @@ uv run pytest tests/ -m ""     # 含 slow（真实进程 SIGKILL）
 - [整体架构](spec/overview.md)
 - [feature 模板](spec/feature-template.md)
 - [Journal：追加日志、状态存储与恢复](spec/feature-journal.md)
+- [Intake：三个 consumer、工具批次与 Brain 唤醒](spec/feature-intake.md)
+- [Intake 场景与崩溃推演](spec/intake-cases.md)
 
 Oath 服务于 [Hymio](https://github.com/HymioSpace/Hymio)。
 [Nostalgia](https://github.com/HymioSpace/Nostalgia) 通过扩展提供个人 context。

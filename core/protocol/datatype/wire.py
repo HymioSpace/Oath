@@ -20,8 +20,8 @@ pong / error / close）。加一个 command 是破坏性变更：老客户端遇
 客户端自己就是它已渲染内容的存储方，让 oath 拿 journal 当消息总线只会把投递能力绑死在
 日志扫描上。
 
-**ack 是应用层回执，不是送达确认。** WebSocket 本身可靠有序，「command 到了」不需要
-再说一遍；ack 回的是传输层看不见的事 —— 凭据验过了没有、绑到了哪个 session。
+ACK 表示 session 绑定成功或命令已可靠接纳；不表示工具执行完成。
+断线后用 session.status 查询审批、调用和 step 状态。
 """
 
 from __future__ import annotations
@@ -72,14 +72,26 @@ class CommandType:
     SESSION_OPEN: Final = "session.open"
     #: 用户输入。会落成 `user.message`。
     USER_MESSAGE: Final = "user.message"
-    #: 审批裁定。落成 `permission.resolved`。
+    #: 审批决定先可靠接纳，再经 system consumer 原子裁定。
     PERMISSION_DECIDE: Final = "permission.decide"
-    #: 取消当前 run。落成 `system.cancel`。
+    #: 取消指定或当前 run；控制动作先于可能的模型解释。
     RUN_CANCEL: Final = "run.cancel"
-    #: 心跳。不落盘。
+    #: 显式重试暂停 / 失败的原 step。
+    STEP_RETRY: Final = "step.retry"
+    SESSION_STATUS: Final = "session.status"
     PING: Final = "ping"
 
-    ALL: Final = frozenset({SESSION_OPEN, USER_MESSAGE, PERMISSION_DECIDE, RUN_CANCEL, PING})
+    ALL: Final = frozenset(
+        {
+            SESSION_OPEN,
+            USER_MESSAGE,
+            PERMISSION_DECIDE,
+            RUN_CANCEL,
+            PING,
+            STEP_RETRY,
+            SESSION_STATUS,
+        }
+    )
 
     #: 不需要 `session_id` 的 command —— 绑定 session 之前还没有 session_id。
     ANONYMOUS: Final = frozenset({SESSION_OPEN})
@@ -121,7 +133,9 @@ COMMAND_SCHEMAS: Final[dict[str, PayloadSchema]] = {
         required=frozenset({"invocation_id", "status"}),
         optional=frozenset({"decided_by", "reason"}),
     ),
-    CommandType.RUN_CANCEL: PayloadSchema(optional=frozenset({"reason"})),
+    CommandType.RUN_CANCEL: PayloadSchema(optional=frozenset({"reason", "run_id"})),
+    CommandType.STEP_RETRY: PayloadSchema(),
+    CommandType.SESSION_STATUS: PayloadSchema(),
     CommandType.PING: PayloadSchema(),
 }
 
@@ -226,17 +240,7 @@ class EventFrame:
 
 
 def ack(command_id: str, *, session_id: str | None = None) -> JsonObject:
-    """应用层回执。
-
-    **不是送达确认** —— WebSocket 本身可靠有序，command 到了这件事不需要再说
-    一遍。它回的是传输层看不见的：凭据验过了没有、绑到了哪个 session。
-
-    `session.open` 是必须的那一条：它是唯一一条客户端不知道自己 `session_id` 的
-    command —— 要绑定的正是 session_id，客户端不拿到就没法发后面任何一条。
-
-    其余 command 不需要回执：结果要么作为事件出现在下行流里，要么失败时来一帧
-    `error`。真的需要一条「它生效了」的确认时才走这条。
-    """
+    """session 绑定成功，或命令已可靠接纳；执行结果另行通知。"""
     frame: JsonObject = {"v": WireVersion.CURRENT, "type": FrameType.ACK, "id": command_id}
     if session_id is not None:
         frame["session_id"] = session_id

@@ -1,16 +1,8 @@
-"""WebSocket server：把客户端接进 runtime。
+"""WebSocket 到 runtime 的桥。
 
-**core 不 import `websockets`。** 这一层是 core 与 socket 之间的桥，两个方向：
-
-- 上行：解析帧 → `Runtime.submit` / `open_session`。两者都是纯内存操作，直接在事件
-  循环里调 —— 不落盘，也就没有要等的写操作。**同一条连接上的多条 command 因此保持
-  顺序**：交给线程池的话，第二条可能比第一条先到队列。
-- 下行：**事件**走 `OutboundHub`（有界队列、有背压）；**控制帧**（ack / pong / error /
-  close）直接写在这条连接上 —— 它们是对某一条 command 的回应，跟着那条连接走才对，
-  排队没有意义。
-
-会话绑定之后，这条连接不再自称身份：`session_id` 只在 `session.open` 那一次出现，
-之后每条 command 的 `session_id` 都要与绑定的那个一致。
+同一连接按顺序 await submit；fsync 放在线程中，成功后回 ACK。
+在线事件经 OutboundHub 投递，断线后用 session.status 查询当前持久化状态。
+session 绑定后不允许客户端重新声明身份。
 """
 
 from __future__ import annotations
@@ -115,7 +107,22 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
                 continue
 
             try:
-                runtime.submit(command, scope)
+                if command.type == CommandType.SESSION_STATUS:
+                    snapshot = await asyncio.to_thread(runtime.status, scope)
+                    await connection.send(
+                        canonical_json(
+                            {
+                                "v": 1,
+                                "type": "event",
+                                "session_id": scope.session_id,
+                                "event_type": "session.status",
+                                "payload": snapshot,
+                            }
+                        )
+                    )
+                    continue
+                await asyncio.to_thread(runtime.submit, command, scope)
+                await connection.send(canonical_json(ack(command.id, session_id=scope.session_id)))
             except WireProtocolError as exc:
                 await _fail(connection, command.id, exc)
             except Exception as exc:  # 装配层给不出更细的分类

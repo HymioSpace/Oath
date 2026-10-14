@@ -16,7 +16,7 @@ from core.protocol.datatype.inbound import InboundKind
 
 
 class QueueName:
-    """三条内部队列。消费方是 `SessionConsumer`。"""
+    """三条内部队列，各自由 UserConsumer / ToolConsumer / SystemConsumer 消费。"""
 
     USER: Final = "user"
     TOOL: Final = "tool"

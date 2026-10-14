@@ -30,6 +30,7 @@ class EventType:
     特殊类别 —— 和 `user.message` 一样是一种 type，一样的登记流程，一样的字段约束。
     """
 
+    RUNTIME_COMMIT: Final = "runtime.commit"
     USER_MESSAGE: Final = "user.message"
     ASSISTANT_MESSAGE: Final = "assistant.message"
     TOOL_CALL: Final = "tool.call"
@@ -43,6 +44,7 @@ class EventType:
     #: 全部合法的 type。
     ALL: Final = frozenset(
         {
+            RUNTIME_COMMIT,
             USER_MESSAGE,
             ASSISTANT_MESSAGE,
             TOOL_CALL,
@@ -68,9 +70,7 @@ class ToolOutcome:
     进程被杀、对端超时无响应）。这种情况**不能**一律重试 —— 幂等键不保证
     第三方系统去重。journal 只存不判，重试策略属于工具系统。
 
-    `AWAITING_APPROVAL` 也刻意存在：工具**没执行**，因为权限判定要人批。这不是
-    失败 —— 没有东西出错。而它必须是个终态：LLM 的 message 数组里每个
-    tool call 都要配一条 tool result，缺一条这个数组交给任何 provider 都是坏的。
+    等待批准属于执行状态；给模型的 reminder 不属于工具终态。
     """
 
     SUCCEEDED: Final = "succeeded"
@@ -78,11 +78,8 @@ class ToolOutcome:
     TIMEOUT: Final = "timeout"
     CANCELLED: Final = "cancelled"
     OUTCOME_UNKNOWN: Final = "outcome_unknown"
-    AWAITING_APPROVAL: Final = "awaiting_approval"
 
-    ALL: Final = frozenset(
-        {SUCCEEDED, FAILED, TIMEOUT, CANCELLED, OUTCOME_UNKNOWN, AWAITING_APPROVAL}
-    )
+    ALL: Final = frozenset({SUCCEEDED, FAILED, TIMEOUT, CANCELLED, OUTCOME_UNKNOWN})
 
 
 class EventRecord(TypedDict):
@@ -147,6 +144,9 @@ class PayloadSchema:
 #: v1 的 payload schema。键是 `(type, version)`，版本从 1 开始。
 #: 每种 type 都有 schema，没有例外。
 PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
+    (EventType.RUNTIME_COMMIT, 1): PayloadSchema(
+        required=frozenset({"version", "reason", "changes"})
+    ),
     (EventType.USER_MESSAGE, 1): PayloadSchema(required=frozenset({"content"})),
     # `reasoning` 必填但可为 null：模型的思维链原样落盘，不加工。
     # 是否在重放时回传给模型由 provider 策略决定，那是适配层的事。
@@ -162,7 +162,7 @@ PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
     ),
     (EventType.TOOL_RESULT, 1): PayloadSchema(
         required=frozenset({"tool_call_id", "invocation_id", "outcome"}),
-        optional=frozenset({"content", "error"}),
+        optional=frozenset({"content", "error", "batch_id", "run_id", "source", "event_id"}),
     ),
     # `trigger` 是这一轮被什么唤醒的：没有它，trace 里分不清「用户问了」和「工具回来
     # 了」，两者的排查方式不一样。

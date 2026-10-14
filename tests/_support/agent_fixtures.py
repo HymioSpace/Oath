@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Any
 
 from core.context import ContextManager
+from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.config import AgentConfig, ModelProviderConfig
 from core.protocol.datatype.event import AgentEvent
 from core.protocol.datatype.scope import Scope
@@ -42,6 +44,25 @@ class SilentSink(AgentEventSink):
 class NoTools(ToolSystem):
     """没有工具，也不会被派发。填那些不关心工具的测试。"""
 
+    def submit_batch(
+        self, scope: Scope, batch_id: str, requests: Sequence[ToolCallRequest]
+    ) -> BatchExecution:
+        return BatchExecution()
+
+    def batch_status(self, scope: Scope, batch_id: str) -> dict[str, Any] | None:
+        return None
+
+    def apply_permission(
+        self, scope: Scope, invocation_id: str, decision: str, command_id: str
+    ) -> bool:
+        return False
+
+    def cancel(self, scope: Scope, run_id: str | None = None) -> None:
+        pass
+
+    def recover_scope(self, scope: Scope) -> None:
+        pass
+
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return ()
 
@@ -66,6 +87,7 @@ def agent_ctx(
     config = config or DEFAULT_CONFIG
     return AgentContext(
         journal=journal,
+        store=RuntimeStore(journal),
         queue=queue or InMemoryEventQueue(),
         sink=sink or SilentSink(),
         tools=tools or NoTools(),

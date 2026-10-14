@@ -1,13 +1,4 @@
-"""装配：把配置变成一个能跑的 runtime。
-
-依赖方向单向 —— `bootstrap` → `core`。core 不反向 import 这里任何东西。
-
-一个 session 一个消费线程：线程在 `session.open` 时起，`Brain.step` 就在这条线程上跑，
-所以模型调用的阻塞只挡住那一条会话。
-
-装配顺序是有依赖的：`queue` → `sink` → `tools` → `AgentContext` → `brain` /
-`consumer`。`AgentContext` 只在最后组装一次，中间产物都是局部变量。
-"""
+"""装配三 consumer、独立 Brain 和共用持久化事务。"""
 
 from __future__ import annotations
 
@@ -18,27 +9,27 @@ from dataclasses import dataclass, field
 from typing import Final
 
 from core.agent import AgentBrain
-from core.buffer import FileEventBuffer
-from core.consumer import SessionConsumer, ToolEventRelay
+from core.buffer.journal_buffer import JournalEventBuffer
+from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
 from core.context import ContextManager, NullCompressor
 from core.journal.impl import FileJournal
+from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
 from core.outbound import OutboundHub, WsEventSink
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.inbound import of_command
 from core.protocol.datatype.scope import Scope
-from core.protocol.datatype.wire import Command
-from core.protocol.error import PermissionDeniedError
+from core.protocol.datatype.wire import Command, CommandType
+from core.protocol.error import PermissionDeniedError, WireProtocolError
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
+from core.protocol.interface.llm import ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
-from core.protocol.interface.tool import Tool, ToolSystem
+from core.protocol.interface.tool import Tool
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
 from core.tool.impl import ThreadedToolSystem
-from core.tool.permission import PermissionManager
-from core.tool.permission.impl import FilePermissionStore
 from core.tool.registry import ToolRegistry
 from core.utils.encoding import JsonObject
 
@@ -95,6 +86,8 @@ class Runtime:
         *,
         loop: asyncio.AbstractEventLoop,
         tools: list[Tool] | None = None,
+        policy: PermissionPolicy | None = None,
+        provider: ModelProvider | None = None,
     ) -> None:
         self.config = config
         self.authenticator = TokenAuthenticator(config.credentials)
@@ -106,33 +99,34 @@ class Runtime:
         queue = InMemoryEventQueue()
         self.hub = OutboundHub(loop, send_queue_size=config.server.send_queue_size)
         outbound: AgentEventSink = WsEventSink(self.hub)
-        # 工具终态事件从工作线程来：直推客户端，再进 tool 队列。**不落盘** ——
-        # 工具系统不知道这一轮是什么，落盘是 brain 读到那一批之后的判断。
-        sink: AgentEventSink = ToolEventRelay(queue, outbound)
-
+        store = RuntimeStore(self.journal)
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         for tool in tools or []:
             registry.register(tool)
-        self.permissions = PermissionManager(
-            FilePermissionStore(data_root / "permissions"),
-            AllowAllPolicy(),
-            sink,
+        tool_system = ThreadedToolSystem(
+            registry, outbound, policy or AllowAllPolicy(), store=store, queue=queue
         )
-        tool_system: ToolSystem = ThreadedToolSystem(registry, sink, self.permissions)
-
-        # 共享基础设施收口成一份。各组件按自己的需要从这里取，不用各自接一遍。
         self.ctx = AgentContext(
             journal=self.journal,
+            store=store,
             queue=queue,
-            sink=sink,
+            sink=outbound,
             tools=tool_system,
             context_manager=ContextManager(self.journal, config.agent, compressor=NullCompressor()),
             config=config.agent,
         )
-        self.brain: Brain = AgentBrain(self.ctx, OpenAICompatibleProvider(config.agent.provider))
-        self.buffers = FileEventBuffer(data_root / "buffers")
-        self.consumer = SessionConsumer(self.ctx, self.brain, self.buffers)
-        self._workers: dict[Scope, SessionWorker] = {}
+        self.brain: Brain = AgentBrain(
+            self.ctx, provider or OpenAICompatibleProvider(config.agent.provider)
+        )
+        self.buffers = JournalEventBuffer(
+            store, tool_buffer_timeout=config.agent.tool_round_timeout_seconds
+        )
+        self.consumers = (
+            UserConsumer(self.ctx, self.brain, self.buffers),
+            ToolConsumer(self.ctx, self.brain, self.buffers),
+            SystemConsumer(self.ctx, self.brain, self.buffers),
+        )
+        self._workers: dict[tuple[Scope, str], SessionWorker] = {}
         self._workers_lock = threading.Lock()
         self._resume_buffered()
 
@@ -144,42 +138,70 @@ class Runtime:
         return Scope(user_id=identity.user_id, session_id=identity.session_id)
 
     def submit(self, command: Command, scope: Scope) -> None:
-        """把一条 command 排进队列。返回即代表排上了。
-
-        **不落盘。** 上行不碰 journal：那条记录由 `Brain` 读到这一批之后才写，键挂在
-        command id 上。
-        """
+        if command.session_id != scope.session_id:
+            raise WireProtocolError("session 与认证身份不匹配", code="session_mismatch")
+        if command.type == CommandType.PERMISSION_DECIDE:
+            if command.payload.get("status") not in {"approved", "denied"}:
+                raise WireProtocolError("审批只接受 approved / denied", code="bad_payload")
+            if not isinstance(command.payload.get("invocation_id"), str):
+                raise WireProtocolError("审批缺 invocation_id", code="bad_payload")
+            if self.ctx.tools.status(scope, str(command.payload["invocation_id"])) is None:
+                raise WireProtocolError("找不到调用", code="not_found")
+            command = Command(
+                command.id,
+                command.type,
+                command.session_id,
+                {**command.payload, "decided_by": scope.user_id},
+            )
+        if command.type == CommandType.USER_MESSAGE and not isinstance(
+            command.payload.get("content"), str
+        ):
+            raise WireProtocolError("content 必须是文本", code="bad_payload")
         inbound = of_command(command)
         if inbound is not None:
+            self.buffers.accept(scope, inbound)
             self.ctx.queue.put(scope, inbound)
+            self.ensure_session(scope)
 
-    # -- session 生命周期 ---------------------------------------------------
+    def status(self, scope: Scope) -> JsonObject:
+        state = self.ctx.store.read(scope)
+        active = state["meta"].get("active_step")
+        step = state["steps"].get(active, {})
+        return {
+            "run_id": state["meta"].get("run_id"),
+            "step_id": active,
+            "step_status": step.get("status", "idle"),
+            "error": step.get("error") or state["meta"].get("intake_error"),
+            "calls": list(state["calls"].values()),
+            "messages": state["conversation"].get("messages", []),
+            "input_errors": [
+                {"input_id": key, "error": entry["error"]}
+                for key, entry in state["inputs"].items()
+                if entry["phase"] == "rejected"
+            ],
+        }
 
     def ensure_session(self, scope: Scope) -> None:
-        """给这个 scope 起一条消费线程。已经有活着的就不动。"""
         with self._workers_lock:
-            existing = self._workers.get(scope)
-            if existing is not None and existing.thread.is_alive():
-                return
-            # 上一次那条已经死了 —— 留着它等于这条 session 再也没有人消费。死因
-            # 在它的日志里，这里只管换一条新的。
-            stop = threading.Event()
-            thread = threading.Thread(
-                target=self.consumer.run,
-                args=(scope, stop),
-                name=f"oath-session-{scope}",
-                daemon=True,
-            )
-            self._workers[scope] = SessionWorker(scope=scope, thread=thread, stop=stop)
-            thread.start()
+            for consumer in self.consumers:
+                key = (scope, consumer.queue_name)
+                existing = self._workers.get(key)
+                if existing and existing.thread.is_alive():
+                    continue
+                stop = threading.Event()
+                thread = threading.Thread(
+                    target=consumer.run,
+                    args=(scope, stop),
+                    name=f"oath-{consumer.queue_name}-{scope.session_id}",
+                    daemon=True,
+                )
+                self._workers[key] = SessionWorker(scope, thread, stop)
+                thread.start()
+        self.brain.resume(scope)
 
     def _resume_buffered(self) -> None:
-        """给上次没干完的活起线程。
-
-        buffer 是崩溃时唯一还留着输入的地方 —— 队列是内存里的，进程一没就没了。
-        没人来捞的话那批输入就一直在文件里，直到有人重新连上这个 session。
-        """
-        for scope in self.buffers.scopes():
+        for scope in self.ctx.store.scopes():
+            self.ctx.tools.recover_scope(scope)
             self.ensure_session(scope)
 
     def close(self) -> None:
@@ -193,14 +215,12 @@ class Runtime:
         for worker in workers:
             worker.thread.join(timeout=_WORKER_JOIN_TIMEOUT)
             if worker.thread.is_alive():
-                # 还卡在模型调用上。它醒过来之后 journal 已经关了，那一步会失败 ——
-                # 说出来比闷在日志里强。
+                # consumer 只做短事务；超时需排查存储或控制处理。
                 _log.warning(
                     "session %s 的消费线程没能在 %ss 内退出", worker.scope, _WORKER_JOIN_TIMEOUT
                 )
         self.brain.close(wait=True)
         self.ctx.tools.shutdown(wait=True)
-        self.permissions.shutdown(wait=True)
         self.hub.shutdown()
         self.journal.close()
 
