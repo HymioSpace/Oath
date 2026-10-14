@@ -84,7 +84,14 @@ class AgentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须是有限正数")
-        for name in ("max_run_steps", "llm_max_attempts"):
+        for name in (
+            "max_run_steps",
+            "llm_max_attempts",
+            "context_window",
+            "tool_result_detail_chars",
+            "compress_keep_recent",
+            "compress_summary_tokens",
+        ):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} 必须是正整数")
         for name in ("compress_async_at_ratio", "compress_sync_at_ratio"):

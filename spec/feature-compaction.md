@@ -1,185 +1,131 @@
 # Feature — Compaction：工具结果截断与历史压缩
 
-状态：Implementing（单进程 JSONL）
+状态：Implemented（单进程 JSONL）。
 
-前置：[Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)。
-本 feature 定义「发给模型的内容比持久化的内容少」这条链路的契约：少了多少、少了的怎么找回来、
-什么时候少、按什么边界少。
+## 总览
 
-## 1 总览
-
-**三级压缩，全部按 scope。前两级只影响发给模型的内容，journal 里始终是全文。**
+按 scope 分三级处理：工具结果截断、40% 异步备摘要、90% 同步生效。
+DetailStore 保存长结果全文；journal 保存截断后的终态和全文引用。
+历史摘要只改变模型视图，不删除 conversation。
 
 ```mermaid
 flowchart TD
-    T[工具返回正文] --> L1{字符数 > 阈值?}
-    L1 -->|是| L1A[存全文到 detail store]
-    L1A --> L1B[正文保头留尾 + detail_key]
-    L1 -->|否| M[进对话历史]
-    L1B --> M
-    M --> U{占用 ≥ 40%?}
-    U -->|是| A[异步线程压缩一段历史 → pending]
-    U -->|否| Req[组装请求]
-    A -.只存不用.-> Req
-    Req --> S{占用 ≥ 90%?}
-    S -->|是且有可用 pending| AP[生效：重组 context]
-    S -->|是且没有| SY[同步压缩一次并生效]
-    AP --> Req2[组装请求]
-    SY --> Req2
-    Req2 --> Req
+    Result[长工具结果] --> Detail[全文持久化 → 保头留尾和读取提示]
+    Input[三个 buffer] --> Claim[step.input：固定输入和 tool 槽位]
+    Claim --> Usage[估算历史视图 + 本轮输入 + system + tools + 输出预算]
+    Usage -->|40%| Async[异步生成 pending，不生效]
+    Usage -->|90%| Apply[生效 pending；不足时同步增量压缩]
+    Usage --> Freeze[step.request：固定最终模型请求]
+    Apply --> Freeze
+    Freeze --> Model[模型调用；重试沿用同一请求]
 ```
 
-贯穿全文的规则：
+规则：至少保留最近 N 条；tool call/result 不拆开；异步产物不自动生效；
+模型调用不占事务锁；已经固定的请求和已保存响应不重复压缩。
 
-1. **截断在写入时做，不在读取时做。** journal 里的终态就是终态；投影路径保持纯读。
-2. **切点必须合法。** 一次 `tool_calls` 声明和它的结果要么整段保留，要么整段丢掉。
-3. **压缩是产物而不是动作。** 算出来的摘要先落成 `pending`，到点才生效；异步那条不阻塞任何请求。
-4. **压不出来就保留原历史。** 压缩失败降级成「不压」，不报错、不丢内容。
+## 1 工具结果与全文
 
-## 2 工具结果截断
+结果超过 tool_result_detail_chars 时，先将全文写入 DetailStore，再生成头尾文本和
+`detail_read(detail_key=...)` 提示。非字符串先编码为 canonical JSON。
+终态带 detail_key / original_chars；正文此时是文本，不再是原 JSON 对象。
 
-工具成功返回的正文超过 `tool_result_detail_chars`（默认 4000 字符）时：
+DetailStore 接口提供按 scope 的 put/get，文件实现置于 core/detail/impl。
+put 成功返回表示全文已持久化。文件实现 fsync 临时文件、rename、fsync 目标目录；
+创建目录时同步父目录。失败则保留完整结果，不发布全文引用。
+写文件发生在工具终态事务之外；崩溃可能留下未引用文件，但不能发布未可靠保存的引用。
 
-- 全文写进 detail store，得到一个 `detail_key`；
-- 落盘的 `content` 变成保头留尾的文本：头 `limit // 2`、尾 `limit - limit // 2`，
-  中间换行放一行说明，指明省略了多少字符、`detail_key` 是什么；
-- 终态 payload 额外带 `detail_key` 和 `original_chars`。
+内置 detail_read 从当前 scope 读取全文，不接受文件路径。它的返回值豁免第一层截断；
+已经进入历史的内容仍按历史摘要规则处理。未找到全文时报告工具失败，不返回空串。
+备份 / 恢复必须同时包含 journal 与 details，journal 单独不包含被移出的全文。
 
-`detail_key` 形如 `<invocation_id>`，取回时必须带同一个 scope —— 跨 session 一律取不到。
+## 2 合法切点
 
-非字符串结果（结构化 JSON）先按 canonical JSON 编码再截断，**截断后的 content 一律是文本**。
-这意味着客户端只在「原结果本来超过阈值」时才会看到 `content` 从对象变成字符串。
+N 是至少保留的最近消息数，计入本步已经固定的输入。候选切点为 len(messages)-N，
+遇到工具组内部则向更早的边界移动。assistant.tool_calls 之前是合法切点；
+声明和所有 tool responses 之间不是。没有可压缩前缀时不压缩。
 
-降级规则：detail store 写失败时保留完整正文、`detail_key` 为空。**宁可多发一段长文本，
-也不让 journal 里出现一个指向不存在内容的 key** —— 那条记录一旦落盘就撤不回来了。
+边界检查确认前缀没有未配对调用、后缀不从孤立 tool response 开始。
+例如 `[user, assistant(call A), tool(A), assistant]`，保留 2 或 3 条均切在下标 1。
 
-`detail_read` 是内置工具，读一个 `detail_key` 的完整内容。它的结果不参与截断：
-它存在的意义就是拿回被截断的东西，再截一次等于没做。它的历史与其他工具结果一样，
-可能被第 3 节的压缩覆盖。
+## 3 摘要范围与增量
 
-截断在工具执行的收尾处、事务之外完成：写 detail 是文件 I/O，不能在 scope 锁里做。
+产物保存原始 conversation 的覆盖条数 covers、替代消息 messages 和生成时间。
+pending 为未生效产物，applied 为生效产物。conversation 只追加，因此覆盖位置稳定。
+产物 covers 必须在范围内且落在合法边界；生效覆盖位置不能后退。
 
-## 3 历史压缩：切点与保留量
+首次压缩输入是原始历史前缀。后续输入是：
 
-压缩的输入是 `conversation.messages`（完整历史），输出是一个产物：
+```text
+当前 applied 摘要 + conversation[applied.covers : 新切点]
+```
+
+不把已覆盖的原始全文重新发给压缩模型。新产物仍保存原始历史的新切点，
+发给主模型的视图为 `applied.messages + conversation[applied.covers:]`。
+没有新增可覆盖前缀时不重新压缩。迟到的异步产物不能覆盖已生效的更大范围。
+
+## 4 请求准备与阈值
+
+Brain 先检查有效唤醒、active step 和预算状态。新的 step.input 原子保存：
+输入 IDs、固定 tool response 槽位、未经历史压缩的 request_draft。
+请求草稿包含本轮输入、system prompt、工具定义和模型参数。
+
+锁外运行压缩准备，然后 step.request 保存最终请求并释放草稿。
+输入认领期间到达的新消息留在 buffer，不混入该草稿。
+压缩期间崩溃恢复原草稿；最终请求已保存后，恢复和模型重试直接使用原请求。
+已保存模型响应的 step 只补后处理，不运行压缩。
+
+占用估算包括当前历史视图、本轮输入、system prompt、工具定义和 max_output_tokens。
+字符启发式计量不是 provider 的精确 tokenizer，阈值不承诺请求绝对不超限。
+
+- 40%：同 scope 至多一个异步压缩任务。可用 pending 存在时不重复准备。
+  任务只保存 pending，不修改当前请求。
+- 90%：先应用可用 pending 并重算；仍超阈值时最多同步压缩一次，覆盖更多历史。
+  同步调用在事务外；不循环压缩。
+
+阈值取 `(0,1]` 且同步高于异步；1.0 表示达到 100% 时触发，不是禁用开关。
+无法压缩、算法失败或摘要不更短时保留原视图。单条巨大输入、必须保留的尾段或 detail_read
+全文本身超过窗口时，这套历史压缩无法保证请求可发送，需调用方限制输入或另设分页读取能力。
+
+## 5 算法接口
 
 ```python
-{"covers": 12, "messages": [{"role": "user", "content": "<context_summary>…</context_summary>"}]}
+Compactor.compress(messages, *, budget_tokens) -> list[dict] | None
 ```
 
-`covers` 是它替换掉的开头消息条数。产物落进 `state["compactions"]` 的两个固定 key：
-`pending`（备好未生效）与 `applied`（当前生效的）。固定 key 而不是自增 id ——
-一个 scope 同时最多有一个生效产物和一个待生效产物，历史只增不减，不需要多版本。
-
-### 3.1 合法切点
-
-一条消息能当切点，当且仅当它既不是 `tool` role，也不带 `tool_calls`：
-
-```python
-def is_boundary(messages, index) -> bool:
-    return messages[index]["role"] != "tool" and not messages[index].get("tool_calls")
-```
-
-理由在 [Intake](feature-intake.md) 6.1：provider 要求一次工具声明后面紧邻同数量的结果，
-中间插一条摘要会让请求直接被拒。把切点落在组中间，等于把一次调用和它的结果劈成两半。
-
-### 3.2 保留最近 N 条
-
-`compress_keep_recent`（默认 12）是从尾部数的保留条数。从 `len - N` 出发向前找第一个
-合法切点；**向前找会切得更靠后**，即多留几条，而不是把 N 减到刚好。
-
-切点不存在（历史比 N 还短，或剩下的尾段没有合法切点）就不压。
-
-### 3.3 产物什么时候还有效
-
-历史只追加，不删除，所以 `covers` 指向的位置永远存在。新消息落在 `covers` 之后，
-产物照样能用。唯一会失效的情况是 `covers` 越界或不再是合法切点 —— 发生后当没压过。
-
-生效的条件：新产物的 `covers` **不小于**当前生效产物的 `covers`。不允许退回更少的历史。
-
-## 4 触发
-
-占用比例按「当前生效视图 + system prompt」估算。视图取自 `conversation.messages` ——
-即已经完成的历史，不含本步刚认领的输入，所以第一步不会触发压缩。
-`estimate` 是估算不是计数：ASCII 每 4 字符记 1 token，其余记 1 token。
-真正的 token 数只有 provider 知道，阈值本来就是启发式的；要精确就换掉这个函数。
-
-### 4.1 异步：40%
-
-占用达到 `compress_async_at_ratio` 时，后台线程跑一次压缩，产物存进 `pending`，
-**不生效**。下一个 step 仍用当前视图，直到 90% 那一级。
-
-同一个 scope 同时只有一个在跑的异步压缩（进程内登记）。已经有可用的 `pending` 时不再起新的 ——
-正在备的那份就是为这次准备的。
-
-### 4.2 同步：90%
-
-占用达到 `compress_sync_at_ratio` 时：
-
-1. 有可用 `pending` → 直接生效，context 重组，不调用模型；
-2. 没有 → 在 Brain 线程里同步压一次并生效；
-3. 压不出来（没有合法切点、段太短、模型失败、摘要不比原文短）→ 保留原历史继续发，
-   由 provider 报超长。
-
-同步压缩是模型调用，**不能进事务**。它在认领事务之前完成，认领事务只做纯数据重组。
-
-| 阈值配置 | 行为 |
-| --- | --- |
-| `compress_async_at_ratio = 1.0` | 永不异步 |
-| `compress_sync_at_ratio = 1.0` | 永不同步 |
-
-两个比例都是 `(0, 1]`，且 `compress_sync_at_ratio > compress_async_at_ratio`。
-配错在构造时抛错，不留到运行时才发现压缩从来没触发过。
-
-## 5 压缩算法
-
-`Compactor` 是唯一的算法接口：
-
-```python
-Compactor.compress(messages: Sequence[Mapping], *, budget_tokens: int) -> list[dict] | None
-```
-
-输入是一段历史，输出是替代它的消息。切在哪、什么时候生效、失败怎么降级都不归它管。
-返回 `None` 表示压不了，调用方保留原历史。当前实现 `LlmCompactor` 是一次模型调用，
-输出用 XML 固定结构：
+算法只生成替代消息，不决定阈值、切点、生效或持久化。返回 None 表示无法压缩。
+LlmCompactor 使用一次模型调用，输出 XML：
 
 ```xml
 <context_digest>
-<summary>已经完成的进展，按时间顺序。</summary>
-<facts>
-<item>订单号 1234，用户要求改地址到上海。</item>
-</facts>
-<open>
-<item>detail_read(detail_key=...) 还没调用。</item>
-</open>
+  <summary>已完成的进展。</summary>
+  <facts><item>标识符、数字、用户约束、全文引用。</item></facts>
+  <open><item>尚未完成的动作。</item></open>
 </context_digest>
 ```
 
-`facts` 收必须逐字保留的东西：标识符、数字、用户原话约束、未完成事项。
-`open` 收还没闭环的动作。两条都是可选的，缺了不报错。
-
-解析后的摘要作为**一条 `user` 消息**替换被压掉的前缀。不用 `assistant` role ——
-那会伪造一段模型没说过的发言，而且部分 provider 要求首条非 system 消息是 user。
-正文转义后包在 `<context_summary>` 里，让模型知道这是历史摘要而不是新指令。
-
-解析失败、空摘要、摘要不比原文短，都当压不出来。
+解析后以转义的 context_summary 包装为 user 消息。空摘要、无效 XML、不比输入短的摘要不保存。
+工具执行状态仍以 RuntimeStore 为准，摘要不能授予权限或修改工具状态。
 
 ## 6 失败与恢复
 
-- **detail store 写失败**：保留完整正文，无 `detail_key`。记录一条日志，不影响工具终态。
-- **`detail_read` 取不到**：抛 `ToolExecutionError`，按普通工具失败处理。不返回空串。
-- **压缩模型失败**：记日志，保留原历史。异步的失败只是没有 `pending`。
-- **进程退出**：在跑的压缩线程随进程消失，没有产物落盘。重启后从当前历史重新判阈值。
-- **产物不匹配当前历史**：`covers` 越界或不是合法切点时当没压过，不报错。
-- **压缩后仍超限**：不循环压缩。一次请求只压一次，压完直接发。
+- 全文写入失败：保留原结果；已经发布的引用随 journal 和 details 一起恢复。
+- 异步任务中断：没有产物就重新准备；已保存 pending 重启后仍可用。
+- 输入已认领但请求未保存：恢复固定草稿，继续准备；不重新 drain。
+- 请求已保存：不重算摘要，不修改请求；模型响应已保存则只恢复后处理。
+- 压缩模型失败：保留视图，记录错误；主模型失败仍遵守有限重试。
 
-## 7 跨仓库影响与范围
+当前是单进程互斥。跨进程 owner、全文分页、精确 tokenizer、摘要质量评估和文件回收另行实现。
 
-- **协议**：`tool.result` payload 新增可选 `detail_key` / `original_chars`。超阈值的结果
-  `content` 是文本；客户端展示长结果时读 `detail_key`。
-- **Hymio**：注册的业务工具不需要改。结果超过阈值时 tool 结果变小是预期行为。
-- **Nostalgia**：从 journal 读到的是全文，压缩只发生在发给模型的那一步。
-- **删掉 extensions 仍可运行**：`detail_read` 与 detail store 都在 core/ 内。
+## 7 对外事件
 
-未实现：跨 scope 共享 detail、分页读取长结果、按 token 而非字符计量、压缩产物跨 session 复用、
-多进程下同一 scope 的压缩互斥（当前保证只在单进程内成立）。
+Coordinator 注入 AgentEventSink，通过现有 WebSocket 发 context.compaction。
+实际开始算法前发 started；产物提交后发 ready（异步）或 applied（同步 / 应用 pending）。
+算法 / 存储失败发 failed，无有效缩短或被新产物取代发 skipped。
+payload 包含 compression_id、status、mode、covers、reason，不含原文或异常正文。
+在线通知不承诺重放，session.status.compaction 提供已保存产物的元数据。
+
+## 8 跨仓库影响
+
+Hymio 根据 detail_key 展示完整结果入口；不能假定长结果仍为 JSON 对象。
+Nostalgia 读取终态得到截断视图，全文需通过同 scope 的 DetailStore 读取。
+工具终态字段新增 detail_key / original_chars；历史摘要不改变工具真实终态。

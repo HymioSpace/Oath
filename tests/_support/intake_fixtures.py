@@ -141,7 +141,9 @@ class Harness:
             ContextManager(self.journal, self.config),
             self.config,
         )
-        self.compaction = CompactionCoordinator(self.store, self.compactor, self.config)
+        self.compaction = CompactionCoordinator(
+            self.store, self.compactor, self.config, sink=self.sink
+        )
         self.brain = AgentBrain(self.ctx, self.provider, self.compaction)
         self.consumers = (
             UserConsumer(self.ctx, self.brain, self.buffers),

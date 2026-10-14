@@ -43,10 +43,10 @@ Brain 共用 RuntimeStore、ToolSystem、EventQueue、AgentEventSink 与 AgentCo
 1. 如果已有 active step，恢复它；失败或暂停态不越过。
 2. 选取三个 buffer 全部 `buffered` 输入，按持久化 receipt 序列排列。
 3. 关闭未呈现 batch 的全部 tool response 槽位，保存真实结果或 reminder。
-4. 保存完整 provider-neutral 请求、step/run 身份、输入 IDs 和状态。
+4. 保存 provider-neutral 请求草稿、step/run 身份、输入 IDs 和状态。
 5. 输入变为 claimed，batch 的 presented_by_step 固定。
 
-context 组装为纯数据操作，当前与认领同事务完成。锁内不执行网络、压缩模型或工具。
+context 草稿与认领同事务完成；锁外压缩后，step.request 保存最终请求。锁内不执行网络或工具。
 认领提交后通知各 consumer 重查，避免 presented 变化后遗漏后到结果。
 
 ## 3 Context 与请求
@@ -62,7 +62,7 @@ batch、invocation、event 与 outcome；等待批准是视图 reminder，不是
 重试与恢复读取同一份请求；新输入留在 buffer。凭据和 transport 配置由部署提供，不写请求快照。
 
 `conversation.messages` 存全文；发给模型的视图由 CompactionCoordinator 按已生效的压缩产物重组。
-认领事务只做这个重组，阈值判断和压缩调用都发生在事务之前。见 [Compaction](feature-compaction.md)。
+输入认领后判断包含本轮输入的阈值，压缩调用在事务外；最终请求保存后才执行模型。见 [Compaction](feature-compaction.md)。
 
 ## 4 模型与后处理
 

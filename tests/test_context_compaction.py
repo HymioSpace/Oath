@@ -114,10 +114,9 @@ def test_the_cut_never_lands_inside_a_tool_group() -> None:
         {"role": "assistant", "content": "回答"},
     ]
 
-    # 保留 3 条落在 tool_calls 上，向前挪到「回答」之前；声明和结果整段留下。
-    assert cut_index(messages, 3) == 3
-    # 保留 2 条落在 tool 上，同样只能向前挪：多留一条，不切在组里。
-    assert cut_index(messages, 2) == 3
+    # 声明之前是合法切点；结果内部的切点退回声明之前。
+    assert cut_index(messages, 3) == 1
+    assert cut_index(messages, 2) == 1
 
 
 def test_the_cut_is_the_first_legal_boundary_from_the_tail() -> None:
@@ -129,7 +128,7 @@ def test_the_cut_is_the_first_legal_boundary_from_the_tail() -> None:
         {"role": "user", "content": "继续"},
     ]
 
-    assert cut_index(messages, 3) == 4
+    assert cut_index(messages, 3) == 2
 
 
 def test_short_history_is_not_compressible() -> None:

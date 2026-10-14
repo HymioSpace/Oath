@@ -99,6 +99,7 @@ def test_fixed_request_not_rebuilt_from_later_tool_or_user_state(tmp_path: Path)
     h.consumers[0].consume(SCOPE)
     step = h.brain._claim(SCOPE, {"user": tuple(h.state()["inputs"])})
     assert step is not None
+    step = h.brain._prepare_request(SCOPE, step)
     frozen = copy.deepcopy(step["request"])
     h.send("后来输入", "u2")
     h.close()

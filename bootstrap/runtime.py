@@ -136,6 +136,7 @@ class Runtime:
                 max_output_tokens=config.agent.max_output_tokens,
             ),
             config.agent,
+            sink=outbound,
         )
         self.brain: Brain = AgentBrain(self.ctx, model, self.compaction)
         self.buffers = JournalEventBuffer(
@@ -194,6 +195,12 @@ class Runtime:
             "error": step.get("error") or state["meta"].get("intake_error"),
             "calls": list(state["calls"].values()),
             "messages": state["conversation"].get("messages", []),
+            "compaction": {
+                key: {
+                    field: value.get(field) for field in ("compression_id", "covers", "created_dt")
+                }
+                for key, value in state["compactions"].items()
+            },
             "input_errors": [
                 {"input_id": key, "error": entry["error"]}
                 for key, entry in state["inputs"].items()

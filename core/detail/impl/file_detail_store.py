@@ -23,6 +23,14 @@ def is_valid_detail_key(key: str) -> bool:
     return isinstance(key, str) and KEY_PATTERN.match(key) is not None
 
 
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class FileDetailStore(DetailStore):
     """一个 key 一个文件，写临时文件后 rename 落位。"""
 
@@ -33,7 +41,14 @@ class FileDetailStore(DetailStore):
         if not is_valid_detail_key(key):
             raise ValueError(f"detail_key 不合法: {key!r}")
         path = self._root / scope.user_id / scope.session_id
-        path.mkdir(parents=True, exist_ok=True)
+        missing = []
+        parent = path
+        while not parent.exists():
+            missing.append(parent)
+            parent = parent.parent
+        for directory in reversed(missing):
+            directory.mkdir(exist_ok=True)
+            _sync_directory(directory.parent)
         handle, temporary = tempfile.mkstemp(dir=path, suffix=".tmp")
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
@@ -41,8 +56,9 @@ class FileDetailStore(DetailStore):
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path / f"{key}.txt")
+            _sync_directory(path)
         except BaseException:
-            os.unlink(temporary)
+            Path(temporary).unlink(missing_ok=True)
             raise
 
     def get(self, scope: Scope, key: str) -> str | None:

@@ -1,6 +1,6 @@
-"""压缩的时机与生效：一个 scope 一次只备一份产物，认领之前决定本次发什么。
+"""压缩的时机与生效：一个 scope 一次只备一份产物，固定请求之前决定本次发什么。
 
-异步那条只在后台算，不进任何请求；同步那条会调用模型，因此只能发生在认领事务**之前**。
+异步那条只在后台算，不进任何请求；同步那条会调用模型，因此只能发生在请求保存事务之外。
 事务里只做纯数据重组 —— 锁内不跑模型。
 """
 
@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import logging
 import threading
+import uuid
 
 from core.compaction.boundary import cut_index
 from core.compaction.tokens import estimate
 from core.compaction.view import APPLIED, PENDING, compacted, usable_artifact
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype.config import AgentConfig
+from core.protocol.datatype.message import MessageEvent
 from core.protocol.datatype.scope import Scope
 from core.protocol.interface.compaction import Compactor
+from core.protocol.interface.event import AgentEventSink
 from core.utils.encoding import utc_now_iso
 
 _log = logging.getLogger(__name__)
@@ -24,8 +27,16 @@ _log = logging.getLogger(__name__)
 class CompactionCoordinator:
     """按 scope 判断阈值、跑压缩、管产物的生效。"""
 
-    def __init__(self, store: RuntimeStore, compactor: Compactor, config: AgentConfig) -> None:
+    def __init__(
+        self,
+        store: RuntimeStore,
+        compactor: Compactor,
+        config: AgentConfig,
+        *,
+        sink: AgentEventSink | None = None,
+    ) -> None:
         self._store, self._compactor, self._config = store, compactor, config
+        self._sink = sink
         self._lock = threading.Lock()
         self._inflight: set[Scope] = set()
         self._stop = threading.Event()
@@ -34,8 +45,8 @@ class CompactionCoordinator:
         """当前生效的视图。纯函数，可以在事务里调。"""
         return compacted(messages, state)
 
-    def prepare(self, scope: Scope) -> None:
-        """认领之前调整 context。到同步阈值就生效，到异步阈值就备一份。
+    def prepare(self, scope: Scope, *, overhead: int = 0, system_prompt: str | None = None) -> None:
+        """固定请求之前调整 context。到同步阈值就生效，到异步阈值就备一份。
 
         任何失败都只是「没压」：压缩是优化，不该让一个 step 因为它失败。
         """
@@ -43,12 +54,14 @@ class CompactionCoordinator:
             return
         try:
             messages, state = self._history(scope)
-            used = self._usage(messages, state)
+            used = self._usage(messages, state, system_prompt) + overhead
             if used >= self._sync_limit():
-                if not self._apply_pending(scope):
+                self._apply_pending(scope)
+                messages, state = self._history(scope)
+                if self._usage(messages, state, system_prompt) + overhead >= self._sync_limit():
                     self._compress(scope, applied=True)
                 messages, state = self._history(scope)
-                used = self._usage(messages, state)
+                used = self._usage(messages, state, system_prompt) + overhead
             if used >= self._async_limit() and self._reserve(scope, messages, state):
                 threading.Thread(
                     target=self._background, args=(scope,), name="oath-compact", daemon=True
@@ -66,10 +79,11 @@ class CompactionCoordinator:
         state = self._store.read(scope)
         return list(state["conversation"].get("messages", [])), state
 
-    def _usage(self, messages: list[State], state: State) -> int:
+    def _usage(self, messages: list[State], state: State, system_prompt: str | None = None) -> int:
         view = compacted(messages, state)
-        if self._config.system_prompt:
-            view = [{"role": "system", "content": self._config.system_prompt}, *view]
+        prompt = self._config.system_prompt if system_prompt is None else system_prompt
+        if prompt:
+            view = [{"role": "system", "content": prompt}, *view]
         return estimate(view)
 
     def _async_limit(self) -> float:
@@ -86,6 +100,9 @@ class CompactionCoordinator:
         current = usable_artifact(state, APPLIED, messages)
         pending = usable_artifact(state, PENDING, messages)
         if pending is not None and (current is None or pending[1] > current[1]):
+            return False
+        cut = cut_index(messages, self._config.compress_keep_recent)
+        if cut is None or (current is not None and cut <= current[1]):
             return False
         with self._lock:
             if scope in self._inflight:
@@ -115,40 +132,93 @@ class CompactionCoordinator:
             state["compactions"][APPLIED] = dict(pending[0])
             return True
 
-        return self._store.transact(scope, "context.compression_applied", apply)
+        applied = self._store.transact(scope, "context.compression_applied", apply)
+        if applied:
+            saved = self._store.read(scope)["compactions"][APPLIED]
+            self._emit(
+                scope, saved.get("compression_id", ""), "applied", "pending", saved["covers"]
+            )
+        return applied
 
     def _compress(self, scope: Scope, *, applied: bool) -> None:
-        messages, _ = self._history(scope)
+        messages, snapshot = self._history(scope)
         cut = cut_index(messages, self._config.compress_keep_recent)
         if cut is None:
             return
-        segment = messages[:cut]
+        current = usable_artifact(snapshot, APPLIED, messages)
+        covered = current[1] if current else 0
+        if cut <= covered:
+            return
+        segment = ([*current[0]["messages"]] if current else []) + messages[covered:cut]
         budget = self._config.compress_summary_tokens
         # 压出来的比被压掉的还长，这一步没有任何意义。
         if estimate(segment) < budget:
             return
+        identity = uuid.uuid4().hex
+        mode = "sync" if applied else "async"
+        self._emit(scope, identity, "started", mode, cut)
         try:
             replacement = self._compactor.compress(segment, budget_tokens=budget)
         except Exception:
             _log.exception("压缩算法失败，保留原历史")
+            self._emit(scope, identity, "failed", mode, cut, "algorithm_error")
             return
         if not replacement or estimate(replacement) >= estimate(segment):
+            self._emit(scope, identity, "skipped", mode, cut, "no_smaller_summary")
             return
         if self._stop.is_set():
             return
 
-        def save(state: State) -> None:
+        def save(state: State) -> bool:
             key = APPLIED if applied else PENDING
             current = usable_artifact(state, APPLIED, state["conversation"].get("messages", []))
-            if applied and current is not None and current[1] > cut:
-                return  # 不退回更少的历史
+            if current is not None and current[1] >= cut:
+                return False  # 不退回更少的历史
             state["compactions"][key] = {
                 "covers": cut,
                 "messages": replacement,
                 "created_dt": utc_now_iso(),
+                "compression_id": identity,
             }
+            return True
 
-        self._store.transact(scope, "context.compressed", save)
+        try:
+            saved = self._store.transact(scope, "context.compressed", save)
+        except Exception:
+            self._emit(scope, identity, "failed", mode, cut, "storage_error")
+            raise
+        status = ("applied" if applied else "ready") if saved else "skipped"
+        self._emit(scope, identity, status, mode, cut)
+
+    def _emit(
+        self,
+        scope: Scope,
+        identity: str,
+        status: str,
+        mode: str,
+        covers: int,
+        reason: str | None = None,
+    ) -> None:
+        if self._sink is None or self._stop.is_set():
+            return
+        try:
+            self._sink.emit(
+                MessageEvent(
+                    type="context.compaction",
+                    scope=scope,
+                    payload={
+                        "compression_id": identity,
+                        "status": status,
+                        "mode": mode,
+                        "covers": covers,
+                        "reason": reason,
+                    },
+                    idempotency_key=f"compaction:{identity}:{status}",
+                    occur_dt=utc_now_iso(),
+                )
+            )
+        except Exception:
+            _log.exception("压缩事件推送失败，不改变已保存产物")
 
 
 __all__ = ["CompactionCoordinator"]

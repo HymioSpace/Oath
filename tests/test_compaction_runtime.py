@@ -161,7 +161,6 @@ def test_the_compressed_view_is_what_the_model_sees(tmp_path: Path) -> None:
         assert [m.content for m in request.messages] == [
             "<context_summary>摘要</context_summary>",
             "字" * 60,
-            "字" * 60,
             "继续",
         ]
         # 历史本身一条不少，压缩只改发给模型的那一份。

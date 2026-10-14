@@ -188,10 +188,10 @@ presented 提交、step 释放 owner 与启动恢复时通知各 consumer 重新
 ### 5.2 drain 是持久化认领
 
 在一个短的 scope 事务中，冻结三个 buffer 当前全部未认领事件。
-`runtime.commit(reason=step.input)` 保存 step_id、输入 ID 集合、trigger、完整请求和固定槽位。
+`runtime.commit(reason=step.input)` 保存 step_id、输入 ID 集合、trigger、请求草稿和固定槽位。
 输入 IDs 精确表达所有权，不依赖额外 cutoff。提交成功后新事件归下一步。
 
-当前 context 为纯数据组装，与 claim 同事务保存完整请求；未来重型 context 操作需读取固定版本。
+claim 保存固定请求草稿；锁外压缩后通过 step.request 保存最终请求。重试只读取已固定请求。
 `step.input` 同时固定 presented_by_step。prepared step 崩溃后继续同一份输入，不重新 drain。
 完成时提交 `step.completed`，仅将本步 input IDs 标为 done，可重复执行；当前不物理删除历史。
 禁止“模型结束时 clear 当前整个 buffer”：那会删除模型运行期间新来的消息。

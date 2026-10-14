@@ -98,3 +98,69 @@ error 带 id、code、message。帧结构 / 协议版本不合法时断开；已
 
 close reason：unauthorized、session_replaced、slow_consumer、protocol_error。
 慢连接发送队列满会断开，重连应退避并查询状态。idle_timeout 尚未启用。
+
+## 6 压缩事件与端到端验证
+
+`context.compaction` 走同一条 WebSocket，下行 payload 为：
+
+```json
+{"compression_id":"opaque-id","status":"started","mode":"async","covers":8,"reason":null}
+```
+
+status 为 started / ready / applied / failed / skipped。ready 表示异步摘要已保存但未生效；
+applied 表示已替换模型视图。mode 为 async / sync / pending（应用已有产物）。
+compression_id 关联同一次摘要的生命周期；covers 是原始历史覆盖条数。
+事件不携带原文或摘要；失败 reason 为固定分类，不含模型或存储异常正文。
+推送失败不改变保存结果。重连通过 session.status.compaction 查询 pending / applied 的身份和覆盖范围。
+
+### 配置
+
+在本地 oath.toml **已有的 `[agent]` 段**添加或修改以下字段，不要重复创建该段：
+
+```toml
+context_window = 8000
+max_output_tokens = 512
+compress_async_at_ratio = 0.2
+compress_sync_at_ratio = 0.6
+compress_keep_recent = 4
+compress_summary_tokens = 128
+tool_result_detail_chars = 200
+```
+
+这是低阈值测试配置；修改后重启服务。system prompt、工具定义和输出预算也占用计量。
+保留 `[agent.provider]` 的有效模型配置，API key 从环境变量读取。
+建议修改顶层 data_root 使用独立测试目录，避免旧历史导致启动后的首次请求直接进入同步压缩。
+
+### 操作与观察
+
+在仓库目录启动服务，另开终端连接：
+
+```bash
+uv run python scripts/run_runtime.py --config oath.toml
+PYTHONPATH=. uv run python scripts/terminal_client.py --url ws://127.0.0.1:8765 --token demo-token
+```
+
+token 使用本地配置里对应的凭据。终端客户端会打印 context.compaction 事件。
+
+1. 连续发送几段各约 500 汉字的合成资料，带不同编号，要求助手只回复“已记录”。
+   逐条等回复；消息数量需超过保留的 4 条，且可压前缀大于摘要预算。
+2. 超过 20% 后看到 async started → ready；此时只有 pending，没有 applied。
+3. 等 ready 后继续发送资料，超过 60% 时看到 pending applied；产物不足以降到阈值下时，
+   还会看到 sync started → applied。若直接跨过同步阈值，直接同步压缩也是预期行为。
+4. 询问早先资料中的编号或约束，验证摘要保留关键信息。failed / skipped 表示此次没有有效摘要，
+   不能按“压缩成功”验收；LLM 摘要质量需要实际模型验证。
+5. 要求调用 echo 返回超过 200 字符的合成文本，查看 tool.terminal 的截断提示与 detail_key；
+   再要求调用 detail_read 读取该 key，确认取回完整正文且未再次截断。
+6. 重启服务并用同一凭据连接；通过 session.status 查询产物，再发送一句短消息，验证恢复后继续使用摘要。
+
+session.status 是 WebSocket command；当前终端客户端仅发送聊天消息。可使用支持原始帧的客户端发送：
+
+```json
+{"v":1,"type":"session.status","id":"status-unique-id","session_id":"default","payload":{}}
+```
+
+自动化链路检查使用替身模型和客户端通道，不调用真实模型：
+
+```bash
+uv run pytest -q tests/test_compaction_events.py tests/test_compaction_regressions.py tests/test_compaction_runtime.py
+```
