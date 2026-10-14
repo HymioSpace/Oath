@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import heapq
 import itertools
+import json
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -37,7 +38,7 @@ from core.protocol.datatype.scope import Scope
 from core.protocol.error import PermissionDeniedError, PermissionError
 from core.protocol.interface import AgentEventSink, PermissionPolicy
 from core.tool.permission.store import PermissionStore
-from core.utils.encoding import JsonObject, utc_now_iso
+from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 
 #: 审批请求的默认有效期。给够人看一眼的时间，又不至于让一个没人管的请求
 #: 在系统里挂到天荒地老。
@@ -123,7 +124,7 @@ class PermissionManager:
         # 这里也让存储顺带当了决策缓存：批过了就放行，不用再问一次策略。
         known = self._store.get(scope, invocation_id)
         if known is not None:
-            return self._replay_verdict(known, tool, tool_call_id)
+            return self._replay_verdict(known, tool, tool_call_id, arguments)
 
         try:
             verdict = self._policy.check(scope, tool, arguments)
@@ -144,17 +145,32 @@ class PermissionManager:
 
     # ---------------------------------------------------------------- 裁定
 
-    def _replay_verdict(self, known: PermissionRecord, tool: str, tool_call_id: str) -> str:
+    def _replay_verdict(
+        self,
+        known: PermissionRecord,
+        tool: str,
+        tool_call_id: str,
+        arguments: JsonObject,
+    ) -> str:
         """同一 `invocation_id` 第二次来的时候，回放上次的结果。
 
         `APPROVED` 映射成 `ALLOW`：批过了就该跑，而且不该再去问策略一次 ——
         审批窗口里策略可能已经变了，而人批的是**这一次具体调用**。
         `EXPIRED` 映射成 `DENY`：过期就是没人批，不批就不能跑。
+
+        **入参一起比。** 人批的是某一个具体调用，连同它的参数；换一组参数再拿同一个
+        `invocation_id` 回来，放行的就是一次没人看过的事 —— 转账三十五块批过了，
+        拿着同一个 id 转三万五，没人问过。
         """
         if known.tool != tool or known.tool_call_id != tool_call_id:
             raise PermissionError(
                 f"invocation_id {known.invocation_id!r} 已经用在 "
                 f"{known.tool}/{known.tool_call_id} 上，不能拿来调 {tool}/{tool_call_id}"
+            )
+        if canonical_json(known.arguments) != canonical_json(arguments):
+            raise PermissionError(
+                f"invocation_id {known.invocation_id!r} 已经按另一组入参问过权限"
+                f"（{canonical_json(known.arguments)}），不能拿来调 {canonical_json(arguments)}"
             )
         if known.status == PermissionStatus.APPROVED:
             return PermissionVerdict.ALLOW
@@ -216,13 +232,17 @@ class PermissionManager:
         invocation_id: str,
         arguments: JsonObject,
     ) -> PermissionRecord:
-        """把一个 `ask` 的调用转成待审批请求。"""
+        """把一个 `ask` 的调用转成待审批请求。
+
+        `arguments` 存一份独立的拷贝：判权限和工具真正跑起来之间隔着排队与执行，
+        调用方手上那个 dict 还活着，它要是被改了，这条记录描述的就不是被问的那一次了。
+        """
         record = PermissionRecord(
             scope=scope,
             tool_call_id=tool_call_id,
             invocation_id=invocation_id,
             tool=tool,
-            arguments=arguments,
+            arguments=json.loads(canonical_json(arguments)),
             status=PermissionStatus.PENDING,
             requested_dt=utc_now_iso(),
             expires_dt=_plus_seconds(self._ttl_seconds),

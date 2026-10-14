@@ -164,6 +164,15 @@ def parse_event_record(text: str, scope: Scope) -> EventRecord:
     if not isinstance(payload, dict):
         raise CorruptRecordError(f"事件记录 payload 必须是对象，得到 {type(payload).__name__}")
 
+    # payload 的结构也在这里判。写进去时判过、读出来时不判，日志就存在一条
+    # 「当时不认、现在照用」的路径 —— 那条记录的字段可能是空的，也可能是错的，
+    # 而错误要等到几层之外的投影里才炸出来。
+    try:
+        validate_event_type(type_)
+        validate_payload(type_, version, payload)
+    except ValidationError as exc:
+        raise CorruptRecordError(f"事件记录 {type_}@v{version} 不合法: {exc}") from exc
+
     commit_dt = obj.get("commit_dt")
     if not isinstance(commit_dt, str):
         raise CorruptRecordError(f"事件记录 commit_dt 必须是字符串，得到 {commit_dt!r}")
@@ -211,6 +220,10 @@ def parse_state_record(text: str, scope: Scope) -> StateRecord:
     payload = obj.get("payload")
     if not isinstance(payload, dict):
         raise CorruptRecordError(f"状态记录 payload 必须是对象，得到 {type(payload).__name__}")
+    try:
+        validate_state_payload(version, payload)
+    except ValidationError as exc:
+        raise CorruptRecordError(f"状态记录 v{version} 不合法: {exc}") from exc
     commit_dt = obj.get("commit_dt")
     if not isinstance(commit_dt, str):
         raise CorruptRecordError(f"状态记录 commit_dt 必须是字符串，得到 {commit_dt!r}")

@@ -129,6 +129,22 @@ class WireProtocolError(ProtocolError):
         self.code = code
 
 
+#: 重试也不会变好的失败。区别在于**换一次、原地再来一次**结果是不是同一个：
+#: 这些说的是「这份输入本身不对」，不是「现在不行」。其余的（磁盘、网络、第三方
+#: 服务）过一会儿再试可能就成了。
+_PERMANENT_ERRORS: tuple[type[ProtocolError], ...] = (
+    ValidationError,
+    IdempotencyKeyConflict,
+    CorruptRecordError,
+    WireProtocolError,
+)
+
+
+def is_permanent(exc: BaseException) -> bool:
+    """这个失败重试有没有意义。给「拿到一批输入去处理」的调用方分类用。"""
+    return isinstance(exc, _PERMANENT_ERRORS)
+
+
 __all__ = [
     "ArgumentValidationError",
     "CorruptRecordError",
@@ -151,5 +167,6 @@ __all__ = [
     "ToolRequestError",
     "UnknownQueueError",
     "ValidationError",
+    "is_permanent",
     "WireProtocolError",
 ]

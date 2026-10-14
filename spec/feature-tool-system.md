@@ -154,7 +154,8 @@ result，而 context 是 append-only 的。所以「正在等待批准」当场�
 执行表，待审批两者都不占；审批状态查 `PermissionManager`。
 
 审批记录（`PermissionRecord`）含 `arguments` / `status` / `expires_dt` / `decided_by` /
-`reason`，存的是**判权限时看到的那份参数** —— 审批的人要看的就是它们。
+`reason`，存的是**判权限时看到的那份参数** —— 审批的人要看的就是它们。判权限与工具真正
+跑起来之间隔着排队与执行，调用方手上那个 dict 还活着，所以记一份拷贝而不是引用。
 
 `PermissionStore`（`record` / `resolve` / `get` / `pending`）只保证**当前状态**、
 **裁定只生效一次**、**跨 scope 查不到**。
@@ -196,7 +197,9 @@ Python 没有安全的线程终止手段，强杀会让 `finally` 不跑、锁�
    醒来必须已经看到这条请求不再需要管，否则会拿过期裁定盖掉人的同意。
 
 **重发**同一个 `invocation_id` 不重新问策略，回放记录：`approved → allow`、`pending →
-ask`、`denied` / `expired → deny`。换工具或换 `tool_call_id` 抛 `PermissionError`。存储
+ask`、`denied` / `expired → deny`。换工具、换 `tool_call_id`、**换参数**都抛
+`PermissionError`：人批的是某一次具体调用连同它的参数，拿同一个 id 换一组参数回来，
+放行的就是一次没人看过的事。参数按 canonical JSON 比 —— 键序不同是同一组参数。存储
 顺带当了决策缓存。
 
 **有效期**由 watchdog 判，不靠查询时比时间 —— 否则一个没人再碰的请求永远挂着，而挂着就

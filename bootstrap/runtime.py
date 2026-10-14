@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Final
@@ -43,6 +44,8 @@ from core.utils.encoding import JsonObject
 
 #: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
 _WORKER_JOIN_TIMEOUT: Final = 2.0
+
+_log = logging.getLogger("oath.runtime")
 
 
 class TokenAuthenticator(SessionAuthenticator):
@@ -110,15 +113,12 @@ class Runtime:
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         for tool in tools or []:
             registry.register(tool)
-        tool_system: ToolSystem = ThreadedToolSystem(
-            registry,
+        self.permissions = PermissionManager(
+            FilePermissionStore(data_root / "permissions"),
+            AllowAllPolicy(),
             sink,
-            PermissionManager(
-                FilePermissionStore(data_root / "permissions"),
-                AllowAllPolicy(),
-                sink,
-            ),
         )
+        tool_system: ToolSystem = ThreadedToolSystem(registry, sink, self.permissions)
 
         # 共享基础设施收口成一份。各组件按自己的需要从这里取，不用各自接一遍。
         self.ctx = AgentContext(
@@ -130,11 +130,11 @@ class Runtime:
             config=config.agent,
         )
         self.brain: Brain = AgentBrain(self.ctx, OpenAICompatibleProvider(config.agent.provider))
-        self.consumer = SessionConsumer(
-            self.ctx, self.brain, FileEventBuffer(data_root / "buffers")
-        )
+        self.buffers = FileEventBuffer(data_root / "buffers")
+        self.consumer = SessionConsumer(self.ctx, self.brain, self.buffers)
         self._workers: dict[Scope, SessionWorker] = {}
         self._workers_lock = threading.Lock()
+        self._resume_buffered()
 
     # -- 上行 --------------------------------------------------------------
 
@@ -156,10 +156,13 @@ class Runtime:
     # -- session 生命周期 ---------------------------------------------------
 
     def ensure_session(self, scope: Scope) -> None:
-        """给这个 scope 起一条消费线程。已经有了就什么都不做。"""
+        """给这个 scope 起一条消费线程。已经有活着的就不动。"""
         with self._workers_lock:
-            if scope in self._workers:
+            existing = self._workers.get(scope)
+            if existing is not None and existing.thread.is_alive():
                 return
+            # 上一次那条已经死了 —— 留着它等于这条 session 再也没有人消费。死因
+            # 在它的日志里，这里只管换一条新的。
             stop = threading.Event()
             thread = threading.Thread(
                 target=self.consumer.run,
@@ -169,6 +172,15 @@ class Runtime:
             )
             self._workers[scope] = SessionWorker(scope=scope, thread=thread, stop=stop)
             thread.start()
+
+    def _resume_buffered(self) -> None:
+        """给上次没干完的活起线程。
+
+        buffer 是崩溃时唯一还留着输入的地方 —— 队列是内存里的，进程一没就没了。
+        没人来捞的话那批输入就一直在文件里，直到有人重新连上这个 session。
+        """
+        for scope in self.buffers.scopes():
+            self.ensure_session(scope)
 
     def close(self) -> None:
         with self._workers_lock:
@@ -180,8 +192,15 @@ class Runtime:
         self.ctx.queue.close(wait=True)
         for worker in workers:
             worker.thread.join(timeout=_WORKER_JOIN_TIMEOUT)
+            if worker.thread.is_alive():
+                # 还卡在模型调用上。它醒过来之后 journal 已经关了，那一步会失败 ——
+                # 说出来比闷在日志里强。
+                _log.warning(
+                    "session %s 的消费线程没能在 %ss 内退出", worker.scope, _WORKER_JOIN_TIMEOUT
+                )
         self.brain.close(wait=True)
         self.ctx.tools.shutdown(wait=True)
+        self.permissions.shutdown(wait=True)
         self.hub.shutdown()
         self.journal.close()
 

@@ -9,8 +9,9 @@
 
 **只支持单进程单写者**，这里不加文件锁 —— 与 journal 同样的取舍。
 
-写失败时把文件截回原长度再抛错。半行留在文件里会被下一次 append 接在后面，把两条
-输入粘成一条解析不了的垃圾；而消费方下一次 `snapshot` 会把它整条丢掉。
+写失败时把文件截回原长度再抛错。崩溃留下的半行在**下一次写之前**截掉：`O_APPEND`
+无条件写在文件尾，半行还在的话新输入会被接在它后面，两条记录粘成一条解析不了的
+垃圾。只在读的时候丢半行挡不住这个 —— 那一行照样进了文件。
 """
 
 from __future__ import annotations
@@ -30,6 +31,36 @@ from core.utils.encoding import canonical_json
 
 _LINE_TERMINATOR = "\n"
 _FILE_MODE = 0o644
+_READ_BLOCK = 1 << 16
+
+
+def _last_newline(fd: int, size: int) -> int:
+    """`[0, size)` 里最后一个换行符的下标，没有则 -1。
+
+    从文件尾往前按块找：判断有没有半行不需要把整个文件读进内存。
+    """
+    pos = size
+    while pos > 0:
+        start = max(0, pos - _READ_BLOCK)
+        block = os.pread(fd, pos - start, start)
+        index = block.rfind(b"\n")
+        if index != -1:
+            return start + index
+        pos = start
+    return -1
+
+
+def _truncate_torn_tail(fd: int) -> None:
+    """把崩溃留下的半行截掉，让下一次 append 接在一条完整行后面。
+
+    文件本来就以换行结尾时什么都不做 —— 常态不付这个 `pread` 之外的钱。
+    """
+    size = os.fstat(fd).st_size
+    if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+        return
+    keep = _last_newline(fd, size) + 1
+    os.ftruncate(fd, keep)
+    os.fsync(fd)
 
 
 class FileEventBuffer(EventBuffer):
@@ -50,8 +81,9 @@ class FileEventBuffer(EventBuffer):
         blob = "".join(canonical_json(item.to_dict()) + _LINE_TERMINATOR for item in items)
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, _FILE_MODE)
+            fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, _FILE_MODE)
             try:
+                _truncate_torn_tail(fd)
                 good_size = os.fstat(fd).st_size
                 data = blob.encode("utf-8")
                 written = 0
@@ -84,22 +116,27 @@ class FileEventBuffer(EventBuffer):
         path = self._path(scope, queue)
         with self._lock:
             try:
-                text = path.read_text(encoding="utf-8")
+                blob = path.read_bytes()
             except FileNotFoundError:
                 return ()
-        return self._parse(text, path)
+        return self._parse(blob, path)
 
-    def _parse(self, text: str, path: Path) -> tuple[Inbound, ...]:
-        lines = text.splitlines()
-        if lines and not text.endswith(_LINE_TERMINATOR):
-            # 崩溃时正在写的那一行。只丢最后一行 —— 中间的损坏是别的问题，
-            # 静默跳过等于丢数据。
-            lines.pop()
+    def _parse(self, blob: bytes, path: Path) -> tuple[Inbound, ...]:
+        """按字节切行，再逐行解码。
+
+        先切后解码：崩溃可能把一个多字节字符劈成两半，`read_text` 会在读到半行的
+        那一刻就抛 `UnicodeDecodeError`，连前面那些完整行都读不出来。
+        """
+        lines = blob.split(b"\n")
+        if lines[-1] == b"":
+            lines.pop()  # 结尾那个换行符自己切出来的空串
+        else:
+            lines.pop()  # 崩溃时正在写的那一行。只丢最后一行 —— 中间的损坏是别的问题
         items: list[Inbound] = []
-        for number, line in enumerate(lines, start=1):
+        for number, raw in enumerate(lines, start=1):
             try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
+                obj = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise CorruptRecordError(f"{path}:{number} 不是合法 JSON: {exc}") from exc
             items.append(Inbound.from_dict(obj))
         return tuple(items)

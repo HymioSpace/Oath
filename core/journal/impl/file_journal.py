@@ -104,6 +104,7 @@ class _ScopeHandle:
         self._index: dict[str, tuple[str, Cursor]] = {}
         self._event_count = 0
         self._events_size = 0
+        self._state_size = 0
         self.last_state: StateRecord | None = None
 
     # -- 打开 / 关闭 ------------------------------------------------------
@@ -175,9 +176,11 @@ class _ScopeHandle:
                 # 整个文件都没有完整行 —— 第一次写就崩了。
                 if self._truncate_torn_tail:
                     self._truncate(self.state_path, 0)
+                self._state_size = 0
                 return
             if last_nl != size - 1 and self._truncate_torn_tail:
                 self._truncate(self.state_path, last_nl + 1)
+            self._state_size = last_nl + 1
             prev_nl = _find_last_newline(fh, last_nl)
             start = prev_nl + 1
             fh.seek(start)
@@ -196,12 +199,15 @@ class _ScopeHandle:
 
     # -- 写入 -------------------------------------------------------------
 
-    def _append_line(self, path: Path, fd: int | None, obj: object, good_size: int) -> None:
-        """追加一行并保证落盘。
+    def _append_line(self, path: Path, fd: int | None, obj: object, good_size: int) -> int:
+        """追加一行并保证落盘，返回追加了多少**字节**。
 
-        返回前必须 fsync —— 这是唯一的耐久性承诺。写失败时把文件截回原长度
+        返回前必须 fsync —— 这是唯一的耐久性承诺。写失败时把文件截回 `good_size`
         再抛错：半行留在文件里会被下一次 append 接在后面，把两条记录粘成
         一条无法解析的垃圾。
+
+        返回字节数而不是让调用方自己算：写的是 UTF-8，算的是字符，两者不等 ——
+        差出来的部分会在下一次失败时从一条已经 fsync 过的记录里截掉。
         """
         if fd is None:
             raise RuntimeError(f"scope {self.scope} 未打开")
@@ -215,19 +221,22 @@ class _ScopeHandle:
         except OSError:
             self._truncate(path, good_size)
             raise
+        return len(data)
 
     def append_event(self, obj: object) -> Cursor:
         cursor = Cursor(CursorKind.LINE, self._event_count + 1)
-        size = self._events_size
-        self._append_line(self.events_path, self._events_fd, obj, size)
+        self._events_size += self._append_line(
+            self.events_path, self._events_fd, obj, self._events_size
+        )
         self._event_count += 1
-        self._events_size = size + len(canonical_json(obj)) + len(RecordFormat.LINE_TERMINATOR)
         return cursor
 
     def append_state(self, record: StateRecord) -> None:
-        # good_size 传 0：状态日志没有追加途中的崩溃恢复需求——真崩了就是
-        # 半行，下次 open 时按截断尾行处理。
-        self._append_line(self.state_path, self._state_fd, record, 0)
+        # 状态日志同样要记原长度：截回 0 会把上一次提交的那份快照抹掉，而那正是
+        # 重启后唯一读得到的状态。
+        self._state_size += self._append_line(
+            self.state_path, self._state_fd, record, self._state_size
+        )
         self.last_state = record
 
     def note_idempotent(self, key: str, fingerprint: str, cursor: Cursor) -> None:

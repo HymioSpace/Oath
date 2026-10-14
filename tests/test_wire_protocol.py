@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from core.protocol.datatype import (
+    MAX_COMMAND_ID_LENGTH,
     AgentEvent,
     CloseReason,
     Command,
@@ -172,6 +173,16 @@ def test_ping_takes_no_payload() -> None:
     with pytest.raises(WireProtocolError) as exc:
         Command.parse(_frame(type=CommandType.PING, session_id="s1", payload={"content": ""}))
     assert exc.value.code == "bad_payload"
+
+
+def test_a_command_id_that_would_overflow_the_idempotency_key_is_rejected() -> None:
+    """command id 会拼进 `cmd:` 这个幂等键。放任超长，落盘那一步才炸 —— 而那时候
+    用户的话已经出了队列。"""
+    assert Command.parse(_frame(id="c" * MAX_COMMAND_ID_LENGTH)).id == "c" * (MAX_COMMAND_ID_LENGTH)
+
+    with pytest.raises(WireProtocolError) as exc:
+        Command.parse(_frame(id="c" * (MAX_COMMAND_ID_LENGTH + 1)))
+    assert exc.value.code == "bad_frame"
 
 
 # --------------------------------------------------------------------------

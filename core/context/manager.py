@@ -12,11 +12,14 @@ from dataclasses import dataclass
 from core.journal.messages import project
 from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.config import AgentConfig
+from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.message import Message
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolDefinition
 from core.protocol.interface.context import ContextCompressor
 from core.protocol.interface.journal import Journal
+
+_BEGINNING = Cursor(CursorKind.LINE, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,12 +52,17 @@ class ContextManager:
     def build(self, scope: Scope, tools: tuple[ToolDefinition, ...]) -> Context:
         """拼出截至此刻的完整对话。
 
-        快照之后的那段（`Recovery.pending`）也要投影进来 —— 那段同样是这一轮对话的
-        一部分。只用 `Recovery.messages` 会让刚发生的事在这一轮里看不见。
+        **一次投影。** `Recovery.messages` 已经是快照水位线之前那一段的投影了，再把
+        `pending` 单独投影一遍拼起来看着省事，实际是把**一次调用和它的结果**劈成两半
+        的做法 —— 快照提交在执行中途时，两半正好落在边界上，前一半得到一个
+        `unresolved` 占位，后一半的结果被投影丢掉。日志里明明写着结果，模型却看不见。
+
+        代价是整份日志读两遍（`recover` 一遍，这里一遍）。省下的那遍要用正确性换，
+        不值。
         """
         recovery = self._journal.recover(scope)
+        messages = project(list(self._journal.read_range(scope, _BEGINNING)))
         state = recovery.state
-        messages: list[Message] = [*recovery.messages, *project(recovery.pending)]
 
         if self._compressor is not None and self._compressor.should_compress(messages, state):
             messages, state = self._compressor.compress(messages, state)

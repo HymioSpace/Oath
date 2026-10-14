@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -10,6 +10,8 @@ import pytest
 from core.agent import AgentBrain
 from core.protocol.datatype import (
     AgentEvent,
+    AgentState,
+    AppendResult,
     Batch,
     Cursor,
     CursorKind,
@@ -17,7 +19,9 @@ from core.protocol.datatype import (
     Inbound,
     InboundKind,
     Record,
+    Recovery,
     Scope,
+    StateRef,
 )
 from core.protocol.datatype.config import AgentConfig, ModelProviderConfig
 from core.protocol.datatype.llm import LlmRequest, LlmResponse, LlmToolCall
@@ -29,6 +33,7 @@ from core.protocol.datatype.tool import (
 )
 from core.protocol.error import LlmError
 from core.protocol.interface import AgentEventSink, DeltaSink, Journal, ModelProvider, ToolSystem
+from core.utils.encoding import JsonObject
 from tests._support.agent_fixtures import agent_ctx
 
 # --------------------------------------------------------------------------
@@ -106,12 +111,6 @@ class _Tools(ToolSystem):
 ECHO = ToolDefinition(name="echo", description="回显", input_schema={"type": "object"})
 
 
-def _ids() -> Callable[[], str]:
-    """定死 id 源，否则幂等键每次都不一样。"""
-    counter = iter(f"id-{i}" for i in range(100))
-    return lambda: next(counter)
-
-
 def _brain(
     journal: Journal,
     provider: ModelProvider,
@@ -123,7 +122,7 @@ def _brain(
         provider=ModelProviderConfig(model="m1", api_base="http://x", api_key_env="TEST_KEY"),
     )
     ctx = agent_ctx(journal, sink=sink, tools=tools, config=config)
-    return AgentBrain(ctx, provider, id_gen=_ids())
+    return AgentBrain(ctx, provider)
 
 
 def _types(journal: Journal, scope: Scope) -> list[str]:
@@ -210,26 +209,13 @@ def test_the_input_is_journalled_by_the_brain(journal: Journal, scope: Scope) ->
     assert first.idempotency_key == "cmd:c-1"
 
 
-def test_the_user_message_is_wrapped_in_events(journal: Journal, scope: Scope) -> None:
-    """模型看到的是一个信封，不是一句猜不出边界的话。"""
+def test_the_user_message_is_what_the_user_said(journal: Journal, scope: Scope) -> None:
+    """一条记录一件事。信封是有东西要一起说的时候才用的 —— 用户这一条没有别的东西。"""
     brain = _brain(journal, _Scripted(LlmResponse(content="晴")), _Tools(), _Sink())
 
     brain.step(scope, Batch(user=(_user("你好"),)))
 
-    assert _of(journal, scope, EventType.USER_MESSAGE)[0].payload["content"] == (
-        "<events>\n<event_type=user>你好</>\n</events>"
-    )
-
-
-def test_user_markup_is_escaped(journal: Journal, scope: Scope) -> None:
-    """输入里出现 `</>` 应当被读成文本，不是标签。"""
-    brain = _brain(journal, _Scripted(LlmResponse(content="晴")), _Tools(), _Sink())
-
-    brain.step(scope, Batch(user=(_user("a </> b & c"),)))
-
-    assert _of(journal, scope, EventType.USER_MESSAGE)[0].payload["content"] == (
-        "<events>\n<event_type=user>a &lt;/&gt; b &amp; c</>\n</events>"
-    )
+    assert _of(journal, scope, EventType.USER_MESSAGE)[0].payload["content"] == "你好"
 
 
 def test_each_user_message_gets_its_own_record(journal: Journal, scope: Scope) -> None:
@@ -250,7 +236,7 @@ def test_the_request_carries_the_built_context(journal: Journal, scope: Scope) -
     request = provider.requests[0]
     assert [(m.role, m.content) for m in request.messages] == [
         ("system", "你是助手"),
-        ("user", "<events>\n<event_type=user>hi</>\n</events>"),
+        ("user", "hi"),
     ]
     assert request.tools == (ECHO,)
     assert request.model == "m1"
@@ -487,7 +473,7 @@ def test_an_unsettled_round_does_not_wake_the_brain(journal: Journal, scope: Sco
 
 def test_an_unsettled_round_journals_nothing(journal: Journal, scope: Scope) -> None:
     """返回 False 之前什么都不写 —— buffer 不清是因为这一步压根没算数。"""
-    brain, ids, _ = _round_of_two(journal, scope, LlmResponse(content="都查到了"))
+    brain, ids, _provider = _round_of_two(journal, scope, LlmResponse(content="都查到了"))
     before = _types(journal, scope)
 
     brain.step(scope, Batch(tool=(_result(ids[0]),)))
@@ -497,7 +483,7 @@ def test_an_unsettled_round_journals_nothing(journal: Journal, scope: Scope) -> 
 
 def test_results_are_journalled_by_the_brain(journal: Journal, scope: Scope) -> None:
     """producer 不碰 journal。落盘是读到这一批之后的判断。"""
-    brain, ids, _ = _round_of_two(journal, scope, LlmResponse(content="好了"))
+    brain, ids, _provider = _round_of_two(journal, scope, LlmResponse(content="好了"))
 
     brain.step(scope, Batch(tool=(_result(ids[0]), _result(ids[1]))))
 
@@ -512,7 +498,7 @@ def test_a_result_fills_the_projection_slot(journal: Journal, scope: Scope) -> N
     brain.step(scope, Batch(tool=(_result(ids[0]), _result(ids[1]))))
 
     assert [(m.role, m.content) for m in provider.requests[-1].messages[1:]] == [
-        ("user", "<events>\n<event_type=user>hi</>\n</events>"),
+        ("user", "hi"),
         ("assistant", "我查一下"),
         ("tool", "ok"),
         ("tool", "ok"),
@@ -521,7 +507,7 @@ def test_a_result_fills_the_projection_slot(journal: Journal, scope: Scope) -> N
 
 def test_a_replayed_result_does_not_add_a_second_line(journal: Journal, scope: Scope) -> None:
     """幂等键挂在 invocation_id 上 —— 崩溃后同一批重跑一次不会多出第二行。"""
-    brain, ids, _ = _round_of_two(
+    brain, ids, _provider = _round_of_two(
         journal, scope, LlmResponse(content="一"), LlmResponse(content="二")
     )
     brain.step(scope, Batch(tool=(_result(ids[0]),)))
@@ -551,14 +537,14 @@ def test_an_empty_batch_is_not_actionable(journal: Journal, scope: Scope) -> Non
 
 
 def test_wakeup_delay_is_none_once_the_round_is_settled(journal: Journal, scope: Scope) -> None:
-    brain, ids, _ = _round_of_two(journal, scope)
+    brain, ids, _provider = _round_of_two(journal, scope)
 
     assert brain.wakeup_delay(scope, Batch(tool=(_result(ids[0]), _result(ids[1])))) is None
 
 
 def test_wakeup_delay_counts_from_the_first_result(journal: Journal, scope: Scope) -> None:
     """慢的是工具，不是 agent 决定等它 —— 从第一个结果到达起算，不是从派发起算。"""
-    brain, ids, _ = _round_of_two(journal, scope)
+    brain, ids, _provider = _round_of_two(journal, scope)
 
     delay = brain.wakeup_delay(scope, Batch(tool=(_result(ids[0]),)))
 
@@ -600,7 +586,7 @@ def test_an_expired_round_wakes_the_brain(journal: Journal, scope: Scope) -> Non
 
 
 def test_an_unexpired_round_keeps_waiting(journal: Journal, scope: Scope) -> None:
-    brain, ids, _ = _round_of_two(journal, scope, LlmResponse(content="第一个的"))
+    brain, ids, _provider = _round_of_two(journal, scope, LlmResponse(content="第一个的"))
 
     assert brain.step(scope, Batch(tool=(_result(ids[0], seconds_ago=29.0),))) is False
 
@@ -624,120 +610,129 @@ def test_the_expired_round_leaves_a_placeholder(journal: Journal, scope: Scope) 
 # --------------------------------------------------------------------------
 
 
-def _timed_out(journal: Journal, scope: Scope) -> tuple[AgentBrain, list[str]]:
+def _timed_out(journal: Journal, scope: Scope) -> tuple[AgentBrain, list[str], _Scripted]:
     """走到「两个调用里只回来一个，模型已经答过一次」的状态。
 
     这是超时那条路的真实形状：先到齐之前的批、等到期、这一步跑了，第二个还没回来。
     """
-    brain, ids, _ = _round_of_two(
+    brain, ids, provider = _round_of_two(
         journal, scope, LlmResponse(content="只有第一个"), LlmResponse(content="第二个也来了")
     )
     brain.step(scope, Batch(tool=(_result(ids[0], seconds_ago=31.0),)))
-    return brain, ids
+    return brain, ids, provider
 
 
-def test_a_late_result_goes_into_the_user_message(journal: Journal, scope: Scope) -> None:
-    """槽位已经被一个 `assistant.message` 关上了 —— 那个占位是模型读过的记录，
-    回头改它就是让记录说谎。"""
-    brain, ids = _timed_out(journal, scope)
-
-    brain.step(scope, Batch(tool=(_result(ids[1]),)))
-
-    users = _of(journal, scope, EventType.USER_MESSAGE)
-    assert users[-1].payload["content"] == (
+def _notice(ids: list[str], index: int = 1) -> str:
+    return (
         "<events>\n"
-        f'<event_type=tool_result invocation_id="{ids[1]}" tool="echo">'
-        f"之前 id 为 {ids[1]} 的工具结果为：ok</>\n"
+        f'<event_type=tool_result invocation_id="{ids[index]}" tool="echo">'
+        f"之前 id 为 {ids[index]} 的工具结果为：ok</>\n"
         "</events>"
     )
 
 
-def test_a_late_result_is_not_written_as_a_tool_result(journal: Journal, scope: Scope) -> None:
-    """写成 `tool.result` 的话，投影会把它填回那个已经关掉的槽位。"""
-    brain, ids = _timed_out(journal, scope)
+def test_a_late_result_is_still_written_as_a_tool_result(journal: Journal, scope: Scope) -> None:
+    """落盘的是事实，迟到不改变事实本身。分成「`tool.result` + 一段补告」两条路
+    落，落下来的东西就取决于这一批凑巧带上了什么 —— 重放一次可能就不一样了。"""
+    brain, ids, _ = _timed_out(journal, scope)
 
     brain.step(scope, Batch(tool=(_result(ids[1]),)))
 
     journalled = _of(journal, scope, EventType.TOOL_RESULT)
-    assert [r.payload["invocation_id"] for r in journalled] == [ids[0]]
+    assert [r.payload["invocation_id"] for r in journalled] == ids
 
 
-def test_a_late_result_is_told_alongside_new_user_input(journal: Journal, scope: Scope) -> None:
-    brain, ids = _timed_out(journal, scope)
+def test_a_late_result_does_not_fill_the_closed_slot(journal: Journal, scope: Scope) -> None:
+    """槽位已经被一个 `assistant.message` 关上了。那个占位是模型读过的记录，
+    回头改它就是让记录说谎 —— 补告另起一条消息说。"""
+    brain, ids, provider = _timed_out(journal, scope)
+
+    brain.step(scope, Batch(tool=(_result(ids[1]),)))
+
+    messages = provider.requests[-1].messages
+    assert [(m.role, m.content) for m in messages] == [
+        ("system", "你是助手"),
+        ("user", "hi"),
+        ("assistant", "我查一下"),
+        ("tool", "ok"),
+        ("tool", ""),
+        ("assistant", "只有第一个"),
+        ("user", _notice(ids)),
+    ]
+    assert messages[4].extra["unresolved"] is True  # 系统提示占第 0 条
+
+
+def test_the_late_result_still_reaches_the_model(journal: Journal, scope: Scope) -> None:
+    """补告的用处就是被模型读到 —— 记下来不算数。"""
+    brain, ids, provider = _timed_out(journal, scope)
+
+    brain.step(scope, Batch(tool=(_result(ids[1]),)))
+
+    assert provider.requests[-1].messages[-1].content == _notice(ids)
+
+
+def test_the_same_late_result_is_not_written_twice(journal: Journal, scope: Scope) -> None:
+    """重放一次（崩溃后重来）不��多出一条记录 —— 幂等键挂在 invocation_id 上。"""
+    brain, ids, _ = _timed_out(journal, scope)
+    brain.step(scope, Batch(tool=(_result(ids[1]),)))
+    before = _types(journal, scope)
+
+    brain.step(scope, Batch(tool=(_result(ids[1]),)))
+
+    assert _types(journal, scope) == before
+
+
+def test_a_late_result_does_not_change_the_user_message(journal: Journal, scope: Scope) -> None:
+    """同一句话配不配得上同一组工具结果，不能看这一批凑巧带上了什么。
+
+    补告并进用户消息的话，重放一次时那条消息的正文就变了 —— 而它的幂等键挂在
+    command id 上，于是 journal 抛「同键异内容」，这一批永远处理不完。
+    """
+    brain, ids, provider = _timed_out(journal, scope)
 
     brain.step(
         scope,
         Batch(user=(_user("顺便问一下", command_id="c-5"),), tool=(_result(ids[1]),)),
     )
 
-    content = str(_of(journal, scope, EventType.USER_MESSAGE)[-1].payload["content"])
-    assert "<event_type=user>顺便问一下</>" in content
-    assert f'invocation_id="{ids[1]}"' in content
+    assert [r.payload["content"] for r in _of(journal, scope, EventType.USER_MESSAGE)] == [
+        "hi",
+        "顺便问一下",
+    ]
+    assert provider.requests[-1].messages[-1].content == _notice(ids)
 
 
-def test_a_late_result_lands_in_the_first_of_two_user_messages(
-    journal: Journal, scope: Scope
-) -> None:
-    """两条用户输入 —— 补告并进第一条，不凭空多出一条消息。"""
-    brain, ids = _timed_out(journal, scope)
+def test_a_late_result_clears_its_invocation(journal: Journal, scope: Scope) -> None:
+    """迟到也要把这次调用从「还差谁」里划掉。
 
-    brain.step(
-        scope,
-        Batch(
-            user=(_user("一", command_id="c-5"), _user("二", command_id="c-6")),
-            tool=(_result(ids[1]),),
-        ),
-    )
-
-    contents = [str(r.payload["content"]) for r in _of(journal, scope, EventType.USER_MESSAGE)]
-    assert contents[-2].startswith("<events>\n<event_type=user>一</>\n<event_type=tool_result")
-    assert contents[-1] == "<events>\n<event_type=user>二</>\n</events>"
-
-
-def test_a_late_result_alone_is_its_own_message(journal: Journal, scope: Scope) -> None:
-    """没有用户输入时，补告自己就是那一条消息 —— 幂等键由参与它的调用定住。"""
-    brain, ids = _timed_out(journal, scope)
-    before = len(_records(journal, scope))
-
-    brain.step(scope, Batch(tool=(_result(ids[1]),)))
-
-    added = [r for r in _records(journal, scope)[before:] if r.type == EventType.USER_MESSAGE]
-    assert len(added) == 1
-    assert added[0].idempotency_key == f"notice:{ids[1]}"
-
-
-def test_the_same_late_result_is_not_written_twice(journal: Journal, scope: Scope) -> None:
-    """重放一次（崩溃后重来）不该多出一条补告 —— 幂等键挡住了。"""
-    brain, ids, _ = _round_of_two(
+    划不掉的话，下一轮再调一次工具就永远等不齐 —— 明明每个结果都到了，`step` 却一直
+    说不到期。
+    """
+    brain, ids, _provider = _round_of_two(
         journal,
         scope,
         LlmResponse(content="只有第一个"),
         LlmResponse(content="第二个也来了"),
-        LlmResponse(content="又说一遍"),
+        LlmResponse(content="新的一轮", tool_calls=(LlmToolCall("echo", {}, "t-9"),)),
+        LlmResponse(content="都查到了"),
     )
     brain.step(scope, Batch(tool=(_result(ids[0], seconds_ago=31.0),)))
     brain.step(scope, Batch(tool=(_result(ids[1]),)))
+    brain.step(scope, Batch(user=(_user("再查一个", command_id="c-7"),)))
+    next_id = str(_of(journal, scope, EventType.TOOL_CALL)[-1].payload["invocation_id"])
 
-    brain.step(scope, Batch(tool=(_result(ids[1]),)))
-
-    assert len(_of(journal, scope, EventType.USER_MESSAGE)) == 2  # 用户那句 + 补告
+    assert brain.step(scope, Batch(tool=(_result(next_id),))) is True
 
 
-def test_the_late_result_still_reaches_the_model(journal: Journal, scope: Scope) -> None:
-    """补告的用处就是被模型读到 —— 记下来不算数。"""
-    brain, ids, provider = _round_of_two(
-        journal, scope, LlmResponse(content="只有第一个"), LlmResponse(content="第二个也来了")
+def test_a_replayed_mixed_batch_does_not_conflict(journal: Journal, scope: Scope) -> None:
+    """用户输入 + 工具结果同一批，重放一次 —— 两条输入的正文都不变，journal 不该翻脸。"""
+    brain, ids, _provider = _round_of_two(
+        journal, scope, LlmResponse(content="done"), LlmResponse(content="replayed")
     )
-    brain.step(scope, Batch(tool=(_result(ids[0], seconds_ago=31.0),)))
+    batch = Batch(user=(_user("新的一句", command_id="c-5"),), tool=tuple(_result(i) for i in ids))
 
-    brain.step(scope, Batch(tool=(_result(ids[1]),)))
-
-    assert provider.requests[-1].messages[-1].content == (
-        "<events>\n"
-        f'<event_type=tool_result invocation_id="{ids[1]}" tool="echo">'
-        f"之前 id 为 {ids[1]} 的工具结果为：ok</>\n"
-        "</events>"
-    )
+    assert brain.step(scope, batch) is True
+    assert brain.step(scope, batch) is True
 
 
 # --------------------------------------------------------------------------
@@ -941,3 +936,119 @@ def test_deltas_are_emitted_before_the_tool_call(journal: Journal, scope: Scope)
         "assistant.message",
         "tool.call",
     ]
+
+
+# --------------------------------------------------------------------------
+# 重放
+# --------------------------------------------------------------------------
+
+
+def test_a_replayed_command_asks_the_model_once(journal: Journal, scope: Scope) -> None:
+    """id 是算出来的：同一批输入重跑一次算回同一个 id，journal 的幂等键因此把
+    「又问了一遍」挡住。模型被问两次就会给出两个不同的答案，journal 里躺着两份
+    互相矛盾的记录。"""
+    provider = _Scripted(LlmResponse(content="晴"), LlmResponse(content="另一句"))
+    brain = _brain(journal, provider, _Tools(), _Sink())
+
+    batch = Batch(user=(_user(),))
+    assert brain.step(scope, batch) is True
+    assert brain.step(scope, batch) is True
+
+    assert len(provider.requests) == 1
+    assert len(_of(journal, scope, EventType.ASSISTANT_MESSAGE)) == 1
+    assert len(_of(journal, scope, EventType.USER_MESSAGE)) == 1
+
+
+def test_a_replayed_command_dispatches_each_call_once(journal: Journal, scope: Scope) -> None:
+    """派发键挂在算出来的 `invocation_id` 上。重放拿回同一个 id，工具系统才认得出
+    这是重复派发，而不是一次新的调用。"""
+    tools = _Tools(ECHO)
+    provider = _Scripted(_answer(LlmToolCall(tool="echo", arguments={}, tool_call_id="t-1")))
+    brain = _brain(journal, provider, tools, _Sink())
+
+    batch = Batch(user=(_user(),))
+    brain.step(scope, batch)
+    brain.step(scope, batch)
+
+    assert len(tools.batches) == 2
+    assert [r.invocation_id for r in tools.batches[0]] == [
+        r.invocation_id for r in tools.batches[1]
+    ]
+    assert len(_of(journal, scope, EventType.TOOL_CALL)) == 1
+
+
+class _CrashBeforeToolCall(Journal):
+    """第一次写 `tool.call` 时崩 —— 模拟 `assistant.message` 已落盘、`tool.call`
+    还没来得及写的那一瞬。"""
+
+    def __init__(self, inner: Journal) -> None:
+        self._inner = inner
+        self.crashed = False
+
+    def append(
+        self,
+        scope: Scope,
+        type: str,
+        payload: JsonObject,
+        *,
+        payload_schema_version: int,
+        idempotency_key: str,
+        occur_dt: str | None = None,
+    ) -> AppendResult:
+        if type == EventType.TOOL_CALL and not self.crashed:
+            self.crashed = True
+            raise RuntimeError("崩在 tool.call 之前")
+        return self._inner.append(
+            scope,
+            type,
+            payload,
+            payload_schema_version=payload_schema_version,
+            idempotency_key=idempotency_key,
+            occur_dt=occur_dt,
+        )
+
+    def commit_state(self, state: AgentState) -> StateRef:
+        return self._inner.commit_state(state)
+
+    def recover(self, scope: Scope) -> Recovery:
+        return self._inner.recover(scope)
+
+    def read_range(
+        self, scope: Scope, cursor: Cursor, *, limit: int | None = None
+    ) -> Iterator[Record]:
+        return self._inner.read_range(scope, cursor, limit=limit)
+
+
+def test_a_step_crashed_before_dispatching_resumes_without_asking_again(
+    journal: Journal, scope: Scope
+) -> None:
+    """崩在 `assistant.message` 之后、`tool.call` 之前。重跑一步时模型不必再问
+    一次 —— 说过的话在 journal 里，那才是这一轮真正说过的话。"""
+    tools = _Tools(ECHO)
+    provider = _Scripted(_answer(LlmToolCall(tool="echo", arguments={}, tool_call_id="t-1")))
+    brain = _brain(_CrashBeforeToolCall(journal), provider, tools, _Sink())
+    batch = Batch(user=(_user(),))
+
+    with pytest.raises(RuntimeError):
+        brain.step(scope, batch)
+    assert len(provider.requests) == 1
+    assert EventType.TOOL_CALL not in _types(journal, scope)
+
+    assert brain.step(scope, batch) is True
+
+    assert len(provider.requests) == 1  # 没有再问模型
+    assert len(tools.batches) == 1
+    assert len(_of(journal, scope, EventType.TOOL_CALL)) == 1
+
+
+def test_an_answer_without_tool_calls_is_not_asked_twice(journal: Journal, scope: Scope) -> None:
+    """「问过了但一个工具都不调」也是问过了。靠 `assistant` 在不在分辨，
+    靠「有没有 tool_calls」分辨不了。"""
+    provider = _Scripted(LlmResponse(content="晴"), LlmResponse(content="另一句"))
+    brain = _brain(journal, provider, _Tools(), _Sink())
+
+    batch = Batch(user=(_user(),))
+    brain.step(scope, batch)
+    brain.step(scope, batch)
+
+    assert len(provider.requests) == 1

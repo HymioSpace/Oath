@@ -146,6 +146,9 @@ class ThreadedToolSystem(ToolSystem):
         )
         self._lock = threading.Lock()
         self._table: dict[tuple[str, str, str], _Cell] = {}
+        #: 正在走接纳流程、还没进执行表的调用。查重和入表之间隔着问权限和校验入参，
+        #: 那两步不是原子的 —— 不先占住位置，两个并发调用会一起走过去。
+        self._admitting: set[tuple[str, str, str]] = set()
         self._heap: list[_Deadline] = []
         # 执行中（in-flight）且尚未终结的调用数。名额按它算，不按执行表大小算 ——
         # 已终结的记录留着给 `status()` 查，但不占名额。
@@ -206,17 +209,28 @@ class ThreadedToolSystem(ToolSystem):
                 f"{invocation_id!r}"
             )
 
+        key = _key(scope, invocation_id)
         with self._lock:
-            existing = self._table.get(_key(scope, invocation_id))
-            if existing is not None:
-                # 正在执行或已终结。已终结的再次派发同样不重跑：重试策略不属于工具
-                # 系统，它是上层的决定。
-                return ToolHandle(
-                    invocation_id=invocation_id,
-                    tool=request.tool,
-                    state=ToolHandleState.DEDUPLICATED,
-                )
-        return self._accept(scope, request, invocation_id)
+            # 查重和入表之间隔着问权限与校验入参，不是一步。占位先落在这儿，
+            # 另一个调用者看到它就会走重复那条路，而不是跟着一起走过去。
+            duplicate = key in self._table or key in self._admitting
+            if not duplicate:
+                self._admitting.add(key)
+        if duplicate:
+            # 正在执行、正在接纳，或已终结。已终结的再次派发同样不重跑：重试策略不
+            # 属于工具系统，它是上层的决定。
+            return ToolHandle(
+                invocation_id=invocation_id,
+                tool=request.tool,
+                state=ToolHandleState.DEDUPLICATED,
+            )
+        try:
+            return self._accept(scope, request, invocation_id)
+        finally:
+            # 接纳成功时 cell 已经在表里了，占位可以撤；被拒时表里没有这条，撤掉之后
+            # 下一次派发才拿得到它。
+            with self._lock:
+                self._admitting.discard(key)
 
     def _accept(self, scope: Scope, request: ToolCallRequest, invocation_id: str) -> ToolHandle:
         registered = self._registry.get(request.tool)

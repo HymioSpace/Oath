@@ -11,6 +11,9 @@ kill 测试在 `test_journal_crash.py`（slow），它验证的是另一件事 �
 
 from __future__ import annotations
 
+import errno
+import json
+import os
 from pathlib import Path
 
 import pytest
@@ -148,6 +151,116 @@ def test_state_log_with_only_a_torn_snapshot_reads_as_no_snapshot(
 
 
 # --------------------------------------------------------------------------
+# 写失败回滚
+# --------------------------------------------------------------------------
+
+
+def _break_writes_after(monkeypatch: pytest.MonkeyPatch, calls: int) -> None:
+    """让前 `calls` 次 `os.write` 正常，第 `calls + 1` 次写一半就报错。"""
+
+    real_write = os.write
+    seen = 0
+
+    def flaky(fd: int, data: bytes) -> int:
+        nonlocal seen
+        seen += 1
+        if seen <= calls:
+            return real_write(fd, data)
+        real_write(fd, data[: max(1, len(data) // 2)])
+        raise OSError(errno.EIO, "写设备故障")
+
+    monkeypatch.setattr(os, "write", flaky)
+
+
+def test_a_failed_append_rolls_back_to_the_last_good_record(tmp_path: Path, scope: Scope) -> None:
+    """截回的长度得是**字节数**。按字符算，中文正文差出来的部分会把上一条已经
+    fsync 过的记录一起截掉 —— 那条记录是已经向调用方返回成功的。"""
+    root = tmp_path / "journal"
+    with FileJournal(root) as j:
+        j.append(
+            scope,
+            EventType.USER_MESSAGE,
+            {"content": "链路" * 8},
+            payload_schema_version=1,
+            idempotency_key="k0",
+        )
+    good = _events_path(root, scope).read_bytes()
+    assert len(good) > len(good.decode("utf-8"))  # 多字节：字节数确实大于字符数
+
+    with FileJournal(root) as j, pytest.MonkeyPatch.context() as patch:
+        _break_writes_after(patch, calls=0)
+        with pytest.raises(OSError):
+            j.append(
+                scope,
+                EventType.USER_MESSAGE,
+                {"content": "半路失败"},
+                payload_schema_version=1,
+                idempotency_key="k1",
+            )
+
+    assert _events_path(root, scope).read_bytes() == good
+
+
+def test_the_log_stays_readable_after_a_rolled_back_append(tmp_path: Path, scope: Scope) -> None:
+    """回滚之后再写一次不会粘在半行上。"""
+    root = tmp_path / "journal"
+    with FileJournal(root) as j:
+        j.append(
+            scope,
+            EventType.USER_MESSAGE,
+            {"content": "第一"},
+            payload_schema_version=1,
+            idempotency_key="k0",
+        )
+    with FileJournal(root) as j, pytest.MonkeyPatch.context() as patch:
+        _break_writes_after(patch, calls=0)
+        with pytest.raises(OSError):
+            j.append(
+                scope,
+                EventType.USER_MESSAGE,
+                {"content": "失败"},
+                payload_schema_version=1,
+                idempotency_key="k1",
+            )
+
+    with FileJournal(root) as j:
+        j.append(
+            scope,
+            EventType.USER_MESSAGE,
+            {"content": "第二"},
+            payload_schema_version=1,
+            idempotency_key="k2",
+        )
+        assert [r.payload["content"] for r in j.read_range(scope, Cursor(CursorKind.LINE, 0))] == [
+            "第一",
+            "第二",
+        ]
+
+
+def test_a_failed_snapshot_keeps_the_previous_one(tmp_path: Path, scope: Scope) -> None:
+    """状态日志截回 0 会把上一次提交的那份快照抹掉，而那正是重启后唯一读得到的
+    状态 —— 水位线归零，全部记录重新处理。"""
+    root = tmp_path / "journal"
+    with FileJournal(root) as j:
+        cursor = j.append(
+            scope,
+            EventType.USER_MESSAGE,
+            {"content": "x"},
+            payload_schema_version=1,
+            idempotency_key="k",
+        ).cursor
+        j.commit_state(AgentState.covering(scope, cursor, {"turn": 1}))
+
+    with FileJournal(root) as j, pytest.MonkeyPatch.context() as patch:
+        _break_writes_after(patch, calls=0)
+        with pytest.raises(OSError):
+            j.commit_state(AgentState.covering(scope, cursor, {"turn": 2}))
+
+    with FileJournal(root) as j:
+        assert j.recover(scope).state == AgentState.covering(scope, cursor, {"turn": 1})
+
+
+# --------------------------------------------------------------------------
 # 中间损坏
 # --------------------------------------------------------------------------
 
@@ -172,6 +285,75 @@ def test_record_from_another_scope_is_rejected(tmp_path: Path, scope: Scope) -> 
     path = _events_path(root, scope)
     data = path.read_bytes().replace(b'"session_id":"s1"', b'"session_id":"s2"')
     path.write_bytes(data)
+
+    with pytest.raises(CorruptRecordError), FileJournal(root) as j:
+        j.recover(scope)
+
+
+def _raw_event(scope: Scope, **overrides: object) -> bytes:
+    record: dict[str, object] = {
+        "user_id": scope.user_id,
+        "session_id": scope.session_id,
+        "type": EventType.USER_MESSAGE,
+        "payload": {"content": "x"},
+        "payload_schema_version": 1,
+        "idempotency_key": "k",
+        "occur_dt": None,
+        "commit_dt": "2026-10-14T00:00:00.000000Z",
+    }
+    record.update(overrides)
+    return (json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+def test_an_unknown_payload_schema_version_is_rejected(tmp_path: Path, scope: Scope) -> None:
+    """读出来时也要认版本。写的时候判过不够 —— 日志可能被别的写者升级过，也可能
+    是手改的。放行等于让一条「当时不认」的记录照常投影出去。"""
+    root = tmp_path / "journal"
+    path = _events_path(root, scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_raw_event(scope, payload_schema_version=2))
+
+    with pytest.raises(CorruptRecordError), FileJournal(root) as j:
+        j.recover(scope)
+
+
+def test_a_payload_that_does_not_match_its_schema_is_rejected(tmp_path: Path, scope: Scope) -> None:
+    root = tmp_path / "journal"
+    path = _events_path(root, scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_raw_event(scope, payload={"content": "x", "多出来的字段": 1}))
+
+    with pytest.raises(CorruptRecordError), FileJournal(root) as j:
+        j.recover(scope)
+
+
+def test_a_payload_missing_a_required_field_is_rejected(tmp_path: Path, scope: Scope) -> None:
+    root = tmp_path / "journal"
+    path = _events_path(root, scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_raw_event(scope, payload={}))
+
+    with pytest.raises(CorruptRecordError), FileJournal(root) as j:
+        j.recover(scope)
+
+
+def test_an_unknown_state_schema_version_is_rejected(tmp_path: Path, scope: Scope) -> None:
+    root = tmp_path / "journal"
+    with FileJournal(root) as j:
+        cursor = j.append(
+            scope,
+            EventType.USER_MESSAGE,
+            {"content": "x"},
+            payload_schema_version=1,
+            idempotency_key="k",
+        ).cursor
+        j.commit_state(AgentState.covering(scope, cursor, {"turn": 1}))
+
+    path = _state_path(root, scope)
+    lines = path.read_bytes().splitlines(keepends=True)
+    record = json.loads(lines[0])
+    record["payload_schema_version"] = 9
+    path.write_bytes((json.dumps(record, ensure_ascii=False) + "\n").encode("utf-8"))
 
     with pytest.raises(CorruptRecordError), FileJournal(root) as j:
         j.recover(scope)

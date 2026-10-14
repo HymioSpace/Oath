@@ -23,6 +23,7 @@ from core.protocol.datatype.inbound import Batch, Inbound, InboundKind
 from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolEvent, ToolEventType
+from core.protocol.error import is_permanent
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.buffer import EventBuffer
 from core.protocol.interface.event import AgentEventSink
@@ -102,33 +103,69 @@ class SessionConsumer:
     # -- 一次循环 ----------------------------------------------------------
 
     def _cycle(self, scope: Scope) -> None:
+        """一次循环。**这一层不往外抛。**
+
+        抛出去就是消费线程死掉：那条 session 再也没有人消费，队列里剩下的输入没人
+        知道它在等什么，而 `buffer` 里没 clear 的那批也再也没人来跑。
+        """
+        try:
+            self._round(scope)
+        except Exception:
+            _log.exception("session %s 的一次循环失败", scope)
+            self._wait(scope, None)
+
+    def _round(self, scope: Scope) -> None:
         self._drain(scope)
         batch = self._batch(scope)
         if batch.empty:
-            self._ctx.queue.wait(scope, timeout=_IDLE_WAIT)
+            self._wait(scope, None)
             return
 
         try:
             settled = self._brain.step(scope, batch)
-        except Exception:
-            # 一条输入处理失败不能让线程死掉 —— 剩下的输入还在队列里，失败的已经由
-            # `AgentBrain` 记成 `system.agent_step{error}`。buffer 不清，下一轮重试。
-            _log.exception("session %s 的一批输入处理失败", scope)
-            self._ctx.queue.wait(scope, timeout=_IDLE_WAIT)
+        except Exception as exc:
+            self._on_failure(scope, batch, exc)
             return
 
         if settled:
             self._clear(scope)
             return
-        delay = self._brain.wakeup_delay(scope, batch)
-        self._ctx.queue.wait(scope, timeout=_IDLE_WAIT if delay is None else delay)
+        self._wait(scope, self._brain.wakeup_delay(scope, batch))
+
+    def _on_failure(self, scope: Scope, batch: Batch, exc: Exception) -> None:
+        """一批输入处理失败。分两种，不是一种。"""
+        if is_permanent(exc):
+            # 重试多少次都是同一个错。留在 buffer 里只会把后来的输入一起拖住 ——
+            # 每一轮醒来都会先撞上它。丢掉这一批，丢了什么记在日志里：客户端那边
+            # 没有回声的通道，日志是唯一的去处。
+            _log.error(
+                "session %s 丢弃一批不合法的输入 %s: %s",
+                scope,
+                _identities(batch),
+                exc,
+                exc_info=exc,
+            )
+            self._clear(scope)
+            return
+        # 暂时性的失败。buffer 不清，下一轮重试；失败的已经由 `AgentBrain` 记成
+        # `system.agent_step{error}`。
+        _log.exception("session %s 的一批输入处理失败", scope)
+        self._wait(scope, None)
 
     def _drain(self, scope: Scope) -> None:
         """取光三条队列，灌进对应的 buffer。"""
         for queue in _QUEUE_ORDER:
             items = self._ctx.queue.drain(scope, queue, limit=_DRAIN_LIMIT)
-            if items:
+            if not items:
+                continue
+            try:
                 self._buffer.put(scope, queue, items)
+            except Exception:
+                # 搬不进去就放回队列。已经出队的东西没了就是没了 —— 用户说过一句
+                # 话，而 journal 里没有、队列里也没有，那句话就真的不存在了。
+                for item in items:
+                    self._ctx.queue.put(scope, item)
+                raise
 
     def _batch(self, scope: Scope) -> Batch:
         """三条 buffer 现在的全部内容。"""
@@ -142,6 +179,23 @@ class SessionConsumer:
         """`Brain` 说处理完了。三条一起清 —— 一批里三样东西是同一件事。"""
         for queue in _QUEUE_ORDER:
             self._buffer.clear(scope, queue)
+
+    def _wait(self, scope: Scope, delay: float | None) -> None:
+        self._ctx.queue.wait(scope, timeout=_IDLE_WAIT if delay is None else delay)
+
+
+def _identities(batch: Batch) -> str:
+    """这批里是些什么。只报身份，不报内容 —— 内容可能是用户输入。"""
+    parts = [
+        f"{kind}={item.source_id}"
+        for kind, items in (
+            ("user", batch.user),
+            ("tool", batch.tool),
+            ("system", batch.system),
+        )
+        for item in items
+    ]
+    return "[" + ", ".join(parts) + "]" if parts else "[空]"
 
 
 def _tool_inbound(event: ToolEvent) -> Inbound:
