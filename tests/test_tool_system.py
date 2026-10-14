@@ -8,7 +8,7 @@ import pytest
 
 from core.protocol.datatype import Scope, ToolCallRequest
 from core.protocol.datatype.config import AgentConfig
-from core.protocol.error import ToolRequestError
+from core.protocol.error import ToolExecutionError, ToolRequestError
 from core.utils.encoding import JsonObject
 from tests._support.intake_fixtures import Harness, requests, until
 from tests._support.tool_fixtures import EchoTool, GatedTool, RaisingTool, VerdictPolicy
@@ -158,6 +158,18 @@ def test_late_worker_result_cannot_change_terminal(tmp_path: Path) -> None:
             assert h.call("a")["terminal"] == original
         finally:
             a.gate.set()
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [(ToolExecutionError("业务失败"), "tool_error"), (ValueError("意外"), "unexpected")],
+)
+def test_no_tool_exception_reaches_the_caller(tmp_path: Path, exc: Exception, kind: str) -> None:
+    with Harness(tmp_path, tools=[RaisingTool("a", exc)]) as h:
+        h.tools.execute(h.scope, requests("a"))  # 不抛：异常止于终态
+        until(lambda: h.call("a")["terminal"])
+        assert h.call("a")["status"] == "failed"
+        assert h.call("a")["terminal"]["error"] == {"kind": kind, "message": str(exc)}
 
 
 def test_failed_tool_does_not_block_other_member(tmp_path: Path) -> None:

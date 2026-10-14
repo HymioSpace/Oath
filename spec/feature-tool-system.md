@@ -23,7 +23,7 @@ flowchart TD
 ```
 
 贯穿全文的规则：原调用身份和参数不变；一个 invocation 一个终态；等待批准不占执行线程；
-在线通知失败不改写结果；未知外部结果不能自动重跑。
+在线通知失败不改写结果；未知外部结果不能自动重跑；工具异常止于 `failed` 终态。
 
 ## 1 接口与身份
 
@@ -36,6 +36,10 @@ execute(invocation: ToolInvocation) -> ToolResult
 
 ToolInvocation 包含 scope、invocation_id、原参数与 monotonic deadline；工具可据此设置自己的
 I/O timeout。正常返回为成功，业务异常使用 ToolExecutionError。
+
+**`execute` 的异常不越过工具边界。** 执行器接住工具抛出的任何异常，写成 `failed` 终态
+（`error.kind` 为 `tool_error` 或 `unexpected`），不会向上冒泡打断 Brain。工具只需要把自己的
+失败说清楚，不需要收住自己所有可能的异常 —— 那不是工具该操心的事。
 
 ToolSystem 提供 submit_batch、execute、batch_status、status、apply_permission、cancel、recover_scope。
 `submit_batch` 要求完整、非空且身份唯一的批次；返回登记回执，不等待权限检查或执行完成。
