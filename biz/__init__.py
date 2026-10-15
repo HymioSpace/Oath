@@ -5,17 +5,17 @@
 
 ```
 biz/
-├── agent.py   AgentApi —— 会话绑定与 command 接纳
-├── query.py   只读 command 的分派与 session.status 读模型
-└── trace.py   trace 列表与单条 trace 的读模型
+├── api.py       AgentApi —— 门面与只读 command 的分派
+├── session/     会话：身份绑定、输入接纳、状态投影
+└── trace/       trace：列表与单条的读模型
 ```
 
-依赖方向单向 —— `biz` → `bootstrap`（拿装配好的 `Runtime`）→ `core`。
-core 不反向 import 这里任何东西。
+按域分，与 `core/` 下的写法一致。依赖方向单向 —— `biz` → `bootstrap`（拿装配好的
+`Runtime`）→ `core`，core 不反向 import 这里任何东西。
 """
 
 from __future__ import annotations
 
-from biz.agent import AgentApi
+from biz.api import AgentApi
 
 __all__ = ["AgentApi"]
