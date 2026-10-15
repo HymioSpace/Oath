@@ -15,7 +15,7 @@ skill 加载、模型调用、trace 记录。扩展只提供业务内容和动�
 | --- | --- | --- |
 | [core/](core/) | 机制，含 JSONL 日志 | 否 |
 | `extensions/` | 业务 tool、业务 skill、额外 context 来源 | 是 |
-| `biz/` | runtime 操作与查询 API | 否 |
+| `biz/` | runtime 操作与查询 API，不是进程 | 否 |
 | `spec/` | 设计文档 | 否 |
 
 `core/` 内部：
@@ -29,7 +29,7 @@ skill 加载、模型调用、trace 记录。扩展只提供业务内容和动�
 | `core/journal/` | 机制：校验、幂等语义、游标运算、messages 投影 |
 | `core/journal/impl/` | 存储后端（v1 只有 JSONL） |
 | `core/trace/impl/` | trace 存储后端（v1 只有 JSONL） |
-| `biz/` | 面向客户端的操作与查询，传输无关 |
+| `biz/` | 面向客户端的操作与查询：`agent.py` 接纳、`query.py` 分派只读命令、`trace.py` 读模型 |
 
 数据类型和接口是跨仓库契约，进 `core/protocol/`，依赖方向单向指向它；编码只是
 手段，进 `core/utils/`。消费方从 `core.protocol.datatype`、

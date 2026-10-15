@@ -155,7 +155,7 @@ step 的 `trace_id` 和 `trace_started` 一起写进 step 状态，重启后仍�
 
 ## 7 查询
 
-`biz` 层给出传输无关的查询，和操作放在一起：
+`biz/trace.py` 给出传输无关的读模型，和操作放在一起：
 
 ```
 traces(scope)        -> 该 scope 的 trace 列表，每条带 step 数与累计耗时

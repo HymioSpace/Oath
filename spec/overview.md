@@ -46,8 +46,11 @@ flowchart TD
 | core/trace | 按 scope 记录 ReAct 循环的 span，OpenTelemetry 形状 |
 | core/outbound | 在线事件与客户端背压 |
 | bootstrap | 配置、认证装配、启动恢复、WebSocket |
-| biz | 面向客户端的操作与查询，传输无关 |
+| biz | 面向客户端的操作与查询，传输无关；`agent` 接纳、`query` 分派只读命令、`trace` 读模型 |
 | extensions | 业务能力扩展 |
+
+biz 之下只有 `bootstrap`，它之下只有 core。传输（WebSocket、将来的 HTTP）住在
+`bootstrap/`，命令词表住在 `biz/` —— 两边都不互相 import 对方的细节。
 
 core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。
 Journal 是事实来源，队列和内存状态可重建；各模块共用 RuntimeStore，不另建审批 / buffer 持久化文件。

@@ -16,7 +16,7 @@ import websockets
 from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as _ws_serve
 
-from biz.api import AgentApi
+from biz import AgentApi
 from bootstrap.runtime import Runtime
 from core.outbound.hub import ClientChannel
 from core.protocol.datatype.scope import Scope
@@ -30,7 +30,7 @@ from core.protocol.datatype.wire import (
     pong,
 )
 from core.protocol.error import WireProtocolError
-from core.utils.encoding import JsonObject, canonical_json
+from core.utils.encoding import canonical_json
 
 _log = logging.getLogger("oath.server")
 
@@ -108,7 +108,9 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
                 continue
 
             try:
-                query = await _query(api, command, scope)
+                # 查询命令回 event 帧，其余走接纳路径回 ACK。分派在 biz 里 ——
+                # 这一层只管把帧搬来搬去。
+                query = await asyncio.to_thread(api.answer, command, scope)
                 if query is not None:
                     event_type, payload = query
                     await connection.send(
@@ -137,21 +139,6 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
     finally:
         if scope is not None:
             runtime.hub.detach(scope, channel)
-
-
-async def _query(api: AgentApi, command: Command, scope: Scope) -> tuple[str, JsonObject] | None:
-    """查询类 command 回一个 event 帧，不是 ACK。
-
-    阻塞读走 `asyncio.to_thread`，与 submit 一样 —— 文件 I/O 不能占住事件循环。
-    """
-    if command.type == CommandType.SESSION_STATUS:
-        return "session.status", await asyncio.to_thread(api.status, scope)
-    if command.type == CommandType.TRACE_LIST:
-        return "trace.list", await asyncio.to_thread(api.traces, scope)
-    if command.type == CommandType.TRACE_GET:
-        trace_id = str(command.payload["trace_id"])
-        return "trace.get", await asyncio.to_thread(api.trace, scope, trace_id)
-    return None
 
 
 async def _fail(connection: ServerConnection, command_id: str | None, exc: Exception) -> None:

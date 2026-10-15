@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from biz.api import AgentApi
+from biz import AgentApi
 from bootstrap.runtime import Runtime
 from core.compaction import CompactionCoordinator
 from core.protocol.datatype.config import OathConfig

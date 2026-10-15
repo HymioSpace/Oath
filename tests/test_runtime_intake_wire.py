@@ -9,7 +9,7 @@ from typing import Any, cast
 import pytest
 from websockets.asyncio.server import ServerConnection
 
-from biz.api import AgentApi
+from biz import AgentApi
 from bootstrap.runtime import Runtime
 from bootstrap.ws import _serve_connection
 from core.protocol.datatype.config import OathConfig

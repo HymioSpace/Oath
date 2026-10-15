@@ -10,13 +10,14 @@ from typing import Any, cast
 
 import pytest
 
-from biz.api import AgentApi
+from biz import AgentApi
 from bootstrap.runtime import Runtime
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span, SpanStatus, new_trace_id
 from core.protocol.datatype.wire import Command
 from core.protocol.error import WireProtocolError
+from core.utils.encoding import JsonObject
 from tests._support.intake_fixtures import ScriptedProvider
 
 TRACE = new_trace_id()
@@ -42,8 +43,17 @@ LLM = Span(
 )
 
 
+async def answer(api: AgentApi, command: Command, scope: Scope) -> tuple[str, JsonObject]:
+    """`answer` 对查询命令回二元组，对其余返回 None —— 这里要的是前者。"""
+    result = await asyncio.to_thread(api.answer, command, scope)
+    assert result is not None, f"{command.type} 不是查询命令"
+    return result
+
+
 @asynccontextmanager
-async def client(tmp_path: Path, spans: dict[Scope, tuple[Span, ...]]) -> AsyncIterator[AgentApi]:
+async def client(
+    tmp_path: Path, spans: dict[Scope, tuple[Span, ...]]
+) -> AsyncIterator[tuple[AgentApi, Runtime]]:
     """真装配一份 Runtime，span 直接写进它的文件后端。"""
     runtime = Runtime(
         OathConfig(
@@ -57,13 +67,13 @@ async def client(tmp_path: Path, spans: dict[Scope, tuple[Span, ...]]) -> AsyncI
         for span in written:
             runtime.ctx.traces.append(scope, span)
     try:
-        yield AgentApi(runtime)
+        yield AgentApi(runtime), runtime
     finally:
         await asyncio.to_thread(runtime.close)
 
 
 async def test_the_trace_list_counts_spans_steps_and_elapsed_time(tmp_path: Path) -> None:
-    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as api:
+    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as (api, _runtime):
         listed = cast(
             list[dict[str, Any]], (await asyncio.to_thread(api.traces, SCOPE))["trace_ids"]
         )
@@ -72,7 +82,7 @@ async def test_the_trace_list_counts_spans_steps_and_elapsed_time(tmp_path: Path
 
 
 async def test_a_trace_carries_every_span_with_its_own_duration(tmp_path: Path) -> None:
-    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as api:
+    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as (api, _runtime):
         view = await asyncio.to_thread(api.trace, SCOPE, TRACE)
 
     assert view["trace_id"] == TRACE
@@ -85,7 +95,7 @@ async def test_a_trace_carries_every_span_with_its_own_duration(tmp_path: Path) 
 
 async def test_an_unknown_trace_id_looks_empty_rather_than_missing(tmp_path: Path) -> None:
     """与「无权查看」不可区分 —— 不留一个枚举 scope 里存过什么的旁路。"""
-    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as api:
+    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as (api, _runtime):
         view = await asyncio.to_thread(api.trace, SCOPE, new_trace_id())
 
     assert view["spans"] == []
@@ -94,15 +104,52 @@ async def test_an_unknown_trace_id_looks_empty_rather_than_missing(tmp_path: Pat
 
 async def test_a_trace_of_another_session_is_not_visible(tmp_path: Path) -> None:
     other = Scope("u1", "s2")
-    async with client(tmp_path, {other: (STEP, LLM)}) as api:
+    async with client(tmp_path, {other: (STEP, LLM)}) as (api, _runtime):
         assert (await asyncio.to_thread(api.traces, SCOPE))["trace_ids"] == []
         assert (await asyncio.to_thread(api.trace, SCOPE, TRACE))["spans"] == []
         assert (await asyncio.to_thread(api.traces, other))["trace_ids"] != []
 
 
 async def test_a_command_for_another_session_is_rejected(tmp_path: Path) -> None:
-    async with client(tmp_path, {}) as api:
+    async with client(tmp_path, {}) as (api, _runtime):
         with pytest.raises(WireProtocolError):
             await asyncio.to_thread(
                 api.submit, Command("u1", "user.message", "s2", {"content": "你好"}), SCOPE
             )
+
+
+async def test_answer_routes_queries_and_ignores_everything_else(tmp_path: Path) -> None:
+    """查询回 (event_type, payload)，非查询返回 None —— 传输层据此决定 ACK 还是事件。"""
+    async with client(tmp_path, {SCOPE: (STEP, LLM)}) as (api, _runtime):
+        event_type, payload = await answer(
+            api, Command("q1", "trace.get", SCOPE.session_id, {"trace_id": TRACE}), SCOPE
+        )
+        assert event_type == "trace.get"
+        assert payload["duration_ms"] == 2.0
+
+        event_type, _ = await answer(api, Command("q2", "trace.list", SCOPE.session_id, {}), SCOPE)
+        assert event_type == "trace.list"
+
+        assert (
+            await asyncio.to_thread(
+                api.answer,
+                Command("u1", "user.message", SCOPE.session_id, {"content": "hi"}),
+                SCOPE,
+            )
+            is None
+        )
+
+
+async def test_a_query_does_not_admit_an_input(tmp_path: Path) -> None:
+    """查询命令不进 buffer，也不认领 step —— 重发一百次和发一次一样。"""
+    async with client(tmp_path, {}) as (api, runtime):
+        for index in range(3):
+            await answer(
+                api,
+                Command(f"q{index}", "trace.list", SCOPE.session_id, {}),
+                SCOPE,
+            )
+
+        state = runtime.ctx.store.read(SCOPE)
+        assert not state["inputs"]
+        assert state["meta"].get("active_step") is None
