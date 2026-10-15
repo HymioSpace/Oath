@@ -112,7 +112,7 @@ class Harness:
         self.sink = RecordingSink()
         self.config = config or AgentConfig(tool_round_timeout_seconds=0.5, llm_retry_delay=0.01)
         self.details = FileDetailStore(root / "details")
-        self.skills = SkillSystem(root / "skills", scan_dirs=[root / "external-skills"])
+        self.skills = SkillSystem([root / "skills"], scan_dirs=[root / "external-skills"])
         # 内存替身：要问的是「写了什么」，不是「落到磁盘没有」。文件后端另有测试。
         self.traces = traces or RecordingTraceStore()
         self.registry = ToolRegistry(default_timeout_seconds=self.config.tool_timeout_seconds)

@@ -53,6 +53,17 @@ def _absolute(value: Any, default: Path) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
 
 
+def _absolute_dirs(values: Any, default: tuple[Path, ...]) -> tuple[Path, ...]:
+    """一串目录字段，同样在装配期变成绝对路径。
+
+    配置写空数组就是关掉扫描 —— 那是一个有意义的取值，不是「没配」，所以这里靠
+    `None` 与 `[]` 分开，不拿「空」当缺省。缺省值同样要绝对化，否则同一个目录会
+    因写法不同而指向两条路径。
+    """
+    paths = (Path(str(value)).expanduser() for value in (default if values is None else values))
+    return tuple(path if path.is_absolute() else Path.cwd() / path for path in paths)
+
+
 def load_config(path: str | Path) -> OathConfig:
     """读一份配置。文件不存在直接报错 —— 起不来就说清楚为什么。"""
     file = Path(path)
@@ -89,6 +100,7 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
         not in (
             "system_prompt",
             "provider",
+            "extension_dirs",
             "skill_dir",
             "skill_scan_dirs",
             "workspace_root",
@@ -96,7 +108,12 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
         )
     }
     defaults = AgentConfig()
-    agent_fields["skill_dir"] = Path(agent_raw.get("skill_dir", defaults.skill_dir))
+    agent_fields["extension_dirs"] = _absolute_dirs(
+        agent_raw.get("extension_dirs"), defaults.extension_dirs
+    )
+    # `skill_dir` 默认就是 `extension_dirs[0]/skills`，所以它也走绝对化 —— 同一个目录
+    # 被两条不同写法的路径指到，只因 `SkillSystem` 按 resolve 去重才没出事。
+    agent_fields["skill_dir"] = _absolute(agent_raw.get("skill_dir"), defaults.skill_dir)
     agent_fields["workspace_root"] = _absolute(
         agent_raw.get("workspace_root"), defaults.workspace_root
     )

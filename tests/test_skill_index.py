@@ -28,7 +28,7 @@ def write(root: Path, name: str, *, description: str, priority: int | None = Non
 
 
 def skills(tmp_path: Path) -> SkillSystem:
-    return SkillSystem(tmp_path / "skills", scan_dirs=[tmp_path / "external"])
+    return SkillSystem([tmp_path / "skills"], scan_dirs=[tmp_path / "external"])
 
 
 def test_only_the_frontmatter_reaches_the_index(tmp_path: Path) -> None:
@@ -140,7 +140,7 @@ def test_a_broken_skill_is_dropped_without_taking_the_others(tmp_path: Path, con
 
 
 def test_a_missing_directory_is_not_an_error(tmp_path: Path) -> None:
-    index = SkillSystem(tmp_path / "nowhere", scan_dirs=[tmp_path / "also-nowhere"])
+    index = SkillSystem([tmp_path / "nowhere"], scan_dirs=[tmp_path / "also-nowhere"])
 
     assert index.list(500) == ""
     assert index.find("任何") == []

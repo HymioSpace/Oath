@@ -1,6 +1,6 @@
 """`oath-cli` 这个可执行文件：参数怎么变成请求，失败怎么变成退出码。
 
-不打真网络 —— `urlopen` 换掉，端点、请求头、query string 都看得见。要验的正是
+不打真网络 —— `urlopen` 换掉，端点、请求头、请求 body 都看得见。要验的正是
 「执行环境里那条命令打出去的请求对不对」，不是 Oath server 的行为（那在
 `test_cli_server.py`）。
 """
@@ -28,18 +28,29 @@ BODY = b'{"error": "bad_query"}'
 LISTING = {
     "commands": [
         {
-            "name": "search",
-            "description": "Search the knowledge base.",
+            "name": "echo",
+            "description": "Echo the text back.",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "要回显的文本"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            # 两条参数，用来验位置参数与 `--key=value` 抢位置的行为。
+            "name": "probe",
+            "description": "Inspect the call.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "关键词"},
+                    "text": {"type": "string", "description": "文本"},
                     "limit": {"type": "integer", "description": "最多几条"},
                 },
-                "required": ["query"],
+                "required": ["text"],
                 "additionalProperties": False,
             },
-        }
+        },
     ]
 }
 
@@ -100,33 +111,33 @@ def sent(asked: list[Any]) -> Any:
 def test_a_positional_argument_lands_on_the_first_declared_parameter(
     cli: ModuleType, asked: list[Any]
 ) -> None:
-    """`oath-cli search 工作区` 里 `工作区` 是 query —— 位置就是声明顺序。"""
-    cli.main(["search", "工作区"])
+    """`oath-cli echo 工作区` 里 `工作区` 是 text —— 位置就是声明顺序。"""
+    cli.main(["echo", "工作区"])
 
-    assert json.loads(sent(asked).data.decode()) == {"query": "工作区"}
+    assert json.loads(sent(asked).data.decode()) == {"text": "工作区"}
 
 
 def test_a_named_argument_does_not_take_up_a_position(cli: ModuleType, asked: list[Any]) -> None:
-    """`--limit=2 工作区`：limit 写了自己的名字，位置留给 query。"""
-    cli.main(["search", "--limit=2", "工作区"])
+    """`--limit=2 工作区`：limit 写了自己的名字，位置留给 text。"""
+    cli.main(["probe", "--limit=2", "工作区"])
 
-    assert json.loads(sent(asked).data.decode()) == {"query": "工作区", "limit": "2"}
+    assert json.loads(sent(asked).data.decode()) == {"text": "工作区", "limit": "2"}
 
 
 def test_the_command_is_posted_with_the_arguments_in_the_body(
     cli: ModuleType, asked: list[Any]
 ) -> None:
     """命令是动作 —— GET 的缓存与重试语义不对。"""
-    cli.main(["search", "工作区"])
+    cli.main(["echo", "工作区"])
 
-    assert (sent(asked).get_method(), sent(asked).full_url) == ("POST", f"{SERVER}/cli/search")
+    assert (sent(asked).get_method(), sent(asked).full_url) == ("POST", f"{SERVER}/cli/echo")
 
 
 def test_the_credential_from_the_environment_goes_into_the_request(
     cli: ModuleType, asked: list[Any]
 ) -> None:
     """脚本不判断 credential 有没有用 —— 它只是把它原样带过去。"""
-    cli.main(["search", "工作区"])
+    cli.main(["echo", "工作区"])
 
     assert sent(asked).get_header("Authorization") == f"Bearer {TOKEN}"
 
@@ -137,8 +148,8 @@ def test_running_it_without_arguments_lists_the_commands(
     assert cli.main([]) == 0
 
     out = capsys.readouterr().out
-    assert "search" in out
-    assert "query（必填）" in out
+    assert "echo" in out
+    assert "text（必填）" in out
 
 
 def test_an_unknown_command_is_a_usage_error(cli: ModuleType, asked: list[Any]) -> None:
@@ -150,7 +161,7 @@ def test_an_unknown_command_is_a_usage_error(cli: ModuleType, asked: list[Any]) 
 
 def test_an_unknown_parameter_is_a_usage_error(cli: ModuleType, asked: list[Any]) -> None:
     with pytest.raises(SystemExit) as exit:
-        cli.payload_of(["search", "--fields=all"])
+        cli.payload_of(["echo", "--fields=all"])
 
     assert exit.value.code == cli.EXIT_USAGE
 
@@ -159,7 +170,7 @@ def test_more_positional_arguments_than_the_command_takes(
     cli: ModuleType, asked: list[Any]
 ) -> None:
     with pytest.raises(SystemExit) as exit:
-        cli.payload_of(["search", "工作区", "5", "多余"])
+        cli.payload_of(["echo", "工作区", "5", "多余"])
 
     assert exit.value.code == cli.EXIT_USAGE
 
@@ -172,7 +183,7 @@ def test_a_rejected_request_fails_with_the_body_the_server_gave(
     def refuse(request: Any, timeout: float = 0.0) -> _Response:
         if request.full_url.endswith("/cli_commands"):
             return _Response(json.dumps(LISTING).encode())
-        assert request.full_url.endswith("/cli/search")
+        assert request.full_url.endswith("/cli/echo")
         raise HTTPError(
             request.full_url, 400, "Bad Request", email.message.Message(), io.BytesIO(BODY)
         )
@@ -180,7 +191,7 @@ def test_a_rejected_request_fails_with_the_body_the_server_gave(
     monkeypatch.setattr(cli, "urlopen", refuse)
 
     with pytest.raises(SystemExit) as exit:
-        cli.main(["search", "工作区"])
+        cli.main(["echo", "工作区"])
 
     assert exit.value.code == cli.EXIT_FAILED
     assert "bad_query" in capsys.readouterr().err
@@ -193,7 +204,7 @@ def test_without_a_server_to_call_it_refuses_to_run(
     monkeypatch.delenv("OATH_CLI_SERVER", raising=False)
 
     with pytest.raises(SystemExit) as exit:
-        cli.main(["search", "工作区"])
+        cli.main(["echo", "工作区"])
 
     assert exit.value.code == cli.EXIT_USAGE
     assert "OATH_CLI_SERVER" in capsys.readouterr().err

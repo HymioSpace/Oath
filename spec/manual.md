@@ -193,26 +193,26 @@ uv run pytest -q tests/test_biz_server.py tests/test_biz_trace.py tests/test_tra
 
 ```
 GET /cli_commands
-{"commands":[{"name":"search","description":"Search the knowledge base.","parameters":{...}}]}
+{"commands":[{"name":"echo","description":"Echo the text back.","parameters":{...}}]}
 ```
 
 调用一条命令：**POST，参数放 JSON body**。命令是动作，GET 的缓存与重试语义不对。
 
 ```
-POST /cli/search
+POST /cli/echo
 Authorization: Bearer <credential>
 Content-Type: application/json
 
-{"query": "工作区", "limit": 5}
+{"text": "工作区"}
 ```
 
 `parameters` 是 JSON Schema，**属性声明的顺序就是位置参数的顺序**；缺失、拼错、
 类型不对的参数一律 400，body 不是对象或不是 JSON 也是 400，认不出的命令名 404，
 credential 不认 401。同一个 path 用 GET 打会回 405。命令自己抛错回 500，不带异常正文。
 
-命令表在 `biz/cli/cli_server.py`，加命令就是加一行；实现在 `extensions/cli/`。
-命令收到的 `user_context` 是该 session 当前的 kv（已裁掉过期的），框架不解释也不
-拿它判权限 —— 要鉴权就写在命令里。
+命令在 `<扩展目录>/cli/<名字>.py` 里声明（模块级 `COMMANDS`），启动时扫出来；路由固定在
+`biz/cli/cli_server.py`。加命令就是加一个文件，路由不用动。命令收到的 `user_context` 是
+该 session 当前的 kv（已裁掉过期的），框架不解释也不拿它判权限 —— 要鉴权就写在命令里。
 
 `oath-cli` 从 `OATH_CLI_SERVER` / `OATH_CLI_TOKEN` 读端点与 credential，由执行环境注入
 子进程；这两个变量没设就退出码 2（用法错），请求失败退出码 1，正文打到 stdout。

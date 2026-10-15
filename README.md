@@ -15,7 +15,8 @@ bash 执行环境与 CLI 代理已实现。
 | 目录 | 放什么 | 可缺省 |
 | --- | --- | --- |
 | [core/](core/) | 机制，含 JSONL 日志 | 否 |
-| `extensions/` | 业务 tool、业务 skill、额外 context 来源 | 是 |
+| `extensions/` | 业务 tool、业务 CLI 命令、业务 skill、额外 context 来源 | 是 |
+| `extensions-local/` | 同上，但只在本机、不进版本库 | 是 |
 | `biz/` | runtime 对外暴露的功能，不是进程 | 否 |
 | `spec/` | 设计文档 | 否 |
 
@@ -32,8 +33,8 @@ bash 执行环境与 CLI 代理已实现。
 | `core/trace/impl/` | trace 存储后端（v1 只有 JSONL） |
 | `core/shell/` | bash 工具与执行环境接口，宿主机实现在 `impl/` |
 | `biz/trace/` | 按 trace_id 取回一条 trace（`api.py`） |
-| `biz/cli/` | 业务 CLI 的命令表与路由 |
-| `extensions/cli/` | 业务 CLI 的实现，纯函数 |
+| `biz/cli/` | 业务 CLI 的路由与代理 |
+| `extensions/cli/` | 命令声明与纯函数实现 |
 
 数据类型和接口是跨仓库契约，进 `core/protocol/`，依赖方向单向指向它；编码只是
 手段，进 `core/utils/`。消费方从 `core.protocol.datatype`、
@@ -43,6 +44,8 @@ bash 执行环境与 CLI 代理已实现。
 command，HTTP（`bootstrap/biz_server.py`）供 biz 只读查询与 CLI 代理。
 
 「可缺省」指删掉它 runtime 照样启动，而且照样能恢复 —— 因为日志在 `core/` 里。
+
+`extensions/` 与 `extensions-local/` 走同一套规则（`tools/` `cli/` `skills/` 三个子目录），启动时按 `agent.extension_dirs` 的顺序扫；后者只在本机，不进版本库。
 
 ## 怎么跑
 

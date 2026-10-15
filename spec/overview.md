@@ -6,7 +6,8 @@ Supervisor、多机 HA 待实现。
 ## 定位
 
 Oath 是持久化、事件驱动的 agent runtime。core 负责执行语义、工具生命周期、context build
-和模型请求；extensions 提供业务工具、skill 和 context 来源；bootstrap 装配并连接客户端。
+和模型请求；extensions 提供业务工具、skill 和 context 来源，由扩展目录在启动时扫出来；
+bootstrap 装配并连接客户端。
 账号、订阅、渠道采集和 Kit 业务逻辑属于 Hymio。
 
 ## 运行链路
@@ -49,7 +50,7 @@ flowchart TD
 | core/outbound | 在线事件与客户端背压 |
 | bootstrap | 配置、认证装配、启动恢复；WebSocket server 与 biz server |
 | biz | runtime 对外暴露的功能：trace 的读模型与 CLI 命令的代理 |
-| extensions | 业务能力扩展 |
+| extensions | 业务能力扩展：`tools/` `cli/` `skills/`，目录在启动时扫 |
 
 biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是 `biz/trace/` 与
 `biz/cli/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
@@ -92,8 +93,7 @@ queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown�
 
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
 [Compaction](feature-compaction.md)、[Skill](feature-skill.md)、[Journal](feature-journal.md)、
-[Trace](feature-trace.md)、
-[Bash 与 CLI](feature-bash-cli.md)、
+[Trace](feature-trace.md)、[扩展目录](feature-extensions.md)、[Bash 与 CLI](feature-bash-cli.md)、
 [User Context](feature-user-context.md)、
 [客户端接入](manual.md) 与
 [场景推演](intake-cases.md)。

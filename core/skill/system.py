@@ -24,16 +24,18 @@ _LINE = "- {name}: {description}"
 class SkillSystem:
     """按名字找技能。
 
-    `skill_dir` 是项目自己的技能目录，进 system prompt 末尾的索引；`scan_dirs` 是
-    额外扫到的目录，只能被 `find` 搜到。两者都按给定顺序扫，名字撞车先到先赢 ——
-    顺序确定，胜者就不该取决于文件系统返回目录项的顺序。
+    `skill_dirs` 是进 system prompt 末尾索引的目录，`scan_dirs` 是只能被 `find` 搜到的
+    目录。两组各自按给定顺序扫，名字撞车先到先赢 —— 顺序确定，胜者就不该取决于文件
+    系统返回目录项的顺序。
     """
 
-    def __init__(self, skill_dir: Path, *, scan_dirs: Sequence[Path] = ()) -> None:
+    def __init__(self, skill_dirs: Sequence[Path], *, scan_dirs: Sequence[Path] = ()) -> None:
         self._injected: tuple[Skill, ...] = ()
         self._index: dict[str, Skill] = {}
         seen: set[Path] = set()
-        for path, injected in ((skill_dir, True), *((d, False) for d in scan_dirs)):
+        sources = [(d, True) for d in skill_dirs]
+        sources += [(d, False) for d in scan_dirs]
+        for path, injected in sources:
             for skill in _scan(path):
                 # 同一个文件被两条路径指到（符号链接）算一次：那不是撞名。
                 real = skill.path.resolve()

@@ -15,7 +15,8 @@ from core.queue import InMemoryEventQueue
 from core.tool import ToolRegistry
 from core.tool.impl import ThreadedToolSystem
 from core.utils.encoding import canonical_json, parse_timestamp
-from extensions.tools import ClockTool, TextTemplateTool
+from extensions.tools.clock import ClockTool
+from extensions.tools.text_template import TextTemplateTool
 from tests._support.tool_fixtures import RecordingSink, VerdictPolicy, wait_terminal
 
 SCOPE = Scope(user_id="u1", session_id="s1")

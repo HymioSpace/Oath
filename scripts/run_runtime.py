@@ -19,8 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bootstrap import Runtime, load_config
 from bootstrap.biz_server import serve as serve_http
+from bootstrap.extension_loader import ExtensionError
 from bootstrap.ws_server import serve as serve_ws
-from extensions.tools import demo_tools
 
 _log = logging.getLogger("oath.runtime")
 
@@ -32,7 +32,13 @@ class StartupFailure(Exception):
 async def _main(config_path: Path) -> None:
     config = load_config(config_path)
     loop = asyncio.get_running_loop()
-    runtime = Runtime(config, loop=loop, tools=demo_tools())
+    try:
+        runtime = Runtime(config, loop=loop)
+    except ExtensionError as error:
+        # 扩展装不起来的消息已经说清是哪个目录、哪个文件。摊在 traceback 里等于没有 ——
+        # 那条消息才是这一路要告诉使用者的东西。
+        _log.error("%s", error)
+        raise SystemExit(1) from None
 
     stop: asyncio.Future[None] = asyncio.Future()
     for sig in (signal.SIGINT, signal.SIGTERM):

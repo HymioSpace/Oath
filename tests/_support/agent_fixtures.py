@@ -37,6 +37,8 @@ DEFAULT_CONFIG = AgentConfig(
     system_prompt="你是助手",
     provider=ModelProviderConfig(model="m1", api_base="http://x", api_key_env="TEST_KEY"),
     skill_dir=Path("/nonexistent/skills"),
+    # 同理：默认的扩展目录指向仓库里真实存在的位置，测试不能读开发者本机的扩展。
+    extension_dirs=(),
 )
 
 
@@ -100,7 +102,7 @@ def agent_ctx(
         sink=sink or SilentSink(),
         tools=tools or NoTools(),
         context_manager=ContextManager(journal, config),
-        skills=skills or SkillSystem(config.skill_dir),
+        skills=skills or SkillSystem([config.skill_dir]),
         traces=traces or RecordingTraceStore(),
         config=config,
     )
