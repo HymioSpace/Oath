@@ -53,6 +53,9 @@ DerivedData/
 xcuserdata/
 .swiftpm/
 
+# 本地扩展目录。规则与 extensions/ 完全一样，只是不进版本库。
+/extensions-local/
+
 # Local runtime data (not source schemas or fixtures)
 /data/
 /runtime-data/

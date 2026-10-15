@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 from bootstrap.biz_server import build_app
 from bootstrap.runtime import Runtime
-from core.protocol.datatype.config import OathConfig
+from core.protocol.datatype.config import AgentConfig, OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span, SpanStatus, new_trace_id
 from core.protocol.interface.trace import TraceStore
@@ -48,6 +48,7 @@ def runtime(tmp_path: Path) -> Iterator[Runtime]:
         OathConfig(
             data_root=tmp_path,
             credentials={TOKEN: (SCOPE.user_id, SCOPE.session_id)},
+            agent=AgentConfig(extension_dirs=()),
         ),
         loop=asyncio.new_event_loop(),
         provider=ScriptedProvider(),

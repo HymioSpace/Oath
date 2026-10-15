@@ -7,6 +7,11 @@ journal 专属的那些。
 from __future__ import annotations
 
 from core.protocol.datatype.agent_state import AgentState
+from core.protocol.datatype.cli import (
+    COMMAND_NAME_PATTERN,
+    CliCommand,
+    is_valid_command_name,
+)
 from core.protocol.datatype.config import (
     AgentConfig,
     ModelProviderConfig,
@@ -99,6 +104,7 @@ __all__ = [
     "PERMISSION_REQUESTED_KEY_PREFIX",
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "MAX_INVOCATION_ID_LENGTH",
+    "COMMAND_NAME_PATTERN",
     "COMMAND_SCHEMAS",
     "MAX_COMMAND_ID_LENGTH",
     "PAYLOAD_SCHEMAS",
@@ -115,8 +121,9 @@ __all__ = [
     "AppendResult",
     "Batch",
     "BatchExecution",
-    "Cursor",
+    "CliCommand",
     "CloseReason",
+    "Cursor",
     "Command",
     "CommandType",
     "CursorKind",
@@ -175,6 +182,7 @@ __all__ = [
     "new_trace_id",
     "queue_of",
     "expired",
+    "is_valid_command_name",
     "is_valid_invocation_id",
     "is_valid_scope_id",
     "is_valid_tool_name",

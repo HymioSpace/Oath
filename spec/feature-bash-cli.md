@@ -9,7 +9,7 @@ agent 需要两样现在没有的能力：在自己指定的目录里跑一条�
 
 - **`bash` 是 core 工具**：命令在哪执行要能换（宿主机 → 沙箱），所以执行环境是接口。
   命令默认在 workspace 下跑，workspace 根目录来自配置，并写进 system prompt。
-- **`oath-cli` 是模型能用的命令行**：它在 bash 里执行，把 `oath-cli search foo` 代理到
+- **`oath-cli` 是模型能用的命令行**：它在 bash 里执行，把 `oath-cli echo foo` 代理到
   runtime 的 CLI server；业务逻辑在 `extensions/cli/`。
 
 不包含：沙箱执行环境；让 CLI 命令参与调度或权限扩展。
@@ -35,9 +35,9 @@ agent 需要两样现在没有的能力：在自己指定的目录里跑一条�
     T -->|command cwd timeout env| E[ExecutionEnvironment]
     E -->|宿主机: subprocess| P[shell]
     T -->|按 scope 现算的环境变量| X[子进程 env]
-    P -->|oath-cli search foo| C[CLI client]
-    C -->|POST /cli/search| S[biz server]
-    S -->|query 参数 + scope + user_context| H[extensions/cli 业务命令]
+    P -->|oath-cli echo foo| C[CLI client]
+    C -->|POST /cli/echo| S[biz server]
+    S -->|body 参数 + scope + user_context| H[extensions/cli 业务命令]
     H -->|JsonValue| S
     S -->|JsonObject| C
 ```
@@ -60,21 +60,21 @@ agent 需要两样现在没有的能力：在自己指定的目录里跑一条�
 里说明 workspace 是 `/repo/workspace`，于是调用：
 
 ```json
-{"name": "bash", "arguments": {"command": "oath-cli search docs", "cwd": "/repo/workspace"}}
+{"name": "bash", "arguments": {"command": "oath-cli echo docs", "cwd": "/repo/workspace"}}
 ```
 
 `HostEnvironment` 在 `/repo/workspace` 起进程，`PATH` 前面加了 `/repo/scripts`（找到
 `oath-cli`），环境里带上这次 scope 的 `OATH_CLI_SERVER` 与 `OATH_CLI_TOKEN`。`oath-cli`
-把它们原样放进请求头，发 `POST /cli/search`，body 是 `{"query": "docs"}`；server 解析出
-`u1/s1`，取出该
-scope 的 `user_context`，调 `extensions/cli` 里的 `search(query, scope=..., user_context=...)`。
+把它们原样放进请求头，发 `POST /cli/echo`，body 是 `{"text": "docs"}`；server 解析出
+`u1/s1`，取出该 scope 的 `user_context`，调 `extensions/cli` 里的
+`echo(text, scope=..., user_context=...)`。
 
 模型拿到的工具结果是一段 JSON：
 
 ```json
-{"command": "oath-cli search docs", "cwd": "/repo/workspace", "exit_code": 0,
+{"command": "oath-cli echo docs", "cwd": "/repo/workspace", "exit_code": 0,
  "duration_ms": 61.4, "timed_out": false, "truncated": false,
- "stdout": "{\n  \"query\": \"docs\",\n  \"hits\": []\n}", "stderr": ""}
+ "stdout": "{\n  \"text\": \"docs\"\n}", "stderr": ""}
 ```
 
 ## 4 接口与数据
@@ -128,17 +128,20 @@ system prompt 的这一段由 core 生成（`workspace_note`），跟在配置�
 ### 4.4 CLI 命令
 
 ```
-def search(query: str, *, limit: int = 3, scope: Scope, user_context: JsonObject) -> JsonValue
+def echo(text: str, *, scope: Scope, user_context: JsonObject) -> JsonValue
 ```
 
 参数声明在 `parameters`（一份 JSON Schema）里，**属性顺序就是位置参数顺序** ——
-`oath-cli search docs --limit=5` 里 `docs` 落在第一个属性上。同一份声明也用来校验服务端
-收到的 query string：缺失、拼错、类型换不过去一律 400。
+`oath-cli echo docs` 里 `docs` 落在第一个属性上。同一份声明也用来校验服务端收到的
+body：缺失、拼错、类型换不过去一律 400。
 
 `scope` 与 `user_context` 由框架传入，用不上的命令也照收 —— 签名一致，要鉴权的命令才能
-自己写在那儿，不必改框架。`CliCommand`（`name` / `description` / `parameters` / `handler`）定义在
-`biz/cli/cli_server.py`，那里同时是命令表 —— 加命令就是加一行，wiring 就该看得见。
-`extensions/cli/` 里的函数不知道自己被 HTTP 调过。
+自己写在那儿，不必改框架。`extensions/cli/` 里的函数不知道自己被 HTTP 调过。
+
+命令在 `<扩展目录>/cli/<名字>.py` 里声明，装配期扫出来进 `runtime.commands`；路由在
+`biz/cli/cli_server.py`，那张表从 runtime 读。**声明与路由分开**：路由是框架的事，所有命令
+一条路；声明是业务的事，放在业务自己的目录里。加命令不用改框架。
+细节见[扩展目录](feature-extensions.md)。
 
 `description` 与 `parameters` 用英文（随请求发给调用方的字面量），注释与文档用中文。
 
@@ -155,9 +158,9 @@ def search(query: str, *, limit: int = 3, scope: Scope, user_context: JsonObject
 | `core/protocol/interface/execution.py` | 执行环境接口与 `ExecutionResult` |
 | `core/shell/impl/host_environment.py` | 宿主机实现：subprocess、超时 kill、输出上限、PATH |
 | `core/shell/bash_tool.py` | `BashTool` 与 system prompt 的 workspace 段落 |
-| `biz/cli/cli_server.py` | 命令表、路由、参数校验、透传 |
+| `biz/cli/cli_server.py` | 路由、参数校验、透传；命令表从 `runtime.commands` 读 |
 | `biz/session_scope.py` | 从请求认出 scope；认证与参数错误的回法，观测查询与 CLI 共用 |
-| `extensions/cli/` | 业务命令，纯函数 |
+| `extensions/cli/` | 业务命令：纯函数 + 模块级 `COMMANDS` 声明 |
 
 命令走 `POST /cli/<name>`、参数是 JSON body，命令目录是 `GET /cli_commands`。**执行不用
 GET**：命令是动作，将来代理写操作时 GET 的缓存、预取与重试语义都不对。

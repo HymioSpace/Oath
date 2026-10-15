@@ -1,5 +1,5 @@
-"""业务 CLI 的命令表与路由。命令的实现在 `extensions/cli/`，两边互不 import 反向。"""
+"""业务 CLI 的路由与代理。命令本身在扩展目录里声明，两边互不 import 反向。"""
 
-from biz.cli.cli_server import COMMANDS, CliCommand, cli_routes
+from biz.cli.cli_server import CliCommand, cli_routes
 
-__all__ = ["COMMANDS", "CliCommand", "cli_routes"]
+__all__ = ["CliCommand", "cli_routes"]
