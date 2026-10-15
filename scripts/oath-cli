@@ -2,8 +2,8 @@
 """runtime 自己的命令行入口：在执行环境里把一条命令代理到 biz 的 CLI server。
 
     oath-cli                       列出可用命令
-    oath-cli search 工作区          位置参数按声明顺序填
-    oath-cli search 工作区 --limit=5
+    oath-cli echo 工作区            位置参数按声明顺序填
+    oath-cli echo 工作区 --upper
 
 端点与 credential 都从环境变量读（`OATH_CLI_SERVER` / `OATH_CLI_TOKEN`），由执行环境
 注入子进程。**这个脚本不做鉴权**：它把拿到的 credential 原样放进请求头，判断留给

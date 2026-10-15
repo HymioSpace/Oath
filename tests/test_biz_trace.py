@@ -14,7 +14,7 @@ import pytest
 
 from biz.trace import list_traces, query_trace
 from bootstrap.runtime import Runtime
-from core.protocol.datatype.config import OathConfig
+from core.protocol.datatype.config import AgentConfig, OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span, SpanStatus, new_trace_id
 from core.protocol.datatype.wire import Command, CommandType
@@ -50,6 +50,7 @@ def runtime(tmp_path: Path) -> Runtime:
         OathConfig(
             data_root=tmp_path,
             credentials={"synthetic-test-token": (SCOPE.user_id, SCOPE.session_id)},
+            agent=AgentConfig(extension_dirs=()),
         ),
         loop=asyncio.new_event_loop(),
         provider=ScriptedProvider(),

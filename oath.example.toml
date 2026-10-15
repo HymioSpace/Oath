@@ -22,8 +22,14 @@ system_prompt = """
 max_output_tokens = 2048
 temperature = 0.7
 
+# 扩展目录。每个目录下按同一套规则扫 tools/、cli/、skills/，顺序即优先级。
+# extensions-local/ 不进版本库 —— 把自己的工具、命令和技能放在那里，runtime 照常
+# 扫到，不用改任何代码。目录不存在不是错误；配成 [] 就是彻底关掉扩展扫描。
+extension_dirs = ["./extensions", "./extensions-local"]
+
 # 项目自己的技能目录。每个技能是里面的一个子目录，含 SKILL.md（YAML frontmatter
 # 加 markdown 正文）。frontmatter 里的 priority 越大越晚被丢掉；没写的按 0 算。
+# 各扩展目录下的 skills/ 也进索引，排在这个目录之后。
 skill_dir = "./extensions/skills"
 # 技能索引进 system prompt 的 token 预算。装不下就按优先级丢，丢掉的仍然能被
 # skill 工具搜到。
@@ -35,7 +41,7 @@ skill_scan_dirs = []
 # bash 工具的默认工作目录，也就是 system prompt 里那段工作区说明说的地方。
 # 命令默认在它下面跑；模型要访问别处就给 bash 传 cwd，不受这里限制。
 workspace_root = "./workspace"
-# oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli search ...`。
+# oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli echo ...`。
 # 与 workspace_root 一样在装配期解析成绝对路径，相对路径按 runtime 进程的 cwd 算，
 # 不是按命令的 cwd（命令默认在 workspace 下）。
 cli_bin_dir = "./scripts"

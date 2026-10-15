@@ -11,7 +11,7 @@ from websockets.asyncio.server import ServerConnection
 
 from bootstrap.runtime import Runtime
 from bootstrap.ws_server import _serve_connection
-from core.protocol.datatype.config import OathConfig
+from core.protocol.datatype.config import AgentConfig, OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command
 from core.protocol.error import WireProtocolError
@@ -76,7 +76,11 @@ def tool_system(runtime: Runtime) -> ThreadedToolSystem:
 async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> None:
     provider = ScriptedProvider([call_response("a")])
     runtime = Runtime(
-        OathConfig(data_root=tmp_path, credentials={"synthetic-test-token": ("u1", "s1")}),
+        OathConfig(
+            data_root=tmp_path,
+            credentials={"synthetic-test-token": ("u1", "s1")},
+            agent=AgentConfig(extension_dirs=()),
+        ),
         loop=asyncio.get_running_loop(),
         tools=[EchoTool("a")],
         policy=VerdictPolicy(default="ask"),
@@ -149,7 +153,11 @@ async def test_no_command_ack_when_durable_acceptance_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     runtime = Runtime(
-        OathConfig(data_root=tmp_path, credentials={"synthetic-test-token": ("u1", "s1")}),
+        OathConfig(
+            data_root=tmp_path,
+            credentials={"synthetic-test-token": ("u1", "s1")},
+            agent=AgentConfig(extension_dirs=()),
+        ),
         loop=asyncio.get_running_loop(),
         provider=ScriptedProvider(),
     )

@@ -29,6 +29,8 @@ WINDOW = 500
 
 def config(*, window: int = WINDOW, async_ratio: float = 0.4, sync: float = 0.9) -> AgentConfig:
     return AgentConfig(
+        # 测试不读开发者本机的扩展目录。
+        extension_dirs=(),
         context_window=window,
         compress_async_at_ratio=async_ratio,
         compress_sync_at_ratio=sync,

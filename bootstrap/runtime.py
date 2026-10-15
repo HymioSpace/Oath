@@ -9,6 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
+from bootstrap.extension_loader import load_extensions
 from core.agent import AgentBrain
 from core.buffer.journal_buffer import JournalEventBuffer
 from core.compaction import CompactionCoordinator, LlmCompactor
@@ -20,6 +21,7 @@ from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
 from core.outbound import OutboundHub, WsEventSink
+from core.protocol.datatype.cli import CliCommand
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.inbound import of_command
 from core.protocol.datatype.scope import Scope
@@ -131,8 +133,15 @@ class Runtime:
         policy: PermissionPolicy | None = None,
         provider: ModelProvider | None = None,
     ) -> None:
+        """`tools` 是装配应用显式注入的工具 —— **不是**第二条发现机制：注入进来的那个
+        实例可以带着配置好的依赖，扩展目录里的工具只能零参构造。扫出来的排在注入的前面，
+        撞名由注册表报出来，不用猜是谁先注册的。
+        """
         self.config = config
         self.authenticator = TokenAuthenticator(config.credentials)
+        # 扩展在装配期就装好：装不起来要在这里炸，不用等到模型真的去调它。
+        extensions = load_extensions(config.agent.extension_dirs)
+        self.commands: tuple[CliCommand, ...] = extensions.commands
 
         data_root = config.data_root
         # 关停要调 `close`，而 `Journal` 接口上没有这个方法 —— 那是具体实现的
@@ -144,7 +153,10 @@ class Runtime:
         store = RuntimeStore(self.journal)
         details = FileDetailStore(data_root / "details")
         self.traces: TraceStore = FileTraceStore(data_root / "traces")
-        skills = SkillSystem(config.agent.skill_dir, scan_dirs=config.agent.skill_scan_dirs)
+        skills = SkillSystem(
+            (config.agent.skill_dir, *extensions.skill_dirs),
+            scan_dirs=config.agent.skill_scan_dirs,
+        )
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))
         registry.register(SkillTool(skills))
@@ -152,6 +164,8 @@ class Runtime:
         # 都只认接口。
         shell = HostEnvironment(config.agent.workspace_root, bin_dirs=(config.agent.cli_bin_dir,))
         registry.register(BashTool(shell, _cli_env(config), root=config.agent.workspace_root))
+        for tool in extensions.tools:
+            registry.register(tool)
         for tool in tools or []:
             registry.register(tool)
         tool_system = ThreadedToolSystem(

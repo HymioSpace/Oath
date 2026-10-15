@@ -7,8 +7,9 @@
 **鉴权只有一处**：请求头里的 credential 换成 scope，之后 `user_context` 整份交给命令 ——
 框架不解释它、不拿它判权限，要不要用、怎么判是业务自己的事。
 
-命令表写在下面，加命令就是加一行。handler 的签名统一：参数按 `parameters` 声明的
-名字接，另有两个 keyword-only 参数由框架给：
+命令本身在扩展目录里声明（`COMMANDS`，见 `spec/feature-extensions.md`），启动时扫出来
+由 `Runtime` 持有。handler 的签名统一：参数按 `parameters` 声明的名字接，另有两个
+keyword-only 参数由框架给：
 
 - `scope`：这次调用属于哪个会话；
 - `user_context`：客户端随消息带来的 kv，已裁掉超过 24 小时没碰过的项。
@@ -19,8 +20,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
@@ -32,45 +32,11 @@ from starlette.routing import Route
 from biz.session_scope import BadQuery, Unauthorized, error_response, scope_of
 from bootstrap.runtime import Runtime
 from core.context.user_context import current, table_of
+from core.protocol.datatype import CliCommand
 from core.protocol.datatype.scope import Scope
 from core.utils.encoding import JsonObject, JsonValue
-from extensions.cli.search import search
 
 _log = logging.getLogger("oath.cli")
-
-
-@dataclass(frozen=True)
-class CliCommand:
-    """一条命令：它叫什么、要什么参数、谁来执行。
-
-    `parameters` 是一份 JSON Schema，**属性声明的顺序就是 `oath-cli` 的位置参数顺序**
-    —— `oath-cli search hymio` 里 `hymio` 落在 `properties` 的第一项上。同一份 Schema
-    也用来校验服务端收到的 body，不另立一份声明。
-    """
-
-    name: str
-    description: str
-    parameters: JsonObject
-    handler: Callable[..., JsonValue]
-
-
-#: 命令表。加命令就是往这里加一行 —— 路由、参数校验与调用都在这一条声明里看得见。
-COMMANDS: Final[tuple[CliCommand, ...]] = (
-    CliCommand(
-        name="search",
-        description="Search the knowledge base.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "关键词，空格分隔"},
-                "limit": {"type": "integer", "description": "最多返回几条，默认 3"},
-            },
-            "required": ["query"],
-            "additionalProperties": False,
-        },
-        handler=search,
-    ),
-)
 
 
 def cli_routes(runtime: Runtime) -> list[Route]:
@@ -80,12 +46,12 @@ def cli_routes(runtime: Runtime) -> list[Route]:
     path，不为 CLI 单开一个进程。
     """
     return [
-        Route("/cli_commands", _commands_endpoint, methods=["GET"]),
+        Route("/cli_commands", _commands_endpoint(runtime), methods=["GET"]),
         Route("/cli/{name}", _command_endpoint(runtime), methods=["POST"]),
     ]
 
 
-def _commands_endpoint(_: Request) -> Response:
+def _commands_endpoint(runtime: Runtime) -> Response:
     """`GET /cli_commands` —— 命令名、说明与参数。
 
     `oath-cli` 不带参数时打这条来列用法，所以参数声明要完整：位置参数的顺序就在
@@ -95,7 +61,7 @@ def _commands_endpoint(_: Request) -> Response:
         {
             "commands": [
                 {"name": c.name, "description": c.description, "parameters": c.parameters}
-                for c in COMMANDS
+                for c in runtime.commands
             ]
         }
     )
@@ -110,7 +76,7 @@ def _command_endpoint(runtime: Runtime) -> Callable[[Request], Any]:
 
     async def endpoint(request: Request) -> Response:
         name = request.path_params["name"]
-        command = _command(name)
+        command = _command(runtime, name)
         if command is None:
             # 命令名不认不该算认证失败：先看有没有这个能力，再谈是谁在问。
             return JSONResponse({"error": "unknown_command", "name": name}, status_code=404)
@@ -131,8 +97,8 @@ def _command_endpoint(runtime: Runtime) -> Callable[[Request], Any]:
     return endpoint
 
 
-def _command(name: str) -> CliCommand | None:
-    return next((c for c in COMMANDS if c.name == name), None)
+def _command(runtime: Runtime, name: str) -> CliCommand | None:
+    return next((c for c in runtime.commands if c.name == name), None)
 
 
 def _run(runtime: Runtime, command: CliCommand, scope: Scope, arguments: JsonObject) -> JsonValue:
@@ -199,4 +165,4 @@ def _validate(command: CliCommand, arguments: JsonObject) -> None:
         raise BadQuery(f"{path} {first.message}")
 
 
-__all__ = ["COMMANDS", "CliCommand", "cli_routes"]
+__all__ = ["CliCommand", "cli_routes"]

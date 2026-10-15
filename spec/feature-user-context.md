@@ -67,7 +67,7 @@ meta.user_context = {
 
 `env` 没被清掉 —— 这次没提它。模型两次都看不到这份 map。
 
-之后模型在 bash 里执行 `oath-cli search docs`，server 交给业务命令的是
+之后模型在 bash 里执行 `oath-cli echo docs`，server 交给业务命令的是
 `{"project": "oath", "env": "dev"}`：`project` 是这次的值，`env` 是两条消息之前写的、
 还没过期的那一份。
 

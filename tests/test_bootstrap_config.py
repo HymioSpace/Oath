@@ -211,10 +211,47 @@ def test_the_agent_skill_directories_are_discovered(tmp_path: Path) -> None:
 
 
 def test_the_skill_directory_falls_back_to_the_extensions_layout(tmp_path: Path) -> None:
-    assert load_config(_write(tmp_path, MINIMAL)).agent.skill_dir == Path("./extensions/skills")
-    assert load_config(
-        _write(tmp_path, MINIMAL + '\n[agent]\nskill_dir = "./skills"\n')
-    ).agent.skill_dir == Path("./skills")
+    assert load_config(_write(tmp_path, MINIMAL)).agent.skill_dir == (
+        Path.cwd() / "extensions" / "skills"
+    )
+    assert (
+        load_config(
+            _write(tmp_path, MINIMAL + '\n[agent]\nskill_dir = "./skills"\n')
+        ).agent.skill_dir
+        == Path.cwd() / "skills"
+    )
+
+
+# --------------------------------------------------------------------------
+# 扩展目录
+# --------------------------------------------------------------------------
+
+
+def test_the_extension_directories_default_to_the_committed_one_and_the_local_one(
+    tmp_path: Path,
+) -> None:
+    """两个目录用同一套规则；本地那个只是不进版本库。"""
+    config = load_config(_write(tmp_path, MINIMAL))
+
+    assert config.agent.extension_dirs == (
+        Path.cwd() / "extensions",
+        Path.cwd() / "extensions-local",
+    )
+
+
+def test_the_extension_directories_are_made_absolute_against_the_process(
+    tmp_path: Path,
+) -> None:
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(tmp_path)
+        config = from_dict({"agent": {"extension_dirs": ["./ext"]}})
+
+    assert config.agent.extension_dirs == (tmp_path / "ext",)
+
+
+def test_an_empty_extension_directory_list_turns_the_scan_off() -> None:
+    """空数组是有意义的取值 —— 关掉扩展扫描，不等于「没配」。"""
+    assert from_dict({"agent": {"extension_dirs": []}}).agent.extension_dirs == ()
 
 
 # --------------------------------------------------------------------------

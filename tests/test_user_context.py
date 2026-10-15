@@ -17,7 +17,7 @@ from bootstrap.runtime import Runtime
 from core.context.user_context import TTL_SECONDS, Table, current, merge
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
-from core.protocol.datatype.config import OathConfig
+from core.protocol.datatype.config import AgentConfig, OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command, CommandType
 from core.protocol.error import WireProtocolError
@@ -91,6 +91,7 @@ def runtime(tmp_path: Path) -> Generator[Runtime, None, None]:
         OathConfig(
             data_root=tmp_path,
             credentials={"synthetic-test-token": (SCOPE.user_id, SCOPE.session_id)},
+            agent=AgentConfig(extension_dirs=()),
         ),
         loop=asyncio.new_event_loop(),
         provider=ScriptedProvider(),
