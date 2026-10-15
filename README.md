@@ -70,3 +70,7 @@ uv run pytest tests/ -m ""     # 含 slow（真实进程 SIGKILL）
 
 Oath 服务于 [Hymio](https://github.com/HymioSpace/Hymio)。
 [Nostalgia](https://github.com/HymioSpace/Nostalgia) 通过扩展提供个人 context。
+
+## 许可证
+
+Oath 采用 [MIT License](LICENSE)。
