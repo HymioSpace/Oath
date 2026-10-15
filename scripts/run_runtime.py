@@ -18,8 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bootstrap import Runtime, load_config
-from bootstrap.http import serve as serve_http
-from bootstrap.ws import serve as serve_ws
+from bootstrap.biz_server import serve as serve_http
+from bootstrap.ws_server import serve as serve_ws
 from extensions.tools import demo_tools
 
 _log = logging.getLogger("oath.runtime")

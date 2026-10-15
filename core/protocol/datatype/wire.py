@@ -70,7 +70,7 @@ class CommandType:
 
     #: 绑定 session。`user_id` 由此处的 credential 决定。
     SESSION_OPEN: Final = "session.open"
-    #: 用户输入。会落成 `user.message`。
+    #: 用户输入。会落成 `user.message`。每条都带一份 `user_context`，按 scope 增量维护。
     USER_MESSAGE: Final = "user.message"
     #: 审批决定先可靠接纳，再经 system consumer 原子裁定。
     PERMISSION_DECIDE: Final = "permission.decide"
@@ -131,7 +131,7 @@ class CloseReason:
 #: 未知字段报错而不是忽略：客户端拼错 key 时静默忽略会得到「成功但什么也没发生」。
 COMMAND_SCHEMAS: Final[dict[str, PayloadSchema]] = {
     CommandType.SESSION_OPEN: PayloadSchema(required=frozenset({"credential"})),
-    CommandType.USER_MESSAGE: PayloadSchema(required=frozenset({"content"})),
+    CommandType.USER_MESSAGE: PayloadSchema(required=frozenset({"content", "user_context"})),
     CommandType.PERMISSION_DECIDE: PayloadSchema(
         required=frozenset({"invocation_id", "status"}),
         optional=frozenset({"decided_by", "reason"}),

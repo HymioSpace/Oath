@@ -18,7 +18,7 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from bootstrap.http import build_app
+from bootstrap.biz_server import build_app
 from bootstrap.runtime import Runtime
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -33,11 +34,12 @@ from core.protocol.interface.tool import Tool
 from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
+from core.shell import BashTool, HostEnvironment
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 from core.trace.impl import FileTraceStore
-from core.utils.encoding import JsonObject
+from core.utils.encoding import JsonObject, JsonValue
 
 #: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
 _WORKER_JOIN_TIMEOUT: Final = 2.0
@@ -72,6 +74,40 @@ class AllowAllPolicy(PermissionPolicy):
 
     def check(self, scope: Scope, tool: str, arguments: JsonObject) -> str:
         return "allow"
+
+
+def _check_user_context(value: JsonValue) -> None:
+    """`user_context` 必须是 key 非空的 object。
+
+    值不额外限制：这一层不解释内容，它只保证「这是个 kv」，值是什么由业务命令负责。空 key
+    是拼错字段名的典型症状，放进来会让后面覆盖时看不出是哪一条。
+    """
+    if not isinstance(value, dict):
+        raise WireProtocolError("user_context 必须是对象", code="bad_payload")
+    if any(not isinstance(key, str) or not key for key in value):
+        raise WireProtocolError("user_context 的 key 必须是非空字符串", code="bad_payload")
+
+
+def _cli_env(config: OathConfig) -> Callable[[Scope], Mapping[str, str]]:
+    """按 scope 现算 CLI 客户端要用的环境变量。
+
+    credential 从配置的映射反查。认不出这个 scope 就给空 token：命令照跑，只是 CLI
+    请求会被 server 拒掉 —— 模型从 exit code 与 stderr 上看得见这件事。生产认证需要能
+    按 scope 出 credential。
+    """
+    # 监听地址不能直接给客户端用：0.0.0.0 是绑定用的通配，不是能连的地址。
+    host = config.server.host
+    reachable = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
+    server = f"http://{reachable}:{config.server.http_port}"
+    tokens = {identity: token for token, identity in config.credentials.items()}
+
+    def env_for(scope: Scope) -> Mapping[str, str]:
+        return {
+            "OATH_CLI_SERVER": server,
+            "OATH_CLI_TOKEN": tokens.get((scope.user_id, scope.session_id), ""),
+        }
+
+    return env_for
 
 
 @dataclass
@@ -112,6 +148,10 @@ class Runtime:
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))
         registry.register(SkillTool(skills))
+        # 执行环境选的是宿主机实现。沙箱要换掉的是这一个类 —— bash 工具与 CLI server
+        # 都只认接口。
+        shell = HostEnvironment(config.agent.workspace_root, bin_dirs=(config.agent.cli_bin_dir,))
+        registry.register(BashTool(shell, _cli_env(config), root=config.agent.workspace_root))
         for tool in tools or []:
             registry.register(tool)
         tool_system = ThreadedToolSystem(
@@ -184,10 +224,10 @@ class Runtime:
                 command.session_id,
                 {**command.payload, "decided_by": scope.user_id},
             )
-        if command.type == CommandType.USER_MESSAGE and not isinstance(
-            command.payload.get("content"), str
-        ):
-            raise WireProtocolError("content 必须是文本", code="bad_payload")
+        if command.type == CommandType.USER_MESSAGE:
+            if not isinstance(command.payload.get("content"), str):
+                raise WireProtocolError("content 必须是文本", code="bad_payload")
+            _check_user_context(command.payload.get("user_context"))
         inbound = of_command(command)
         if inbound is not None:
             self.buffers.accept(scope, inbound)

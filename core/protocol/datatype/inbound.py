@@ -88,10 +88,15 @@ def of_command(command: Command) -> Inbound | None:
     if command.type in CommandType.QUERY:
         return None
     if command.type == CommandType.USER_MESSAGE:
+        # `user_context` 照原样带下去：覆盖式的维护由 consumer 做，这里不裁剪也不解释。
+        context = command.payload.get("user_context")
         return Inbound(
             kind=InboundKind.USER,
             source=command.type,
-            payload={"content": str(command.payload.get("content", ""))},
+            payload={
+                "content": str(command.payload.get("content", "")),
+                "user_context": dict(context) if isinstance(context, dict) else {},
+            },
             source_id=command.id,
             occur_dt=utc_now_iso(),
         )

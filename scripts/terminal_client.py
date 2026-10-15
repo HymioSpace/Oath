@@ -20,6 +20,7 @@ import websockets
 from websockets import ClientConnection
 
 from core.protocol.datatype.wire import Command, CommandType, FrameType
+from core.utils.encoding import JsonValue
 
 
 class _DeltaLine:
@@ -118,7 +119,7 @@ async def _read_loop(websocket: ClientConnection) -> None:
         _render(_as_text(raw))
 
 
-async def _run(url: str, token: str) -> None:
+async def _run(url: str, token: str, context: dict[str, JsonValue]) -> None:
     async with websockets.connect(url, max_size=1 << 20) as websocket:
         opener = Command(
             id="c-open",
@@ -147,7 +148,7 @@ async def _run(url: str, token: str) -> None:
                 id=_command_id(),
                 type=CommandType.USER_MESSAGE,
                 session_id=session_id,
-                payload={"content": line},
+                payload={"content": line, "user_context": context},
             )
             await websocket.send(json.dumps(command.to_json(), ensure_ascii=False))
         reader.cancel()
@@ -157,9 +158,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Oath 终端客户端")
     parser.add_argument("--url", default="ws://127.0.0.1:8765")
     parser.add_argument("--token", default="demo-token")
+    parser.add_argument(
+        "--context",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="随消息带上的 user_context，可重复",
+    )
     args = parser.parse_args()
+    context: dict[str, JsonValue] = {
+        key: value for key, value in (pair.split("=", 1) for pair in args.context)
+    }
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(_run(args.url, args.token))
+        asyncio.run(_run(args.url, args.token, context))
 
 
 if __name__ == "__main__":

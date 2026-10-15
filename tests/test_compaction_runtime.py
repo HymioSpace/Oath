@@ -158,7 +158,8 @@ def test_the_compressed_view_is_what_the_model_sees(tmp_path: Path) -> None:
         harness.start().send("继续")
 
         request = harness.provider.wait(1)
-        assert [m.content for m in request.messages] == [
+        # 压缩动的是对话；system prompt（工作区段落）不在其中。
+        assert [m.content for m in request.messages if m.role != "system"] == [
             "<context_summary>摘要</context_summary>",
             "字" * 60,
             "继续",

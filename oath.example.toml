@@ -8,8 +8,8 @@ data_root = "./data"
 [server]
 host = "127.0.0.1"
 port = 8765
-# biz server 的端口。整个 biz 一个端口，每条查询是其中一个 path（当前是 /traces）。
-# 与 WebSocket 分开：查询不是 command，不占会话连接。
+# biz server 的端口。整个 biz 一个端口，每条能力是其中一个 path（/list_traces、
+# /query_trace、/cli/<命令名>）。与 WebSocket 分开：查询不是 command，不占会话连接。
 http_port = 8766
 # 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
 send_queue_size = 256
@@ -31,6 +31,14 @@ skill_index_tokens = 1024
 # 额外扫的技能目录。配置里的排在 ~/.claude/skills、~/.codex/skills 等已装好的
 # coding agent 技能目录之后 —— 同名时先到先赢。
 skill_scan_dirs = []
+
+# bash 工具的默认工作目录，也就是 system prompt 里那段工作区说明说的地方。
+# 命令默认在它下面跑；模型要访问别处就给 bash 传 cwd，不受这里限制。
+workspace_root = "./workspace"
+# oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli search ...`。
+# 与 workspace_root 一样在装配期解析成绝对路径，相对路径按 runtime 进程的 cwd 算，
+# 不是按命令的 cwd（命令默认在 workspace 下）。
+cli_bin_dir = "./scripts"
 
 [agent.provider]
 model = "gpt-4o-mini"

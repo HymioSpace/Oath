@@ -10,7 +10,7 @@ import pytest
 from websockets.asyncio.server import ServerConnection
 
 from bootstrap.runtime import Runtime
-from bootstrap.ws import _serve_connection
+from bootstrap.ws_server import _serve_connection
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command
@@ -105,7 +105,7 @@ async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> Non
                 assert "user:user-1" in RuntimeStore(runtime.journal).read(scope)["inputs"]
 
         first.on_send = check_ack
-        await first.command("user.message", "user-1", {"content": "do it"})
+        await first.command("user.message", "user-1", {"content": "do it", "user_context": {}})
         await first.wait_for(lambda f: f["type"] == "ack" and f["id"] == "user-1")
         await asyncio.to_thread(until, lambda: tool_system(runtime).permissions.pending(scope))
         await first.close()
@@ -163,7 +163,7 @@ async def test_no_command_ack_when_durable_acceptance_fails(
             raise OSError("disk full")
 
         monkeypatch.setattr(runtime.buffers, "accept", fail)
-        await connection.command("user.message", "u", {"content": "hello"})
+        await connection.command("user.message", "u", {"content": "hello", "user_context": {}})
         await connection.wait_for(lambda f: f["type"] == "error" and f["id"] == "u")
         assert not any(f["type"] == "ack" and f["id"] == "u" for f in connection.frames)
         assert not runtime.ctx.store.read(Scope("u1", "s1"))["inputs"]

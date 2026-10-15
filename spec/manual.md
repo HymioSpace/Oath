@@ -23,7 +23,7 @@ credential 映射仅用于演示；部署由 Hymio 提供身份与权限策略�
 
 ```json
 {"v":1,"type":"ack","id":"open-1","session_id":"default"}
-{"v":1,"type":"user.message","id":"user-1","session_id":"default","payload":{"content":"帮我查天气"}}
+{"v":1,"type":"user.message","id":"user-1","session_id":"default","payload":{"content":"帮我查天气","user_context":{"project":"hymio"}}}
 ```
 
 user_id 由服务端认证决定。credential 不认则 close unauthorized，不回落为匿名用户。
@@ -33,7 +33,7 @@ user_id 由服务端认证决定。credential 不认则 close unauthorized，不
 | type | payload | 回应 |
 | --- | --- | --- |
 | session.open | credential | 绑定 ACK |
-| user.message | content: string | 可靠接纳 ACK；后续事件异步到达 |
+| user.message | content: string，user_context: object（见下） | 可靠接纳 ACK；后续事件异步到达 |
 | permission.decide | invocation_id, status: approved / denied, reason? | 可靠接纳 ACK |
 | run.cancel | run_id?, reason? | 可靠接纳 ACK；未指定 run_id 时绑定处理时的当前 run |
 | step.retry | 空对象 | 可靠接纳 ACK；重试失败或暂停的原 step |
@@ -44,6 +44,12 @@ ACK 表示已保存命令，不代表模型已回答、权限已生效或工具�
 命令 ID 使用唯一字符串；重发同一命令复用原 ID 和内容。同 ID 不同内容报错。
 客户端不得替换审批对应的工具 / 参数；decided_by 即使携带也由服务端认证身份覆盖。
 session.status 不产生输入、不改任何状态，可以随时重发。trace 查询不在 WebSocket 上，走 [§4 Trace 查询](#4-trace-查询) 的 HTTP。
+
+`user_context` 是这一条消息带来的会话上下文，**必填**，没有新事实就传空对象
+`{}`。它是一张 kv：同名 key 直接覆盖并更新时间，超过 24 小时没人再碰的作废，
+服务端按 session 维护，不会带进模型上下文。形状不是对象、key 为空字符串时整帧拒掉
+（`bad_payload`）。这份 kv 唯一的去处是 [§5 CLI 代理](#5-cli-代理) 里的业务命令，
+要不要用它、怎么判权限由命令自己决定。
 
 ## 3 审批与重连
 
@@ -175,10 +181,43 @@ credential 不认回 `401 {"error":"unauthorized"}`，响应里不回显凭据�
 用替身模型和文件后端，不连真实模型、不起 socket：
 
 ```bash
-uv run pytest -q tests/test_biz_http.py tests/test_biz_trace.py tests/test_trace_store.py tests/test_trace_brain.py
+uv run pytest -q tests/test_biz_server.py tests/test_biz_trace.py tests/test_trace_store.py tests/test_trace_brain.py
 ```
 
-## 5 Event
+## 5 CLI 代理
+
+业务命令挂在 biz server 上，与 trace 查询同一个端口、同一套 credential。模型在 bash 里
+执行 `oath-cli <命令名> [参数...] [--key=value]` 调它们。
+
+列出可用命令（`oath-cli` 不带参数时打的就是这条）：
+
+```
+GET /cli_commands
+{"commands":[{"name":"search","description":"Search the knowledge base.","parameters":{...}}]}
+```
+
+调用一条命令：**POST，参数放 JSON body**。命令是动作，GET 的缓存与重试语义不对。
+
+```
+POST /cli/search
+Authorization: Bearer <credential>
+Content-Type: application/json
+
+{"query": "工作区", "limit": 5}
+```
+
+`parameters` 是 JSON Schema，**属性声明的顺序就是位置参数的顺序**；缺失、拼错、
+类型不对的参数一律 400，body 不是对象或不是 JSON 也是 400，认不出的命令名 404，
+credential 不认 401。同一个 path 用 GET 打会回 405。命令自己抛错回 500，不带异常正文。
+
+命令表在 `biz/cli/cli_server.py`，加命令就是加一行；实现在 `extensions/cli/`。
+命令收到的 `user_context` 是该 session 当前的 kv（已裁掉过期的），框架不解释也不
+拿它判权限 —— 要鉴权就写在命令里。
+
+`oath-cli` 从 `OATH_CLI_SERVER` / `OATH_CLI_TOKEN` 读端点与 credential，由执行环境注入
+子进程；这两个变量没设就退出码 2（用法错），请求失败退出码 1，正文打到 stdout。
+
+## 6 Event
 
 事件信封：
 
@@ -206,7 +245,7 @@ assistant.delta 的 channel 为 content / reasoning，只用于草稿展示；�
 用完整 assistant.message 或重连查询替换草稿。tool.terminal 通知可重复，按 event_id 去重。
 在线事件不补发，occur_dt 不用于消费排序。持久化事务日志是 runtime.commit，客户端不需要解析它。
 
-## 6 错误与连接
+## 7 错误与连接
 
 error 带 id、code、message。帧结构 / 协议版本不合法时断开；已解析 command 的业务失败保留连接。
 常见 code：bad_frame、bad_payload、not_bound、session_mismatch、already_bound、not_found、internal_error。
@@ -214,7 +253,7 @@ error 带 id、code、message。帧结构 / 协议版本不合法时断开；已
 close reason：unauthorized、session_replaced、slow_consumer、protocol_error。
 慢连接发送队列满会断开，重连应退避并查询状态。idle_timeout 尚未启用。
 
-## 7 压缩事件与端到端验证
+## 8 压缩事件与端到端验证
 
 `context.compaction` 走同一条 WebSocket，下行 payload 为：
 

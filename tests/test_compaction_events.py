@@ -93,7 +93,9 @@ async def test_runtime_pushes_compaction_over_client_channel(tmp_path: Path) -> 
             "compress",
             return_value=[{"role": "user", "content": "摘要"}],
         ):
-            await connection.command("user.message", "u", {"content": "continue"})
+            await connection.command(
+                "user.message", "u", {"content": "continue", "user_context": {}}
+            )
             frame = await connection.wait_for(
                 lambda f: (
                     f.get("event_type") == "context.compaction"

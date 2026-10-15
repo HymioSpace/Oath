@@ -42,6 +42,17 @@ def _expand(value: Any) -> Any:
     return value
 
 
+def _absolute(value: Any, default: Path) -> Path:
+    """目录字段在装配期变成绝对路径。
+
+    **相对路径按 runtime 进程的工作目录算，不是按命令的工作目录。** 这两个 cwd 不是
+    一回事：bash 命令默认落在 workspace 下，`cli_bin_dir` 若照原样进 `PATH`，命令就会
+    去找 `workspace/scripts/oath-cli`。
+    """
+    path = Path(str(value)).expanduser() if value else default
+    return path if path.is_absolute() else Path.cwd() / path
+
+
 def load_config(path: str | Path) -> OathConfig:
     """读一份配置。文件不存在直接报错 —— 起不来就说清楚为什么。"""
     file = Path(path)
@@ -74,10 +85,22 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
     agent_fields = {
         k: v
         for k, v in agent_raw.items()
-        if k not in ("system_prompt", "provider", "skill_dir", "skill_scan_dirs")
+        if k
+        not in (
+            "system_prompt",
+            "provider",
+            "skill_dir",
+            "skill_scan_dirs",
+            "workspace_root",
+            "cli_bin_dir",
+        )
     }
     defaults = AgentConfig()
     agent_fields["skill_dir"] = Path(agent_raw.get("skill_dir", defaults.skill_dir))
+    agent_fields["workspace_root"] = _absolute(
+        agent_raw.get("workspace_root"), defaults.workspace_root
+    )
+    agent_fields["cli_bin_dir"] = _absolute(agent_raw.get("cli_bin_dir"), defaults.cli_bin_dir)
     agent_fields["skill_scan_dirs"] = (
         Path.cwd() / ".claude" / "skills",
         *(Path.home() / name for name in _AGENT_SKILL_DIRS),
