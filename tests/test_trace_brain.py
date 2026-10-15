@@ -39,15 +39,33 @@ def _terminal(harness: Harness) -> bool:
 
 
 def _settled(harness: Harness) -> bool:
-    """认领过 step、并且没有 step 还在飞。"""
+    """认领过 step、没有 step 还在飞。"""
     steps = harness.state()["steps"]
     return bool(steps) and harness.state()["meta"].get("active_step") is None
 
 
-def run_loop(harness: Harness) -> None:
+def _spans_written(harness: Harness) -> bool:
+    """每个 step 的终态 span 都写出来了。
+
+    `active_step` 归零比终态 span 写出早一步：`step.completed` 事务里清的，
+    `_close_step` 在事务之后。只等 `_settled` 会读到认领时那条 —— 读到哪一条取决于
+    Brain 线程跑到哪，这个 race 落在测试里。
+    """
+    closed = {
+        span.span_id
+        for span in store(harness).by_name(harness.scope, "invoke_agent")
+        if span.end_unix_nano is not None
+    }
+    return len(closed) == len(harness.state()["steps"])
+
+
+def run_loop(harness: Harness, *, traced: bool = True) -> None:
+    """跑完一次循环。`traced=False` 用于 store 写不进去的用例 —— 那时没有 span 可等。"""
     harness.start().send()
     harness.provider.wait(2)
-    until(lambda: harness.state()["meta"].get("active_step") is None)
+    until(lambda: _settled(harness))
+    if traced:
+        until(lambda: _spans_written(harness))
 
 
 def store(harness: Harness) -> RecordingTraceStore:
@@ -211,13 +229,17 @@ def test_a_user_message_claiming_a_tool_result_keeps_the_causal_link(tmp_path: P
         harness.provider.wait(2)
         until(lambda: harness.state()["meta"].get("active_step") is None)
 
-        [mixed] = [
-            span
-            for trace_id in harness.traces.trace_ids(harness.scope)
-            for span in harness.traces.spans(harness.scope, trace_id)
-            if span.name == "invoke_agent"
-            and {"oath.input.user", "oath.input.tool"} <= {event.name for event in span.events}
-        ]
+        def mixed_span() -> list[Span]:
+            return [
+                span
+                for trace_id in harness.traces.trace_ids(harness.scope)
+                for span in harness.traces.spans(harness.scope, trace_id)
+                if span.name == "invoke_agent"
+                and {"oath.input.user", "oath.input.tool"} <= {event.name for event in span.events}
+            ]
+
+        # 输入事件在认领时就写出来了，但要等终态 span 覆盖过来才带得上 link。
+        [mixed] = until(mixed_span)
         # 用户消息开了新 trace，link 指回上一条 trace 里产出工具结果的那个 step。
         assert mixed.trace_id != harness.state()["steps"][source_step]["trace_id"]
         [link] = mixed.links
@@ -246,7 +268,7 @@ def test_ttft_and_tpot_need_a_streamed_answer(tmp_path: Path) -> None:
         harness.provider.wait(1)
         until(lambda: harness.state()["meta"].get("active_step") is None)
 
-        [llm] = llm_spans(harness)
+        [llm] = until(lambda: llm_spans(harness))
         assert OATH_LLM_TTFT_MS not in llm.attributes
         assert OATH_LLM_TPOT_MS not in llm.attributes
 
@@ -279,7 +301,7 @@ def test_a_failed_model_call_is_recorded_as_an_error_span(tmp_path: Path) -> Non
 def test_a_broken_trace_store_does_not_stop_inference(tmp_path: Path) -> None:
     traces = BrokenTraceStore()
     with Harness(tmp_path, tools=[EchoTool("a")], responses=LOOP, traces=traces) as harness:
-        run_loop(harness)
+        run_loop(harness, traced=False)
 
         assert harness.provider.wait(2).messages[-1].role == "tool"
         assert harness.state()["conversation"]["messages"][-1]["content"] == "好了"
