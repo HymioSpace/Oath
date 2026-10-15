@@ -127,7 +127,13 @@ def test_a_trace_with_no_finished_span_has_no_elapsed_time(runtime: Runtime) -> 
 def test_the_status_keeps_the_trace_id_after_the_step_is_over(runtime: Runtime) -> None:
     """刚跑完的那一轮要还能查到 —— 只从 active step 取的话，step 一结束就断了。"""
     runtime.submit(
-        Command("u1", CommandType.USER_MESSAGE, SCOPE.session_id, {"content": "你好"}), SCOPE
+        Command(
+            "u1",
+            CommandType.USER_MESSAGE,
+            SCOPE.session_id,
+            {"content": "你好", "user_context": {}},
+        ),
+        SCOPE,
     )
     until(lambda: runtime.status(SCOPE)["trace_id"] is not None)
     until(lambda: runtime.status(SCOPE)["step_id"] is None)

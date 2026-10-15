@@ -1,6 +1,7 @@
 # Oath 整体架构
 
-状态：单进程运行链路、三级压缩、技能索引与 trace 已实现；Supervisor、多机 HA 待实现。
+状态：单进程运行链路、三级压缩、技能索引、trace、bash 执行环境与 CLI 代理已实现；
+Supervisor、多机 HA 待实现。
 
 ## 定位
 
@@ -41,18 +42,19 @@ flowchart TD
 | core/compaction | 历史压缩：切点、阈值、产物生效 |
 | core/detail | 超阈值结果的全文存储、截断与 detail_read |
 | core/skill | 技能索引、优先级预算与 skill 工具 |
+| core/shell | bash 工具与执行环境接口；宿主机实现、沙箱实现待补 |
 | core/tool | 注册、完整批次、权限裁定、执行资格、deadline 与真实终态 |
 | core/llm | provider adapter，当前支持 OpenAI-compatible API |
 | core/trace | 按 scope 记录 ReAct 循环的 span，OpenTelemetry 形状 |
 | core/outbound | 在线事件与客户端背压 |
 | bootstrap | 配置、认证装配、启动恢复；WebSocket server 与 biz server |
-| biz | runtime 对外暴露的功能，当前只有 trace 的读模型 |
+| biz | runtime 对外暴露的功能：trace 的读模型与 CLI 命令的代理 |
 | extensions | 业务能力扩展 |
 
-biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是
-`biz/trace/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
-一个 biz server 供查询。整个 biz 一个端口，每条查询是其中一个 path。
-依赖单向 `biz` → `bootstrap` → `core`。
+biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是 `biz/trace/` 与
+`biz/cli/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
+一个 biz server 供查询与 CLI 代理。整个 biz 一个端口，每条能力是其中一个 path。
+依赖单向 `bootstrap` → `biz` → `core`。
 
 core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。
 Journal 是事实来源，队列和内存状态可重建；各模块共用 RuntimeStore，不另建审批 / buffer 持久化文件。
@@ -91,5 +93,7 @@ queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown�
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
 [Compaction](feature-compaction.md)、[Skill](feature-skill.md)、[Journal](feature-journal.md)、
 [Trace](feature-trace.md)、
+[Bash 与 CLI](feature-bash-cli.md)、
+[User Context](feature-user-context.md)、
 [客户端接入](manual.md) 与
 [场景推演](intake-cases.md)。

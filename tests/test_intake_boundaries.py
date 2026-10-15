@@ -40,7 +40,8 @@ def test_concurrent_wakes_claim_all_buffers_once(tmp_path: Path) -> None:
         h.brain.wake(h.scope, "stale", (input_id(user), input_id(system)))
         assert len(h.state()["steps"]) == 1
         assert all(i["phase"] == "done" for i in h.state()["inputs"].values())
-        assert [m.role for m in h.provider.requests[0].messages] == ["user", "user"]
+        first = h.provider.requests[0].messages
+        assert [m.role for m in first if m.role != "system"] == ["user", "user"]
 
 
 def test_approval_expires_without_another_user_message(tmp_path: Path) -> None:

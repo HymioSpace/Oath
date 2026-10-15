@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.llm import LlmRequest, LlmResponse, LlmToolCall
+from core.shell import workspace_note
 from tests._support.intake_fixtures import Harness, until
 from tests.test_skill_index import write
 
@@ -39,11 +40,14 @@ def test_the_index_lands_at_the_end_of_the_system_prompt(tmp_path: Path) -> None
     assert "theirs" not in prompt
 
 
-def test_an_empty_index_leaves_the_system_prompt_untouched(tmp_path: Path) -> None:
+def test_an_empty_index_adds_nothing_after_the_workspace_note(tmp_path: Path) -> None:
+    """索引为空时不留空段 —— prompt 是配置那句 + 工作区段落，到此为止。"""
     with Harness(tmp_path, config=CONFIG) as harness:
         harness.start().send()
 
-        assert system_prompt_of(harness.provider.wait(1)) == "你是助手"
+        assert system_prompt_of(harness.provider.wait(1)) == (
+            f"你是助手\n\n{workspace_note(CONFIG.workspace_root)}"
+        )
 
 
 def test_a_scanned_skill_is_reachable_by_name_but_never_stated_up_front(tmp_path: Path) -> None:

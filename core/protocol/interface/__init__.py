@@ -7,6 +7,7 @@ from core.protocol.interface.buffer import EventBuffer
 from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.detail import DetailStore
 from core.protocol.interface.event import AgentEventSink
+from core.protocol.interface.execution import ExecutionEnvironment, ExecutionResult
 from core.protocol.interface.journal import Journal
 from core.protocol.interface.llm import DeltaChannel, DeltaSink, ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
@@ -25,6 +26,8 @@ __all__ = [
     "DetailStore",
     "EventBuffer",
     "EventQueue",
+    "ExecutionEnvironment",
+    "ExecutionResult",
     "Journal",
     "ModelProvider",
     "OutboundTransport",

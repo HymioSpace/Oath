@@ -7,6 +7,7 @@ import threading
 import time
 
 from core.buffer.journal_buffer import JournalEventBuffer, buffered, input_id
+from core.context.user_context import merge, table_of
 from core.journal.runtime_store import State
 from core.protocol.datatype import Scope
 from core.protocol.datatype.inbound import Inbound
@@ -63,6 +64,23 @@ class QueueConsumer:
 
 class UserConsumer(QueueConsumer):
     queue_name = QueueName.USER
+
+    def apply(self, scope: Scope, item: Inbound) -> None:
+        """把这条消息带来的 user_context 覆盖进 scope 状态。
+
+        维护放在 user 队列的 consumer 里，而不是 Brain 认领 step 时：认领可能因为输入不
+        齐被推迟，而上下文是消息本身就带着的事实，不该等模型那一轮。
+        """
+        incoming = item.payload.get("user_context")
+        # 空的不写：没有新事实就别动表 —— 过期项在读的时候本来就裁掉了。
+        if not isinstance(incoming, dict) or not incoming:
+            return
+
+        def overlay(state: State) -> bool:
+            state["meta"]["user_context"] = merge(table_of(state), incoming, now=time.time())
+            return True
+
+        self.ctx.store.transact(scope, "user_context.updated", overlay)
 
     def evaluate(self, scope: Scope) -> float:
         entries = buffered(self.ctx.store.read(scope), self.queue_name)

@@ -30,7 +30,7 @@ def _frame(**over: JsonValue) -> JsonObject:
         "type": CommandType.USER_MESSAGE,
         "id": "c-1",
         "session_id": "s1",
-        "payload": {"content": "hello"},
+        "payload": {"content": "hello", "user_context": {}},
     }
     frame.update(over)
     return frame
@@ -125,6 +125,8 @@ def test_event_frame_carries_no_cursor(scope: Scope) -> None:
         (_frame(type="user.shout"), "unknown_command"),
         (_frame(session_id=None), "bad_frame"),
         (_frame(payload={"content": "hi", "extra": 1}), "bad_payload"),
+        # 老客户端不带 user_context —— 拒掉，不做「有就给、没有就当空」的宽容接纳。
+        (_frame(payload={"content": "hi"}), "bad_payload"),
         (_frame(payload={}), "bad_payload"),
         (_frame(payload="hi"), "bad_payload"),
     ],

@@ -31,6 +31,7 @@ from core.protocol.datatype.trace import (
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
+from core.shell import workspace_note
 from core.trace.attributes import (
     BODY,
     GEN_AI_OPERATION_NAME,
@@ -140,13 +141,16 @@ class AgentBrain(Brain):
         self.resume(scope)
 
     def _system_prompt(self) -> str:
-        """system prompt + 技能索引。索引放末尾 —— 模型先读规则，再读可选能力。
+        """system prompt + 工作区 + 技能索引。模型先读规则，再知道在哪干活、有什么可选能力。
 
-        索引是启动时的快照，每一步的请求照常被冻结：技能变了也要等下次启动。
+        两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
         """
-        index = self._ctx.skills.list(self._ctx.config.skill_index_tokens)
-        prompt = self._ctx.config.system_prompt
-        return f"{prompt}\n\n{index}" if index else prompt
+        parts = [
+            self._ctx.config.system_prompt,
+            workspace_note(self._ctx.config.workspace_root),
+            self._ctx.skills.list(self._ctx.config.skill_index_tokens),
+        ]
+        return "\n\n".join(part for part in parts if part)
 
     def _claim(self, scope: Scope, triggers: dict[str, tuple[str, ...]]) -> State | None:
         definitions = [t.to_dict() for t in self._ctx.tools.definitions()]

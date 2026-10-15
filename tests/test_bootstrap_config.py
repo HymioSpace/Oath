@@ -241,3 +241,23 @@ def test_the_shipped_example_parses() -> None:
 
     assert config.agent.provider.model
     assert config.agent.system_prompt
+
+
+def test_the_directories_are_made_absolute_against_the_process(tmp_path: Path) -> None:
+    """相对路径按 runtime 进程的 cwd 解析，不是按命令的 cwd。
+
+    命令默认落在 workspace 下；`cli_bin_dir` 若照原样进 `PATH`，命令就会去找
+    `workspace/scripts/oath-cli` —— 默认配置下 `oath-cli` 直接找不到。
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.chdir(tmp_path)
+        config = from_dict({"agent": {"workspace_root": "./workspace", "cli_bin_dir": "./scripts"}})
+
+    assert config.agent.workspace_root == tmp_path / "workspace"
+    assert config.agent.cli_bin_dir == tmp_path / "scripts"
+
+
+def test_a_directory_given_as_absolute_is_left_alone() -> None:
+    config = from_dict({"agent": {"cli_bin_dir": "/opt/oath/bin"}})
+
+    assert config.agent.cli_bin_dir == Path("/opt/oath/bin")

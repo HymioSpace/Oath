@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""runtime 自己的命令行入口：在执行环境里把一条命令代理到 biz 的 CLI server。
+
+    oath-cli                       列出可用命令
+    oath-cli search 工作区          位置参数按声明顺序填
+    oath-cli search 工作区 --limit=5
+
+端点与 credential 都从环境变量读（`OATH_CLI_SERVER` / `OATH_CLI_TOKEN`），由执行环境
+注入子进程。**这个脚本不做鉴权**：它把拿到的 credential 原样放进请求头，判断留给
+server 与命令自己。用退出码说话 —— 成功 0，用法不对 2，请求没成 1，响应正文打到 stdout。
+
+命令走 POST、参数放 JSON body：命令是动作，GET 的缓存与重试语义不对。
+
+只用标准库：它是执行环境里的一个可执行文件，不该假设目标环境装了什么。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from typing import Any, Final
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+#: 端点与 credential 从这里读。
+ENV_SERVER: Final = "OATH_CLI_SERVER"
+ENV_TOKEN: Final = "OATH_CLI_TOKEN"
+
+#: 退出码。分开「自己写错了」与「服务没成」：模型据此知道该改命令还是该改环境。
+EXIT_OK: Final = 0
+EXIT_FAILED: Final = 1
+EXIT_USAGE: Final = 2
+
+#: 连多久。命令在工具层另有超时，这里只是别让连接本身挂住。
+_TIMEOUT_SECONDS: Final = 30.0
+
+
+def die(message: str, code: int) -> Any:
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def call(path: str, payload: dict[str, Any] | None = None) -> Any:
+    """打一次请求，返回解析后的正文。非 2xx 当失败：响应正文就是错误说明。
+
+    `payload` 是命令的参数，走 body；命令目录那条不带。
+    """
+    base = os.environ.get(ENV_SERVER, "").rstrip("/")
+    if not base:
+        die(f"没有 {ENV_SERVER}：这个命令只能在 runtime 的执行环境里跑。", EXIT_USAGE)
+    url = f"{base}{path}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    request = Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {os.environ.get(ENV_TOKEN, '')}",
+            "Content-Type": "application/json",
+        },
+        method="POST" if body is not None else "GET",
+    )
+    try:
+        with urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        die(f"{exc.code} {detail}", EXIT_FAILED)
+    except URLError as exc:
+        die(f"连不上 {url}：{exc.reason}", EXIT_FAILED)
+
+
+def listing() -> list[dict[str, Any]]:
+    """命令表。位置参数的顺序、说明、可选项全在里面。"""
+    return list(call("/cli_commands").get("commands", []))
+
+
+def declaration(argv: list[str]) -> dict[str, Any]:
+    """`argv` 里那条命令的声明。名字不在表里就报错，并把可用命令列出来。"""
+    entries = listing()
+    for entry in entries:
+        if entry.get("name") == argv[0]:
+            return dict(entry)
+    known = "、".join(str(entry.get("name", "")) for entry in entries)
+    die(f"没有这条命令：{argv[0]}。可用：{known or '（无）'}", EXIT_USAGE)
+
+
+def payload_of(argv: list[str]) -> dict[str, Any]:
+    """位置参数按声明顺序落到参数名上，`--key=value` 直接点名。
+
+    `--key=value` 不占位置，也不被位置参数覆盖：写了名字的就不该被后面那个顶掉。
+    """
+    names = list(declaration(argv).get("parameters", {}).get("properties", {}))
+    payload: dict[str, Any] = {}
+    filled = 0
+    for item in argv[1:]:
+        if item.startswith("--"):
+            key, _, value = item[2:].partition("=")
+            if key not in names:
+                die(f"没有这个参数：{key}", EXIT_USAGE)
+            payload[key] = value
+            continue
+        if filled >= len(names):
+            die(f"{argv[0]} 收 {len(names)} 个参数：{'、'.join(names)}", EXIT_USAGE)
+        payload[names[filled]] = item
+        filled += 1
+    return payload
+
+
+def usage() -> None:
+    """不带参数就把命令表打出来。"""
+    entries = listing()
+    print("用法：oath-cli <命令> [参数...] [--key=value]")
+    for entry in entries:
+        print()
+        print(f"  {entry.get('name')}  {entry.get('description', '')}")
+        parameters = entry.get("parameters") or {}
+        for name, spec in parameters.get("properties", {}).items():
+            required = "必填" if name in parameters.get("required", []) else "可选"
+            print(f"    {name}（{required}）{spec.get('description', '')}")
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        usage()
+        return EXIT_OK
+    print(json.dumps(call(f"/cli/{argv[0]}", payload_of(argv)), ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        raise SystemExit(130) from None

@@ -14,6 +14,7 @@ from core.detail.impl import FileDetailStore
 from core.detail.shrink import ResultShrinker
 from core.journal.runtime_store import State
 from core.protocol.datatype.config import AgentConfig
+from core.protocol.datatype.llm import LlmRequest
 from core.protocol.datatype.scope import Scope
 from core.utils.encoding import canonical_json
 from core.utils.tokens import estimate, estimate_text
@@ -21,6 +22,11 @@ from tests._support.intake_fixtures import Harness, until
 from tests.test_context_compaction import CountingCompactor, build, extend, history, seed
 
 SCOPE = Scope("u1", "s1")
+
+
+def conversation_of(request: LlmRequest) -> list[str]:
+    """请求里除 system prompt 之外的消息。压缩动的是这一段。"""
+    return [m.content for m in request.messages if m.role != "system"]
 
 
 def test_every_cut_preserves_at_least_n_and_complete_tool_groups() -> None:
@@ -52,7 +58,7 @@ def test_current_input_and_request_overhead_trigger_compression(tmp_path: Path) 
         h.start().send("新" * 1800)
         request = h.provider.wait(1)
         assert compactor.calls == 1
-        assert request.messages[0].content == "摘要"
+        assert conversation_of(request)[0] == "摘要"
         size = estimate([m.to_dict() for m in request.messages])
         size += estimate_text(canonical_json([t.to_dict() for t in request.tools]))
         assert size + request.max_output_tokens < config.context_window
@@ -69,7 +75,7 @@ def test_output_reservation_alone_can_cross_sync_threshold(tmp_path: Path) -> No
     with Harness(tmp_path, config=config, compactor=CountingCompactor()) as h:
         seed(h.store, history(6, 60))
         h.start().send("go")
-        assert h.provider.wait(1).messages[0].content == "摘要"
+        assert conversation_of(h.provider.wait(1))[0] == "摘要"
 
 
 def test_second_summary_uses_applied_digest_and_only_uncovered_history(tmp_path: Path) -> None:

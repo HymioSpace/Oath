@@ -64,6 +64,11 @@ class AgentConfig:
     #: 额外扫到的技能目录。它们只能被 skill 工具搜到，不进 system prompt。
     skill_scan_dirs: tuple[Path, ...] = ()
 
+    #: 工作区根目录。bash 的默认 cwd，进 system prompt 的工作区段落。
+    workspace_root: Path = Path("./workspace")
+    #: 挂 `oath-cli` 的目录，前置到 bash 子进程的 PATH 上。
+    cli_bin_dir: Path = Path("./scripts")
+
     #: 一次 run 的推理预算，工具返回触发的新 step 也计入。
     max_run_steps: int = 32
     max_run_seconds: float = 3600
@@ -174,6 +179,8 @@ class OathConfig:
                 "skill_dir": str(self.agent.skill_dir),
                 "skill_index_tokens": self.agent.skill_index_tokens,
                 "skill_scan_dirs": [str(path) for path in self.agent.skill_scan_dirs],
+                "workspace_root": str(self.agent.workspace_root),
+                "cli_bin_dir": str(self.agent.cli_bin_dir),
                 "tool_timeout_seconds": self.agent.tool_timeout_seconds,
                 "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
                 "max_run_steps": self.agent.max_run_steps,
