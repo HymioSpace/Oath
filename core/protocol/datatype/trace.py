@@ -1,8 +1,9 @@
 """`Span` —— OpenTelemetry 的观测数据形状。
 
 trace_id / span_id / parent_span_id / name / kind / start / end / status /
-attributes / events，字段与 OTel 一一对应。照抄 OTLP 的好处是以后接导出不用改
-数据模型 —— 换的是怎么送出去，不是送什么。
+attributes / events / links，字段与 OTel 的 span 数据模型一一对应。**这不是 OTLP
+的线上编码**：导出时还要一层映射（属性类型、`status` 的 code 与 message、trace
+state），换的是怎么送出去，不是送什么。
 
 时间是 unix 纳秒的整数，和 OTel 的 `fixed64` 一样。`end` 可以是 `None`：那表示这个
 span 还没结束，进程就是在中途没的。
@@ -83,12 +84,48 @@ class SpanEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class SpanLink:
+    """一条因果关系，指向不在自己父链上的 span。
+
+    有因果但不在同一棵父子树里 —— 典型是「这一步被上一步的工具结果唤醒」，而那两步
+    在时间上是先后而不是嵌套。`trace_id` 是必备的：被指向的 span 常常不在自己这条
+    trace 里。
+    """
+
+    trace_id: str
+    span_id: str
+    attributes: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not is_trace_id(self.trace_id):
+            raise ValueError(
+                f"link 的 trace_id 必须是 {TRACE_ID_LENGTH} 位小写 hex: {self.trace_id!r}"
+            )
+        if not is_span_id(self.span_id):
+            raise ValueError(
+                f"link 的 span_id 必须是 {SPAN_ID_LENGTH} 位小写 hex: {self.span_id!r}"
+            )
+
+    def to_dict(self) -> JsonObject:
+        return {"trace_id": self.trace_id, "span_id": self.span_id, "attributes": self.attributes}
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> SpanLink:
+        return cls(
+            trace_id=str(raw["trace_id"]),
+            span_id=str(raw["span_id"]),
+            attributes=dict(raw.get("attributes") or {}),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Span:
     """一次可观测动作。
 
     `parent_span_id` 为 `None` 是 trace 的顶层 span。core 里每个 step span 都是顶层，
     它的 llm span 是子 span —— step 之间用 trace_id 串，不套成一棵树：第二步发生在
-    第一步结束之后，把它塞进第一步里会让耗时读起来是错的。
+    第一步结束之后，把它塞进第一步里会让耗时读起来是错的。step 之间的先后关系靠
+    `links` 补。
     """
 
     trace_id: str
@@ -101,6 +138,7 @@ class Span:
     status: str = SpanStatus.UNSET
     attributes: JsonObject = field(default_factory=dict)
     events: tuple[SpanEvent, ...] = ()
+    links: tuple[SpanLink, ...] = ()
 
     def __post_init__(self) -> None:
         # id 的长度在构造时校验：写错了当场报错，好过读 trace 的人对着一个不合法的
@@ -137,6 +175,7 @@ class Span:
             "status": self.status,
             "attributes": self.attributes,
             "events": [event.to_dict() for event in self.events],
+            "links": [link.to_dict() for link in self.links],
         }
 
     @classmethod
@@ -154,6 +193,7 @@ class Span:
             status=str(raw.get("status", SpanStatus.UNSET)),
             attributes=dict(raw.get("attributes") or {}),
             events=tuple(SpanEvent.from_dict(event) for event in raw.get("events") or ()),
+            links=tuple(SpanLink.from_dict(link) for link in raw.get("links") or ()),
         )
 
 
@@ -163,6 +203,7 @@ __all__ = [
     "Span",
     "SpanEvent",
     "SpanKind",
+    "SpanLink",
     "SpanStatus",
     "is_span_id",
     "is_trace_id",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from core.protocol.datatype.config import AgentConfig, ModelProviderConfig
+from core.protocol.datatype.inbound import Inbound, InboundKind
 from core.protocol.datatype.llm import LlmResponse, LlmToolCall
 from core.protocol.datatype.trace import Span
 from core.trace.attributes import (
@@ -23,7 +24,7 @@ from core.trace.attributes import (
     RESPONSE_EVENT,
 )
 from tests._support.intake_fixtures import Harness, until
-from tests._support.tool_fixtures import EchoTool
+from tests._support.tool_fixtures import EchoTool, GatedTool
 from tests._support.trace_fixtures import BrokenTraceStore, RecordingTraceStore
 
 #: 一次「模型要工具 → 工具回来 → 模型收尾」的完整循环。
@@ -35,6 +36,12 @@ CONFIG = AgentConfig(provider=ModelProviderConfig(model="m1"))
 
 def _terminal(harness: Harness) -> bool:
     return all(step["status"] == "failed" for step in harness.state()["steps"].values())
+
+
+def _settled(harness: Harness) -> bool:
+    """认领过 step、并且没有 step 还在飞。"""
+    steps = harness.state()["steps"]
+    return bool(steps) and harness.state()["meta"].get("active_step") is None
 
 
 def run_loop(harness: Harness) -> None:
@@ -146,10 +153,88 @@ def test_a_step_span_records_its_input_events_and_closes(tmp_path: Path) -> None
         assert first.attributes[OATH_STEP_STATUS] == "completed"
         assert first.attributes[OATH_STEP_LLM_CALLS] == 1
         assert first.end_unix_nano is not None
-        assert [event.name for event in first.events] == ["oath.input.user"]
+        assert [event.name for event in first.events] == [
+            "oath.input.user",
+            "oath.stage.request_prepared",
+            "oath.stage.tools_submitted",
+            "oath.stage.completed",
+        ]
         assert body(first, "oath.input.user")["payload"] == {"content": "你好"}
         # 第二步的输入是工具结果，不是用户消息 —— 这一步被工具结果唤醒。
-        assert [event.name for event in second.events] == ["oath.input.tool"]
+        assert [event.name for event in second.events] == [
+            "oath.input.tool",
+            "oath.stage.request_prepared",
+            "oath.stage.completed",
+        ]
+
+
+def test_a_step_span_links_back_to_the_step_whose_tool_result_woke_it(tmp_path: Path) -> None:
+    """step 之间不是父子关系，唤醒关系只能靠 link —— 混进用户输入时 link 是唯一线索。"""
+    with Harness(tmp_path, tools=[EchoTool("a")], responses=LOOP, config=CONFIG) as harness:
+        run_loop(harness)
+
+        first, second = step_spans(harness)
+        # 第一步由用户消息唤醒，没有来源。
+        assert first.links == ()
+        assert [link.span_id for link in second.links] == [first.span_id]
+        assert all(link.trace_id == first.trace_id for link in second.links)
+
+
+def test_a_user_message_claiming_a_tool_result_keeps_the_causal_link(tmp_path: Path) -> None:
+    """用户新消息必开新 trace，工具结果却属于上一条 —— link 自带 trace_id 才读得回来。"""
+    tool = GatedTool("a")
+    responses = [
+        LlmResponse(tool_calls=(LlmToolCall("a", {}, "id-a"),)),
+        LlmResponse(content="好了"),
+    ]
+    with Harness(tmp_path, tools=[tool], responses=responses, config=CONFIG) as harness:
+        # 工具卡住不放行，结果就一直回不到 buffer。第一步结束、工具还没回来。
+        harness.start().send("先查一下")
+        harness.provider.wait(1)
+        until(lambda: _settled(harness))
+        source_step = next(iter(harness.state()["steps"]))
+
+        # 工具结果与用户新消息一起进 buffer 再叫醒：两条输入被认领进同一个 step。
+        harness.buffers.receive(
+            harness.scope,
+            Inbound(
+                InboundKind.TOOL_RESULT,
+                "tool.terminal",
+                {"batch_id": source_step, "invocation_id": f"{source_step}-0", "outcome": "ok"},
+                "r1",
+            ),
+        )
+        harness.buffers.receive(
+            harness.scope, Inbound(InboundKind.USER, "user.message", {"content": "顺便看看"}, "u2")
+        )
+        harness.brain.wake(harness.scope, "tool", ("tool_result:r1",))
+        harness.provider.wait(2)
+        until(lambda: harness.state()["meta"].get("active_step") is None)
+
+        [mixed] = [
+            span
+            for trace_id in harness.traces.trace_ids(harness.scope)
+            for span in harness.traces.spans(harness.scope, trace_id)
+            if span.name == "invoke_agent"
+            and {"oath.input.user", "oath.input.tool"} <= {event.name for event in span.events}
+        ]
+        # 用户消息开了新 trace，link 指回上一条 trace 里产出工具结果的那个 step。
+        assert mixed.trace_id != harness.state()["steps"][source_step]["trace_id"]
+        [link] = mixed.links
+        assert link.span_id == source_step[:16]
+        assert link.attributes[OATH_STEP_ID] == source_step
+        assert link.trace_id == harness.state()["steps"][source_step]["trace_id"]
+
+        tool.gate.set()  # 别把工具线程留到超时
+
+
+def test_the_stage_nodes_come_in_time_order(tmp_path: Path) -> None:
+    with Harness(tmp_path, tools=[EchoTool("a")], responses=LOOP, config=CONFIG) as harness:
+        run_loop(harness)
+
+        first, _second = step_spans(harness)
+        stamps = [event.unix_nano for event in first.events]
+        assert stamps == sorted(stamps)
 
 
 def test_ttft_and_tpot_need_a_streamed_answer(tmp_path: Path) -> None:

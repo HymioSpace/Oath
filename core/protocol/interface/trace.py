@@ -29,7 +29,7 @@ class TraceStore(ABC):
 
     @abstractmethod
     def trace_ids(self, scope: Scope) -> tuple[str, ...]:
-        """这个 scope 里有哪些 trace，按首次写入时间排序。没有就返回空元组。"""
+        """这个 scope 里有哪些 trace，**最近写入的排前面**。没有就返回空元组。"""
         ...
 
     @abstractmethod

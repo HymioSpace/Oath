@@ -50,7 +50,9 @@ class FileTraceStore(TraceStore):
             if not is_trace_id(trace_id):
                 continue
             found.append((entry.stat().st_mtime, trace_id))
-        return tuple(trace_id for _, trace_id in sorted(found))
+        # 最近写入的排前面。看修改时间而不是开文件的时刻，是为了让重试后补写的旧 trace
+        # 也回到该在的位置；代价是一条 trace 被再次追加会往前挪。
+        return tuple(trace_id for _, trace_id in sorted(found, reverse=True))
 
     def spans(self, scope: Scope, trace_id: str) -> tuple[Span, ...]:
         if not is_trace_id(trace_id):

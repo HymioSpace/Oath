@@ -200,8 +200,9 @@ class Runtime:
         return {
             "run_id": state["meta"].get("run_id"),
             "step_id": active,
-            # 客户端拿 trace_id 去查这条运行：认领 step 时定的，之后不变。
-            "trace_id": step.get("trace_id"),
+            # 客户端拿 trace_id 去查这条运行：认领 step 时定的，之后不变。没有在飞的
+            # step 时退回最后开过的那条 —— 否则刚结束的一轮就查不到了。
+            "trace_id": step.get("trace_id") or state["meta"].get("trace_id"),
             "step_status": step.get("status", "idle"),
             "error": step.get("error") or state["meta"].get("intake_error"),
             "calls": list(state["calls"].values()),

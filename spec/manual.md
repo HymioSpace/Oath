@@ -58,7 +58,7 @@ permission.requested 带 invocation_id、batch_id、tool、arguments、expires_a
 
 断线后重新 session.open，再 session.status。响应包含：
 
-- run_id、step_id、step_status、error、trace_id。
+- run_id、step_id、step_status、error、trace_id（trace_id 在 step 结束后不清，见 §4.1）。
 - calls：原调用身份、工具 / 参数、审批 / 执行状态、期限与终态。
 - messages：固定的对话视图；末尾可能是尚未获得响应的工具声明。
 - input_errors：被隔离的无效内部输入。
@@ -81,8 +81,8 @@ trace.get 返回其中一条的 span 列表。两者都只读，不触发模型�
 {"v":1,"type":"event","session_id":"default","event_type":"session.status","payload":{"run_id":"...","step_id":"...","trace_id":"6f1c9b2d...","step_status":"prepared"}}
 ```
 
-运行结束后 `step_id` 变 `null`，`trace_id` 随之变 `null` —— 这一轮已经不在飞了。
-要留住 id 就自己存，没有别的来源。
+运行结束后 `step_id` 变 `null`，`trace_id` 留着最后开的那条 —— 刚跑完的这一轮
+还能查。什么时候真的换 id：下一次认领 step 时。
 
 ### 4.2 列历史
 
@@ -92,39 +92,49 @@ trace.get 返回其中一条的 span 列表。两者都只读，不触发模型�
 ```
 
 `span_count` 是这条 trace 的 span 总数，`step_count` 是它跑了几步。
-`duration_ms` 为 `null` 表示一个 span 都没结束 —— 见 4.4。
+最近写入的排前面。`duration_ms` 为 `null` 表示一个 span 都没结束 —— 见 4.4。
 
 ### 4.3 取一条
 
 ```json
 {"v":1,"type":"trace.get","id":"t2","session_id":"default","payload":{"trace_id":"6f1c9b2d..."}}
 {"v":1,"type":"event","session_id":"default","event_type":"trace.get","payload":{"trace_id":"6f1c9b2d...","duration_ms":812.4,"spans":[
-  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4e5f60718","parent_span_id":null,"name":"invoke_agent","kind":"internal","start_unix_nano":1760000000000000000,"end_unix_nano":1760000000400000000,"status":"ok","duration_ms":400.0,"attributes":{"oath.step.id":"step-example-0","oath.step.status":"completed","oath.step.llm_calls":1,"oath.step.duration_ms":400.0},"events":[{"name":"oath.input.user","unix_nano":1760000000000000000,"attributes":{"body":"{...}"}}]},
-  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4f6071801","parent_span_id":"a1b2c3d4e5f60718","name":"chat m1","kind":"client","start_unix_nano":1760000000100000000,"end_unix_nano":1760000001200000000,"status":"ok","duration_ms":1100.0,"attributes":{"gen_ai.request.model":"m1","gen_ai.usage.input_tokens":812,"gen_ai.usage.output_tokens":64,"oath.llm.ttft_ms":420.0,"oath.llm.tpot_ms":12.1},"events":[{"name":"gen_ai.request","unix_nano":1760000000100000000,"attributes":{"body":"{...}"}},{"name":"gen_ai.response","unix_nano":1760000001200000000,"attributes":{"body":"{...}"}}]}
+  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4e5f60718","parent_span_id":null,"name":"invoke_agent","kind":"internal","start_unix_nano":1760000000000000000,"end_unix_nano":1760000000400000000,"status":"ok","duration_ms":400.0,"attributes":{"oath.step.id":"step-example-0","oath.step.status":"completed","oath.step.llm_calls":1,"oath.step.duration_ms":400.0},"events":[{"name":"oath.input.user","unix_nano":1760000000000000000,"attributes":{"body":"{...}"}},{"name":"oath.stage.tools_submitted","unix_nano":1760000000399000000,"attributes":{"oath.step.tool_calls":1}}],"links":[]},
+  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4f6071801","parent_span_id":"a1b2c3d4e5f60718","name":"chat m1","kind":"client","start_unix_nano":1760000000100000000,"end_unix_nano":1760000001200000000,"status":"ok","duration_ms":1100.0,"attributes":{"gen_ai.request.model":"m1","gen_ai.usage.input_tokens":812,"gen_ai.usage.output_tokens":64,"oath.llm.ttft_ms":420.0,"oath.llm.tpot_ms":12.1},"events":[{"name":"gen_ai.request","unix_nano":1760000000100000000,"attributes":{"body":"{...}"}},{"name":"gen_ai.response","unix_nano":1760000001200000000,"attributes":{"body":"{...}"}}],"links":[]}
 ]}}
 ```
 
 ### 4.4 怎么读
 
-**span 树只有两层。** `parent_span_id` 为空的是 step span（`invoke_agent`），
-它下面 `chat <模型>` 的是那一步的模型调用 span。step 之间是平级的 —— 第二步发生在
+**span 树只有两层，step 之间平级。** `parent_span_id` 为空的是 step span
+（`invoke_agent`），它下面 `chat <模型>` 的是那一步的模型调用 span。第二步发生在
 第一步结束之后，不嵌在第一步里。
+
+**step 与上一步的因果看 `links`。** 每条工具结果各指向产出它的那一步的 span，
+字段是 `trace_id` / `span_id` / `attributes`。跨 trace 时 `trace_id` 指的是**另一条**
+trace —— 用户新消息会开新 trace，但和它一起被认领的旧工具结果仍指回原来那条。
+按 `links` 串起来才是完整的因果链，光看 `trace_id` 分组会断。
 
 **耗时直接读 `duration_ms`**，服务端算好的，不要用 `start_unix_nano` 自己减。
 
 **原始输入输出在 `events` 里**，不在 `attributes`：
 `oath.input.<队列名>` 是唤醒这一步的每一条输入（`user` / `tool` / `system`），
 `gen_ai.request` 是发给模型的那一份，`gen_ai.response` 是模型回来的那一份。
-`attributes.body` 是 JSON 文本，要 parse。
+`attributes.body` 是 JSON 文本，要 parse。记到 core 冻结的那一层为止，provider
+内部的 wire 报文不在里面。
+
+**阶段节点 `oath.stage.*`** 带时刻，把 step 里不属于模型调用的时间切开：
+`request_prepared`（压缩判定与请求冻结完成，到这里之前算「模型之前」）、
+`tools_submitted`、`completed`。慢 step 看这几个节点就知道慢在哪一段。
 
 **字段缺席是有意义的。** 非流式调用没有 `oath.llm.ttft_ms`，也就没有
 `oath.llm.tpot_ms` —— 别把缺席当 0。同理 step span 的 `oath.step.llm_calls` 为 0
 表示还没调过模型（`events` 里也就只有输入、没有 request）。
 
 **`end_unix_nano` 为 `null`** 表示这一步还没结束：进程崩在了步骤中途。
-按 `status` 分 `ok` 与 `error`，`unset` 配 `null` 就是崩在半路。
+按 `status` 分 `ok` 与 `error`，`unset` 配 `null` 就是崩在半路，阶段节点也随之没有。
 
-span 字段与 OpenTelemetry 一致，属性名清单见 [Trace](feature-trace.md)。
+span 字段与 OpenTelemetry 的 span 模型一致，属性名清单见 [Trace](feature-trace.md)。
 客户端按 `step_count` 展示循环轮数、按 `duration_ms` 展示耗时即可，
 不要试图从 trace 还原成对话。
 
@@ -166,8 +176,8 @@ uv run pytest -q tests/test_biz_trace.py tests/test_trace_store.py tests/test_tr
 | step.status | status, error, step_id? |
 | intake.rejected | input_id, error |
 | session.status | 当前快照 |
-| trace.list | trace_id, span_count, step_count, duration_ms |
-| trace.get | trace_id, duration_ms, spans |
+| trace.list | trace_ids[]：trace_id, span_count, step_count, duration_ms |
+| trace.get | trace_id, duration_ms, spans[] |
 
 tool.terminal outcome 为 succeeded / failed / timeout / cancelled / outcome_unknown。
 结果正文超过阈值时 content 是截断后的文本，detail_key 指到全文，original_chars 是原长度；

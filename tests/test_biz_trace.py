@@ -17,7 +17,8 @@ from bootstrap.runtime import Runtime
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span, SpanStatus, new_trace_id
-from tests._support.intake_fixtures import ScriptedProvider
+from core.protocol.datatype.wire import Command, CommandType
+from tests._support.intake_fixtures import ScriptedProvider, until
 
 TRACE = new_trace_id()
 SCOPE = Scope("u1", "s1")
@@ -114,4 +115,19 @@ def test_a_trace_with_no_finished_span_has_no_elapsed_time(runtime: Runtime) -> 
     assert listed == [{"trace_id": trace_id, "span_count": 1, "step_count": 1, "duration_ms": None}]
     assert view["duration_ms"] is None
     assert cast(list[dict[str, Any]], view["spans"])[0]["end_unix_nano"] is None
+    runtime.close()
+
+
+def test_the_status_keeps_the_trace_id_after_the_step_is_over(runtime: Runtime) -> None:
+    """刚跑完的那一轮要还能查到 —— 只从 active step 取的话，step 一结束就断了。"""
+    runtime.submit(
+        Command("u1", CommandType.USER_MESSAGE, SCOPE.session_id, {"content": "你好"}), SCOPE
+    )
+    until(lambda: runtime.status(SCOPE)["trace_id"] is not None)
+    until(lambda: runtime.status(SCOPE)["step_id"] is None)
+
+    trace_id = str(runtime.status(SCOPE)["trace_id"])
+    listed = cast(list[dict[str, Any]], list_traces(runtime.traces, SCOPE)["trace_ids"])
+    assert [item["trace_id"] for item in listed] == [trace_id]
+    assert get_trace(runtime.traces, SCOPE, trace_id)["duration_ms"] is not None
     runtime.close()

@@ -29,6 +29,7 @@ OATH_STEP_STATUS: Final = "oath.step.status"
 OATH_STEP_TRIGGERS: Final = "oath.step.triggers"
 OATH_STEP_INPUT_COUNT: Final = "oath.step.input_count"
 OATH_STEP_LLM_CALLS: Final = "oath.step.llm_calls"
+OATH_STEP_TOOL_CALLS: Final = "oath.step.tool_calls"
 OATH_STEP_DURATION_MS: Final = "oath.step.duration_ms"
 OATH_RUN_ID: Final = "oath.run.id"
 
@@ -47,6 +48,14 @@ INPUT_EVENT: Final = "oath.input.{queue}"
 REQUEST_EVENT: Final = "gen_ai.request"
 RESPONSE_EVENT: Final = "gen_ai.response"
 BODY: Final = "body"
+
+#: Brain 的固定阶段节点，全是 step span 上的 event，带时刻。
+#:
+#: 只有一个 step 总耗时是不够的：模型调用有自己的 span，剩下的时间（认领、压缩判定、
+#: 请求冻结、工具批次提交）全挤在 step span 里。慢的时候要能一眼看出慢在哪一段。
+STAGE_REQUEST_PREPARED: Final = "oath.stage.request_prepared"
+STAGE_TOOLS_SUBMITTED: Final = "oath.stage.tools_submitted"
+STAGE_COMPLETED: Final = "oath.stage.completed"
 
 
 def chat_span_name(model: str) -> str:
@@ -78,10 +87,14 @@ __all__ = [
     "OATH_STEP_ID",
     "OATH_STEP_INPUT_COUNT",
     "OATH_STEP_LLM_CALLS",
+    "OATH_STEP_TOOL_CALLS",
     "OATH_STEP_STATUS",
     "OATH_STEP_TRIGGERS",
     "REQUEST_EVENT",
     "RESPONSE_EVENT",
+    "STAGE_COMPLETED",
+    "STAGE_REQUEST_PREPARED",
+    "STAGE_TOOLS_SUBMITTED",
     "chat_span_name",
     "input_event_name",
 ]

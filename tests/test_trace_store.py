@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
 
 from core.protocol.datatype.scope import Scope
-from core.protocol.datatype.trace import Span, SpanEvent, SpanStatus, new_trace_id
+from core.protocol.datatype.trace import (
+    Span,
+    SpanEvent,
+    SpanLink,
+    SpanStatus,
+    new_trace_id,
+)
 from core.trace.impl import FileTraceStore
 
 SCOPE = Scope("u1", "s1")
@@ -27,7 +34,7 @@ def span(trace_id: str, span_id: str, *, start: int = 1, **kwargs: object) -> Sp
 
 def test_a_span_survives_a_round_trip(tmp_path: Path) -> None:
     store = FileTraceStore(tmp_path)
-    trace_id = new_trace_id()
+    trace_id, other = new_trace_id(), new_trace_id()
     store.append(
         SCOPE,
         span(
@@ -37,6 +44,7 @@ def test_a_span_survives_a_round_trip(tmp_path: Path) -> None:
             status=SpanStatus.OK,
             attributes={"oath.step.id": "s"},
             events=(SpanEvent("gen_ai.request", 2, {"body": '{"a":1}'}),),
+            links=(SpanLink(other, "fedcba9876543210", {"oath.step.id": "prev"}),),
         ),
     )
 
@@ -46,6 +54,8 @@ def test_a_span_survives_a_round_trip(tmp_path: Path) -> None:
     assert read.attributes["oath.step.id"] == "s"
     assert [event.name for event in read.events] == ["gen_ai.request"]
     assert read.events[0].attributes["body"] == '{"a":1}'
+    # link 自带 trace_id：被指向的 span 常常不在自己这条 trace 里。
+    assert read.links == (SpanLink(other, "fedcba9876543210", {"oath.step.id": "prev"}),)
 
 
 def test_the_last_line_wins_for_one_span_id(tmp_path: Path) -> None:
@@ -112,6 +122,22 @@ def test_a_stray_file_in_the_directory_is_not_a_trace(tmp_path: Path) -> None:
     (tmp_path / SCOPE.user_id / SCOPE.session_id / "README.txt").write_text("x")
 
     assert store.trace_ids(SCOPE) == (trace_id,)
+
+
+def test_the_most_recently_written_trace_comes_first(tmp_path: Path) -> None:
+    """排序看文件修改时间：失败重试补写的旧 trace 会回到前面，而不是留在创建时的位置。"""
+    store = FileTraceStore(tmp_path)
+    older, newer = new_trace_id(), new_trace_id()
+    store.append(SCOPE, span(older, "0123456789abcdef"))
+    store.append(SCOPE, span(newer, "0123456789abcdef"))
+    os.utime(_file(tmp_path, older), (1_000_000, 1_000_000))
+    store.append(SCOPE, span(older, "0123456789abcdef", end_unix_nano=9))
+
+    assert store.trace_ids(SCOPE) == (older, newer)
+
+
+def _file(tmp_path: Path, trace_id: str) -> Path:
+    return tmp_path / SCOPE.user_id / SCOPE.session_id / f"{trace_id}.jsonl"
 
 
 @pytest.mark.parametrize(

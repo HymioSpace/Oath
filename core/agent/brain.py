@@ -24,6 +24,7 @@ from core.protocol.datatype.trace import (
     Span,
     SpanEvent,
     SpanKind,
+    SpanLink,
     SpanStatus,
     new_trace_id,
 )
@@ -49,11 +50,15 @@ from core.trace.attributes import (
     OATH_STEP_INPUT_COUNT,
     OATH_STEP_LLM_CALLS,
     OATH_STEP_STATUS,
+    OATH_STEP_TOOL_CALLS,
     OATH_STEP_TRIGGERS,
     OP_CHAT,
     OP_INVOKE_AGENT,
     REQUEST_EVENT,
     RESPONSE_EVENT,
+    STAGE_COMPLETED,
+    STAGE_REQUEST_PREPARED,
+    STAGE_TOOLS_SUBMITTED,
     chat_span_name,
     input_event_name,
 )
@@ -82,6 +87,7 @@ class AgentBrain(Brain):
         self._compaction = compaction
         self._lock = threading.Lock()
         self._workers: dict[Scope, _Worker] = {}
+        self._stages: dict[str, dict[str, SpanEvent]] = {}
         self._stop = threading.Event()
 
     def _worker(self, scope: Scope) -> _Worker:
@@ -147,6 +153,7 @@ class AgentBrain(Brain):
         config = self._ctx.config
         fresh = False
         claimed: list[tuple[str, float | None, State]] = []
+        links: list[SpanLink] = []
 
         def claim(state: State) -> State | None:
             nonlocal fresh
@@ -205,6 +212,7 @@ class AgentBrain(Brain):
             claimed.extend(
                 (entry["queue"], entry["buffered_at"], entry["item"]) for _, entry in entries
             )
+            links.extend(_source_links(state, [entry for _, entry in entries]))
             state["conversation"]["messages"] = messages
             for _, entry in entries:
                 entry.update(phase="claimed", step_id=step_id)
@@ -213,7 +221,7 @@ class AgentBrain(Brain):
         step = self._store.transact(scope, "step.input", claim)
         if fresh and step is not None:
             # 事务外写 span：文件 I/O 不能在 scope 锁里做。
-            self._open_step(scope, step, claimed)
+            self._open_step(scope, step, claimed, tuple(links))
             self._ctx.queue.notify(scope)
             if step["status"] == "paused":
                 self._emit(
@@ -287,7 +295,15 @@ class AgentBrain(Brain):
                 current["request_draft"] = None
             return cast(State, current)
 
-        return self._store.transact(scope, "step.request", freeze)
+        prepared = self._store.transact(scope, "step.request", freeze)
+        # 压缩判定可能同步调一次模型，所以这个时刻之前的时间都算「模型之前」。
+        self._stage(
+            scope,
+            step["step_id"],
+            STAGE_REQUEST_PREPARED,
+            {OATH_STEP_INPUT_COUNT: len(prepared["request"]["messages"])},
+        )
+        return prepared
 
     def _execute(self, scope: Scope, step: State) -> None:
         if step["response"] is None:
@@ -352,6 +368,7 @@ class AgentBrain(Brain):
                     for i, c in enumerate(calls)
                 ],
             )
+            self._stage(scope, step_id, STAGE_TOOLS_SUBMITTED, {OATH_STEP_TOOL_CALLS: len(calls)})
 
         def finish(state: State) -> State:
             current = state["steps"][step_id]
@@ -377,6 +394,7 @@ class AgentBrain(Brain):
 
         # 终态从事务里回读，不复用认领时那份 —— 写进 span 的必须是最终的 status。
         closed = self._store.transact(scope, "step.completed", finish)
+        self._stage(scope, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
         self._close_step(scope, closed, SpanStatus.OK, int(closed["attempts"]))
         self._ctx.queue.notify(scope)
         # Consumer 会重查各自规则；不能仅因 buffer 非空再次调用模型。
@@ -410,7 +428,11 @@ class AgentBrain(Brain):
             _log.exception("写 trace 失败，推理不受影响")
 
     def _open_step(
-        self, scope: Scope, step: State, claimed: list[tuple[str, float | None, State]]
+        self,
+        scope: Scope,
+        step: State,
+        claimed: list[tuple[str, float | None, State]],
+        links: tuple[SpanLink, ...],
     ) -> None:
         """step 认领时的第一条 span。`end` 为空 —— 进程崩在这一步中途就留个空 end。"""
         started = int(step["trace_started"])
@@ -433,23 +455,36 @@ class AgentBrain(Brain):
                     OATH_STEP_LLM_CALLS: 0,
                 },
                 events=_input_events(started, claimed),
+                links=links,
             ),
         )
+
+    def _stage(self, scope: Scope, step_id: str, name: str, attributes: JsonObject) -> None:
+        """记一个 Brain 阶段节点。step span 要到最后才整条写出去，节点先攒着。
+
+        攒在内存里而不是 journal 里：trace 不参与恢复，进程崩了这几个节点就该没有。
+        同一个阶段重跑（失败重试）只留第一次，不重复记。
+        """
+        with self._lock:
+            self._stages.setdefault(step_id, {})[name] = SpanEvent(name, time.time_ns(), attributes)
+
+    def _take_stages(self, step_id: str) -> tuple[SpanEvent, ...]:
+        with self._lock:
+            return tuple(self._stages.pop(step_id, {}).values())
 
     def _close_step(self, scope: Scope, step: State, status: str, llm_calls: int) -> None:
         """step 到终态时的第二条 span。同一个 span_id，读的时候后写的赢。
 
         输入事件在这里重读一遍，不靠认领时那份：后写的整条覆盖先写的，事件不补回来
-        就等于从没写过。
+        就等于从没写过。阶段节点与输入事件一起按时间排。
         """
         start = int(step["trace_started"])
         end = time.time_ns()
-        entries = self._store.read(scope)["inputs"]
-        claimed = [
-            (entries[key]["queue"], entries[key]["buffered_at"], entries[key]["item"])
-            for key in step["input_ids"]
-            if key in entries
-        ]
+        state = self._store.read(scope)
+        entries = state["inputs"]
+        inputs = [entries[key] for key in step["input_ids"] if key in entries]
+        claimed = [(entry["queue"], entry["buffered_at"], entry["item"]) for entry in inputs]
+        stages = self._take_stages(step["step_id"])
         self._trace(
             scope,
             Span(
@@ -470,7 +505,8 @@ class AgentBrain(Brain):
                     OATH_STEP_LLM_CALLS: llm_calls,
                     OATH_STEP_DURATION_MS: round((end - start) / 1_000_000, 3),
                 },
-                events=_input_events(start, claimed),
+                events=_ordered(_input_events(start, claimed) + stages),
+                links=tuple(_source_links(state, inputs)),
             ),
         )
 
@@ -565,12 +601,49 @@ class AgentBrain(Brain):
         self._stop.set()
         with self._lock:
             workers = tuple(self._workers.values())
+            self._stages.clear()
         for worker in workers:
             worker.signal.set()
         if wait:
             for worker in workers:
                 if worker.thread:
                     worker.thread.join(timeout=2)
+
+
+def _source_links(state: State, entries: Sequence[State]) -> list[SpanLink]:
+    """这次认领的输入里，每条工具结果各指向产出它的那个 step 的 span。
+
+    step 之间不是父子关系（第二步发生在第一步结束之后），所以唤醒关系只能靠 link
+    表达。用户输入没有来源，不产生 link。
+
+    用户消息和工具结果被认领进同一个 step 时，那句话开的是新 trace，而工具结果指向
+    的是上一条 trace 的 span —— link 自带 `trace_id`，跨 trace 的因果因此还读得回来。
+    找不到来源 step（journal 里已经没有）就跳过，不猜。
+    """
+    links: list[SpanLink] = []
+    seen: set[str] = set()
+    for entry in entries:
+        item = entry.get("item") or {}
+        if item.get("kind") != "tool_result":
+            continue
+        batch_id = str((item.get("payload") or {}).get("batch_id") or "")
+        source = state["steps"].get(batch_id)
+        if not batch_id or source is None or batch_id in seen:
+            continue
+        seen.add(batch_id)
+        links.append(
+            SpanLink(
+                trace_id=source["trace_id"],
+                span_id=_step_span_id(batch_id),
+                attributes={OATH_STEP_ID: batch_id},
+            )
+        )
+    return links
+
+
+def _ordered(events: Sequence[SpanEvent]) -> tuple[SpanEvent, ...]:
+    """span event 按时刻排。输入事件的时刻来自 buffer，可能早于 step 开始。"""
+    return tuple(sorted(events, key=lambda event: event.unix_nano))
 
 
 def _input_events(
