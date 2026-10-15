@@ -178,22 +178,32 @@ step 的 `trace_id` 和 `trace_started` 一起写进 step 状态，重启后仍�
 biz 只管这一件事 —— `biz/trace/api.py`，把 runtime 手里的 span 变成能直接返回的对象：
 
 ```
-list_traces(store, scope)        -> 该 scope 的 trace 列表，每条带 step 数与累计耗时
-get_trace(store, scope, trace_id) -> 一条 trace 的全部 span，含每条 span 的耗时
+list_traces(store, scope, limit, offset) -> 该 scope 的 trace 列表一页，每条带 step 数与累计耗时
+query_trace(store, scope, trace_id)     -> 一条 trace 的全部 span，含每条 span 的耗时
 ```
 
 两个函数只吃 `TraceStore`，不认识 runtime —— 换后端不用改调用方。会话身份、输入接纳、
 状态快照都在 `Runtime` 上，biz 不碰。
 
-`get_trace` 返回的 span 顺序按开始时间，`parent_span_id` 指向 llm span 的父 step，
+`query_trace` 返回的 span 顺序按开始时间，`parent_span_id` 指向 llm span 的父 step，
 `links` 指向唤醒这一步的上一轮 step —— 一次完整的 ReAct 循环在返回值里读起来是
 「平级的一串 step，每一步下面挂一次模型调用，每一步往前指一步」。trace 找不到返回
 空列表，不区分「不存在」和「无权查看」。
 
 客户端的入口是 `session.status` 里的 `trace_id` —— step 认领时就定了，之后不变；
 step 结束后这个字段保留最后一次的值，不清空。
-WebSocket 上对应 `trace.list` 与 `trace.get` 两条只读 command，帧的形状见
-[接入手册](manual.md)。
+查询面是 biz server 里的两个端点，在 `bootstrap/http.py`：`GET /list_traces` 与
+`GET /query_trace`，参数走 query string。**path 是动作名，不套 RESTful 的资源命名** ——
+trace 不是 CRUD 里的资源，客户端要的就是「列」「查」两个动作。查询不在 WebSocket 上：
+它不产生 ACK、不改状态，也不是 command。身份仍走 `session.open` 那套 credential，
+每个请求自己带、自己验。
+
+分页在 biz 层，不在传输层：`list_traces` 收 `limit` / `offset`，回 `total`，上限与
+默认值由调用方定。翻过头是空页而不是报错。
+
+`offset` 分页拿不到一致性快照：排序看的是文件修改时间，翻页期间被追加的 trace 会挤进
+已经翻过或还没翻到的位置。按 cursor 稳定翻页尚未实现 —— v1 的量级下用 offset 够，
+真要「翻到底不重不漏」再换。
 
 ## 8 失败与恢复
 
@@ -208,13 +218,14 @@ WebSocket 上对应 `trace.list` 与 `trace.get` 两条只读 command，帧的�
 怎么转成 wire 报文、怎么解析响应，trace 看不到 —— 拿那一层要改 `ModelProvider` 的
 接口形状，是跨仓库的破坏性变更，代价大于收益。排查适配层问题时看 provider 的日志。
 
-热导出到 OTLP collector、按 trace_id 跨 scope 检索、trace 与运行状态的一致性检查尚未实现。
+热导出到 OTLP collector、按 trace_id 跨 scope 检索、按 cursor 的稳定翻页、trace 与运行
+状态的一致性检查尚未实现。
 
 ## 9 跨仓库影响
 
 trace 的数据形状是跨仓库契约：Hymio 与客户端按 `gen_ai.*` 读属性，
 换字段名要同步。协议字段改动属破坏性变更。
 
-新增 `trace.list` / `trace.get` 两条 command 与 `session.status.trace_id` 字段，
-客户端需要能处理未知 command 时忽略而不是断开。span 新增 `links` 字段，客户端读
-span 时按未知字段忽略处理即可。
+新增 `session.status.trace_id` 字段与两个 trace 查询端点。前者是 WebSocket 事件里
+多一个字段，后者是新的 HTTP 面 —— 客户端按未知字段 / 未知端点忽略处理即可。
+span 新增 `links` 字段，客户端读 span 时同样按未知字段忽略处理。

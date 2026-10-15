@@ -35,7 +35,8 @@ skill 加载、模型调用、trace 记录。扩展只提供业务内容和动�
 手段，进 `core/utils/`。消费方从 `core.protocol.datatype`、
 `core.protocol.error`、`core.protocol.interface` 三个包入口 import，不碰子模块，
 也不走 `core.protocol` 这一层——两个 `__init__.py` 都不重导出符号。
-`bootstrap/` 负责配置读取、模块装配与运行入口。
+`bootstrap/` 负责配置读取、模块装配与运行入口，并监听两个 server：WebSocket 收
+command，HTTP（`bootstrap/http.py`）供 biz 只读查询。
 
 「可缺省」指删掉它 runtime 照样启动，而且照样能恢复 —— 因为日志在 `core/` 里。
 

@@ -3,6 +3,8 @@
 同一连接按顺序 await submit；fsync 放在线程中，成功后回 ACK。
 在线事件经 OutboundHub 投递，断线后用 session.status 查询当前持久化状态。
 session 绑定后不允许客户端重新声明身份。
+
+只读查询不在这里 —— biz 的 trace 查询走 `bootstrap/http.py`。查询不是 command。
 """
 
 from __future__ import annotations
@@ -16,7 +18,6 @@ import websockets
 from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as _ws_serve
 
-from biz.trace import get_trace, list_traces
 from bootstrap.runtime import Runtime
 from core.outbound.hub import ClientChannel
 from core.protocol.datatype.scope import Scope
@@ -30,7 +31,7 @@ from core.protocol.datatype.wire import (
     pong,
 )
 from core.protocol.error import WireProtocolError
-from core.utils.encoding import JsonObject, canonical_json
+from core.utils.encoding import canonical_json
 
 _log = logging.getLogger("oath.server")
 
@@ -108,16 +109,15 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
                 continue
 
             try:
-                query = await _query(runtime, command, scope)
-                if query is not None:
-                    event_type, payload = query
+                if command.type == CommandType.SESSION_STATUS:
+                    payload = await asyncio.to_thread(runtime.status, scope)
                     await connection.send(
                         canonical_json(
                             {
                                 "v": 1,
                                 "type": "event",
                                 "session_id": scope.session_id,
-                                "event_type": event_type,
+                                "event_type": CommandType.SESSION_STATUS,
                                 "payload": payload,
                             }
                         )
@@ -137,23 +137,6 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
     finally:
         if scope is not None:
             runtime.hub.detach(scope, channel)
-
-
-async def _query(runtime: Runtime, command: Command, scope: Scope) -> tuple[str, JsonObject] | None:
-    """查询类 command 回一个 event 帧，不是 ACK —— 它没接纳任何东西。
-
-    阻塞读走 `asyncio.to_thread`，与 submit 一样 —— 文件 I/O 不能占住事件循环。
-    """
-    if command.type == CommandType.SESSION_STATUS:
-        return CommandType.SESSION_STATUS, await asyncio.to_thread(runtime.status, scope)
-    if command.type == CommandType.TRACE_LIST:
-        return CommandType.TRACE_LIST, await asyncio.to_thread(list_traces, runtime.traces, scope)
-    if command.type == CommandType.TRACE_GET:
-        trace_id = str(command.payload["trace_id"])
-        return CommandType.TRACE_GET, await asyncio.to_thread(
-            get_trace, runtime.traces, scope, trace_id
-        )
-    return None
 
 
 async def _fail(connection: ServerConnection, command_id: str | None, exc: Exception) -> None:

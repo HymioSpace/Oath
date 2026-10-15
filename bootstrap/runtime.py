@@ -30,6 +30,7 @@ from core.protocol.interface.llm import ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
 from core.protocol.interface.tool import Tool
+from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
 from core.skill import SKILL, SkillSystem, SkillTool
@@ -106,7 +107,7 @@ class Runtime:
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
         details = FileDetailStore(data_root / "details")
-        self.traces = FileTraceStore(data_root / "traces")
+        self.traces: TraceStore = FileTraceStore(data_root / "traces")
         skills = SkillSystem(config.agent.skill_dir, scan_dirs=config.agent.skill_scan_dirs)
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))

@@ -45,12 +45,13 @@ flowchart TD
 | core/llm | provider adapter，当前支持 OpenAI-compatible API |
 | core/trace | 按 scope 记录 ReAct 循环的 span，OpenTelemetry 形状 |
 | core/outbound | 在线事件与客户端背压 |
-| bootstrap | 配置、认证装配、启动恢复、WebSocket |
+| bootstrap | 配置、认证装配、启动恢复；WebSocket server 与 biz server |
 | biz | runtime 对外暴露的功能，当前只有 trace 的读模型 |
 | extensions | 业务能力扩展 |
 
 biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是
-`biz/trace/`），不放协议与生命周期 —— 那两样在 `bootstrap/`。
+`biz/trace/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
+一个 biz server 供查询。整个 biz 一个端口，每条查询是其中一个 path。
 依赖单向 `biz` → `bootstrap` → `core`。
 
 core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。

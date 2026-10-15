@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from biz.trace.api import get_trace, list_traces
+from biz.trace.api import list_traces, query_trace
 
-__all__ = ["get_trace", "list_traces"]
+__all__ = ["list_traces", "query_trace"]

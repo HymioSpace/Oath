@@ -16,13 +16,15 @@ from core.protocol.interface.trace import TraceStore
 from core.utils.encoding import JsonObject, JsonValue
 
 
-def list_traces(traces: TraceStore, scope: Scope) -> JsonObject:
-    """这个 scope 的 trace 列表，每条带 span 数、step 数与累计耗时。
+def list_traces(traces: TraceStore, scope: Scope, *, limit: int, offset: int) -> JsonObject:
+    """这个 scope 的 trace 列表的一页，每条带 span 数、step 数与累计耗时。
 
-    累计耗时读的时候算而不是存下来：存了就是第二份真相，span 一改它就过期了。
+    排序按最近写入，页内是 `offset` 起的一截。`total` 是全部条数，客户端靠它判断还有
+    没有下一页。分页只切列表 —— 一条 trace 的 span 数、耗时都是整条读的，不跨页。
     """
+    trace_ids = traces.trace_ids(scope)
     listed: list[JsonValue] = []
-    for trace_id in traces.trace_ids(scope):
+    for trace_id in trace_ids[offset : offset + limit]:
         spans = traces.spans(scope, trace_id)
         listed.append(
             {
@@ -32,10 +34,10 @@ def list_traces(traces: TraceStore, scope: Scope) -> JsonObject:
                 "duration_ms": _elapsed(spans),
             }
         )
-    return {"trace_ids": listed}
+    return {"trace_ids": listed, "total": len(trace_ids), "limit": limit, "offset": offset}
 
 
-def get_trace(traces: TraceStore, scope: Scope, trace_id: str) -> JsonObject:
+def query_trace(traces: TraceStore, scope: Scope, trace_id: str) -> JsonObject:
     """按 trace_id 取一条 trace 的全部 span。找不到就是空列表 —— 与「无权查看」不可区分。"""
     spans = traces.spans(scope, trace_id)
     return {
@@ -53,4 +55,4 @@ def _elapsed(spans: tuple[Span, ...]) -> float | None:
     return round((max(ends) - min(span.start_unix_nano for span in spans)) / 1_000_000, 3)
 
 
-__all__ = ["get_trace", "list_traces"]
+__all__ = ["list_traces", "query_trace"]

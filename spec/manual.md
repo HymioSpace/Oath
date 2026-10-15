@@ -9,7 +9,9 @@ export MINIMAX_API_KEY=...  # 按配置的 api_key_env 设置
 uv run python scripts/run_runtime.py --config oath.toml
 ```
 
-默认监听 `ws://127.0.0.1:8765`。配置中的 credential 映射仅用于演示；部署由 Hymio 提供身份与权限策略。
+默认监听 `ws://127.0.0.1:8765`；biz server 在 `http://127.0.0.1:8766`，整个 biz
+一个端口，每条查询是其中一个 path。配置中的
+credential 映射仅用于演示；部署由 Hymio 提供身份与权限策略。
 
 先发送：
 
@@ -36,14 +38,12 @@ user_id 由服务端认证决定。credential 不认则 close unauthorized，不
 | run.cancel | run_id?, reason? | 可靠接纳 ACK；未指定 run_id 时绑定处理时的当前 run |
 | step.retry | 空对象 | 可靠接纳 ACK；重试失败或暂停的原 step |
 | session.status | 空对象 | 当前 session.status 事件，不触发模型 |
-| trace.list | 空对象 | 当前 session 的 trace.list 事件，不触发模型 |
-| trace.get | trace_id: string | trace.get 事件，不触发模型 |
 | ping | 空对象 | pong，不落盘 |
 
 ACK 表示已保存命令，不代表模型已回答、权限已生效或工具完成。写入失败回 error，不回成功 ACK。
 命令 ID 使用唯一字符串；重发同一命令复用原 ID 和内容。同 ID 不同内容报错。
 客户端不得替换审批对应的工具 / 参数；decided_by 即使携带也由服务端认证身份覆盖。
-session.status / trace.list / trace.get 不产生输入、不改任何状态，可以随时重发。
+session.status 不产生输入、不改任何状态，可以随时重发。trace 查询不在 WebSocket 上，走 [§4 Trace 查询](#4-trace-查询) 的 HTTP。
 
 ## 3 审批与重连
 
@@ -69,8 +69,17 @@ step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；
 ## 4 Trace 查询
 
 一条 trace 是一段 ReAct 循环：一个 step 产出工具调用，工具结果唤醒下一个 step，
-直到某个 step 不再要工具为止。trace.list 返回当前 session 的全部 trace，
-trace.get 返回其中一条的 span 列表。两者都只读，不触发模型。
+直到某个 step 不再要工具为止。
+
+查询走 biz server 的 HTTP 接口，不在 WebSocket 上：它不产生 ACK、不改任何状态，
+塞进 command/event 协议里是拧的。两个 server 共用一套 credential。
+
+path 就是动作名，参数走 query string：`GET /list_traces`、`GET /query_trace`。
+
+```bash
+TOKEN=synthetic-demo-token
+BASE=http://127.0.0.1:8766
+```
 
 ### 4.1 拿 trace_id
 
@@ -86,22 +95,36 @@ trace.get 返回其中一条的 span 列表。两者都只读，不触发模型�
 
 ### 4.2 列历史
 
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/list_traces?limit=20&offset=0"
+```
+
 ```json
-{"v":1,"type":"trace.list","id":"t1","session_id":"default","payload":{}}
-{"v":1,"type":"event","session_id":"default","event_type":"trace.list","payload":{"trace_ids":[{"trace_id":"6f1c9b2d...","span_count":4,"step_count":2,"duration_ms":812.4}]}}
+{"trace_ids":[{"trace_id":"6f1c9b2d...","span_count":4,"step_count":2,"duration_ms":812.4}],"total":37,"limit":20,"offset":0}
 ```
 
 `span_count` 是这条 trace 的 span 总数，`step_count` 是它跑了几步。
 最近写入的排前面。`duration_ms` 为 `null` 表示一个 span 都没结束 —— 见 4.4。
 
+分页用 `limit` 与 `offset`，都不给时 `limit` 取 50、上限 200；`offset` 不限大小。
+`total` 是全部条数，客户端靠它判断还有没有下一页；翻过头是空页，不是报错。
+`limit` 超上限直接回 400，不静默截断 —— 截断会让客户端以为那就是全部。
+
+**翻页之间不是快照。** 排序看文件的修改时间，所以翻页过程中若有 trace 被追加（比如
+重试后补写的旧 trace 前移），同一页里的条目可能重复或漏掉。当成「最近活动过的
+trace 大致是这样」来看，别当成一致性分页。
+
 ### 4.3 取一条
 
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "$BASE/query_trace?trace_id=6f1c9b2d..."
+```
+
 ```json
-{"v":1,"type":"trace.get","id":"t2","session_id":"default","payload":{"trace_id":"6f1c9b2d..."}}
-{"v":1,"type":"event","session_id":"default","event_type":"trace.get","payload":{"trace_id":"6f1c9b2d...","duration_ms":812.4,"spans":[
+{"trace_id":"6f1c9b2d...","duration_ms":812.4,"spans":[
   {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4e5f60718","parent_span_id":null,"name":"invoke_agent","kind":"internal","start_unix_nano":1760000000000000000,"end_unix_nano":1760000000400000000,"status":"ok","duration_ms":400.0,"attributes":{"oath.step.id":"step-example-0","oath.step.status":"completed","oath.step.llm_calls":1,"oath.step.duration_ms":400.0},"events":[{"name":"oath.input.user","unix_nano":1760000000000000000,"attributes":{"body":"{...}"}},{"name":"oath.stage.tools_submitted","unix_nano":1760000000399000000,"attributes":{"oath.step.tool_calls":1}}],"links":[]},
   {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4f6071801","parent_span_id":"a1b2c3d4e5f60718","name":"chat m1","kind":"client","start_unix_nano":1760000000100000000,"end_unix_nano":1760000001200000000,"status":"ok","duration_ms":1100.0,"attributes":{"gen_ai.request.model":"m1","gen_ai.usage.input_tokens":812,"gen_ai.usage.output_tokens":64,"oath.llm.ttft_ms":420.0,"oath.llm.tpot_ms":12.1},"events":[{"name":"gen_ai.request","unix_nano":1760000000100000000,"attributes":{"body":"{...}"}},{"name":"gen_ai.response","unix_nano":1760000001200000000,"attributes":{"body":"{...}"}}],"links":[]}
-]}}
+]}
 ```
 
 ### 4.4 怎么读
@@ -138,25 +161,21 @@ span 字段与 OpenTelemetry 的 span 模型一致，属性名清单见 [Trace](
 客户端按 `step_count` 展示循环轮数、按 `duration_ms` 展示耗时即可，
 不要试图从 trace 还原成对话。
 
-### 4.5 找不到的时候
+### 4.5 错误与空态
 
-`trace_id` 不存在、或属于别的 session，都返回 `spans: []` 与 `duration_ms: null`，
+credential 不认回 `401 {"error":"unauthorized"}`，响应里不回显凭据本身。
+参数不合法（非整数、负数、超上限、缺 trace_id）回 `400 {"error":"bad_query","message":...}`。
+读 trace 失败回 `500 {"error":"internal_error"}` —— 不把故障说成空列表。
+
+`trace_id` 不存在、或属于别的 session，都回 `spans: []` 与 `duration_ms: null`，
 不报错，也不区分「不存在」和「无权查看」。按空态处理即可。
 
-### 4.6 手工试
+### 4.6 自动化检查
 
-当前终端客户端只发聊天消息。用支持原始帧的客户端连上后依次发：
-
-```json
-{"v":1,"type":"session.status","id":"q1","session_id":"default","payload":{}}
-{"v":1,"type":"trace.list","id":"q2","session_id":"default","payload":{}}
-{"v":1,"type":"trace.get","id":"q3","session_id":"default","payload":{"trace_id":"<4.1 拿到的>"}}
-```
-
-自动化链路检查使用替身模型和文件后端，不调用真实模型：
+用替身模型和文件后端，不连真实模型、不起 socket：
 
 ```bash
-uv run pytest -q tests/test_biz_trace.py tests/test_trace_store.py tests/test_trace_brain.py
+uv run pytest -q tests/test_biz_http.py tests/test_biz_trace.py tests/test_trace_store.py tests/test_trace_brain.py
 ```
 
 ## 5 Event
@@ -176,8 +195,6 @@ uv run pytest -q tests/test_biz_trace.py tests/test_trace_store.py tests/test_tr
 | step.status | status, error, step_id? |
 | intake.rejected | input_id, error |
 | session.status | 当前快照 |
-| trace.list | trace_ids[]：trace_id, span_count, step_count, duration_ms |
-| trace.get | trace_id, duration_ms, spans[] |
 
 tool.terminal outcome 为 succeeded / failed / timeout / cancelled / outcome_unknown。
 结果正文超过阈值时 content 是截断后的文本，detail_key 指到全文，original_chars 是原长度；
