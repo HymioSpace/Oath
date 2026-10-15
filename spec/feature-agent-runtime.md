@@ -43,7 +43,7 @@ Brain 共用 RuntimeStore、ToolSystem、EventQueue、AgentEventSink 与 AgentCo
 1. 如果已有 active step，恢复它；失败或暂停态不越过。
 2. 选取三个 buffer 全部 `buffered` 输入，按持久化 receipt 序列排列。
 3. 关闭未呈现 batch 的全部 tool response 槽位，保存真实结果或 reminder。
-4. 保存 provider-neutral 请求草稿、step/run 身份、输入 IDs 和状态。
+4. 保存 provider-neutral 请求草稿、step/run/trace 身份、输入 IDs 和状态。
 5. 输入变为 claimed，batch 的 presented_by_step 固定。
 
 context 草稿与认领同事务完成；锁外压缩后，step.request 保存最终请求。锁内不执行网络或工具。
@@ -63,6 +63,7 @@ system message 是 `system_prompt` 加上 [Skill](feature-skill.md) 的技能索
 
 模型请求保存 messages、工具定义、model、temperature、max_output_tokens、extra_params。
 重试与恢复读取同一份请求；新输入留在 buffer。凭据和 transport 配置由部署提供，不写请求快照。
+这份冻结的请求同时是 [Trace](feature-trace.md) 里记录的那一份原文。
 
 `conversation.messages` 存全文；发给模型的视图由 CompactionCoordinator 按已生效的压缩产物重组。
 输入认领后判断包含本轮输入的阈值，压缩调用在事务外；最终请求保存后才执行模型。见 [Compaction](feature-compaction.md)。
@@ -78,6 +79,8 @@ step.completed 把 assistant 消息追加到 conversation，只把该 step 的 i
 
 assistant.delta 为在线展示，带 step_id、channel、seq；不参与恢复。完整 assistant.message 已保存
 才推送。网络重试可能重新流式输出；客户端应以最终消息 / session.status 替换草稿。
+
+认领与到终态各写一条 step span，一次模型调用一条 llm span，写失败不影响推理。
 
 ## 5 失败与恢复
 

@@ -8,8 +8,9 @@ import logging
 import threading
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import cast
 
 from core.buffer.journal_buffer import buffered
 from core.compaction.coordinator import CompactionCoordinator
@@ -18,10 +19,45 @@ from core.journal.runtime_store import State
 from core.protocol.datatype import Message, Scope, ToolCallRequest, ToolDefinition
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
 from core.protocol.datatype.message import MessageEvent, MessageEventType
+from core.protocol.datatype.trace import (
+    SPAN_ID_LENGTH,
+    Span,
+    SpanEvent,
+    SpanKind,
+    SpanStatus,
+    new_trace_id,
+)
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
-from core.utils.encoding import canonical_json, utc_now_iso
+from core.trace.attributes import (
+    BODY,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_REQUEST_MAX_TOKENS,
+    GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    OATH_LLM_ATTEMPT,
+    OATH_LLM_DURATION_MS,
+    OATH_LLM_TPOT_MS,
+    OATH_LLM_TTFT_MS,
+    OATH_RUN_ID,
+    OATH_STEP_DURATION_MS,
+    OATH_STEP_ID,
+    OATH_STEP_INPUT_COUNT,
+    OATH_STEP_LLM_CALLS,
+    OATH_STEP_STATUS,
+    OATH_STEP_TRIGGERS,
+    OP_CHAT,
+    OP_INVOKE_AGENT,
+    REQUEST_EVENT,
+    RESPONSE_EVENT,
+    chat_span_name,
+    input_event_name,
+)
+from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 from core.utils.tokens import estimate_text
 
 _log = logging.getLogger(__name__)
@@ -110,6 +146,7 @@ class AgentBrain(Brain):
         definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
         config = self._ctx.config
         fresh = False
+        claimed: list[tuple[str, float | None, State]] = []
 
         def claim(state: State) -> State | None:
             nonlocal fresh
@@ -124,8 +161,13 @@ class AgentBrain(Brain):
                 return None
             step_id = uuid.uuid4().hex
             new_user = any(e["queue"] == "user" for _, e in entries)
-            if new_user or not state["meta"].get("run_id"):
+            new_run = new_user or not state["meta"].get("run_id")
+            if new_run:
                 state["meta"].update(run_id=uuid.uuid4().hex, run_steps=0, run_started=time.time())
+            # 续不续上一条 trace 只看两件事：是不是新 run，上一个 step 有没有产出工具
+            # 调用。新 run 必开新 trace —— 工具还在跑时插进来的那句话属于新意图。
+            continuing = not new_run and state["meta"].get("trace_step")
+            trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
             messages = build_messages(state, entries, step_id)
             system = self._system_prompt()
             request_messages = (
@@ -138,6 +180,8 @@ class AgentBrain(Brain):
             step = {
                 "step_id": step_id,
                 "run_id": state["meta"]["run_id"],
+                "trace_id": trace_id,
+                "trace_started": time.time_ns(),
                 "input_ids": [key for key, _ in entries],
                 "trigger": list(triggers),
                 "status": "paused" if exhausted else "prepared",
@@ -156,16 +200,22 @@ class AgentBrain(Brain):
             }
             state["steps"][step_id] = step
             state["meta"]["active_step"] = step_id
+            state["meta"]["trace_id"] = trace_id
             fresh = True
+            claimed.extend(
+                (entry["queue"], entry["buffered_at"], entry["item"]) for _, entry in entries
+            )
             state["conversation"]["messages"] = messages
             for _, entry in entries:
                 entry.update(phase="claimed", step_id=step_id)
             return step
 
         step = self._store.transact(scope, "step.input", claim)
-        if fresh:
+        if fresh and step is not None:
+            # 事务外写 span：文件 I/O 不能在 scope 锁里做。
+            self._open_step(scope, step, claimed)
             self._ctx.queue.notify(scope)
-            if step and step["status"] == "paused":
+            if step["status"] == "paused":
                 self._emit(
                     scope,
                     "step.status",
@@ -254,16 +304,28 @@ class AgentBrain(Brain):
                 state["steps"][step_id]["attempts"] += 1
 
             self._store.transact(scope, "step.attempt", attempt)
+            attempt_no = int(step["attempts"]) + 1
+            emit = self._delta(scope, step_id)
+            # ttft = 第一段增量到达的时刻。计时用单调时钟：墙上时间会被 NTP 拨一下。
+            timing: list[float] = []
+            clock = time.monotonic()
+
+            def on_delta(channel: str, text: str) -> None:
+                if not timing:
+                    timing.append(time.monotonic())
+                emit(channel, text)
+
+            started_ns = time.time_ns()
             try:
-                response = self._provider.complete(
-                    _request(step["request"]), on_delta=self._delta(scope, step_id)
-                )
+                response = self._provider.complete(_request(step["request"]), on_delta=on_delta)
                 if self._stop.is_set():
                     return
                 payload = _response(response)
             except Exception as exc:
+                self._record_llm(scope, step, attempt_no, started_ns, clock, timing, None, str(exc))
                 self._fail(scope, step_id, str(exc))
                 return
+            self._record_llm(scope, step, attempt_no, started_ns, clock, timing, response, None)
 
             def save(state: State) -> None:
                 state["steps"][step_id]["response"] = payload
@@ -291,10 +353,10 @@ class AgentBrain(Brain):
                 ],
             )
 
-        def finish(state: State) -> None:
+        def finish(state: State) -> State:
             current = state["steps"][step_id]
             if current["status"] == "completed":
-                return
+                return cast(State, current)
             message: State = {
                 "role": "assistant",
                 "content": "运行已取消。" if cancelled else current["response"]["content"],
@@ -309,27 +371,171 @@ class AgentBrain(Brain):
             current["status"] = "completed"
             state["meta"]["active_step"] = None
             state["meta"]["run_steps"] = state["meta"].get("run_steps", 0) + 1
+            # 没有工具调用就是这一串的最后一个 step：下一个 step 开新 trace。
+            state["meta"]["trace_step"] = step_id if calls else None
+            return cast(State, current)
 
-        self._store.transact(scope, "step.completed", finish)
+        # 终态从事务里回读，不复用认领时那份 —— 写进 span 的必须是最终的 status。
+        closed = self._store.transact(scope, "step.completed", finish)
+        self._close_step(scope, closed, SpanStatus.OK, int(closed["attempts"]))
         self._ctx.queue.notify(scope)
         # Consumer 会重查各自规则；不能仅因 buffer 非空再次调用模型。
 
     def _fail(self, scope: Scope, step_id: str, error: str) -> None:
-        def change(state: State) -> str:
+        def change(state: State) -> State:
             step = state["steps"][step_id]
             failed = step["attempts"] >= self._ctx.config.llm_max_attempts
             step.update(status="failed" if failed else "prepared", error=error[:500])
-            return str(step["status"])
+            return cast(State, step)
 
-        status = self._store.transact(scope, "step.error", change)
+        step = self._store.transact(scope, "step.error", change)
         self._emit(
-            scope, "step.status", {"step_id": step_id, "status": status, "error": error[:500]}
+            scope,
+            "step.status",
+            {"step_id": step_id, "status": step["status"], "error": error[:500]},
         )
-        if status == "prepared":
-            self._stop.wait(self._ctx.config.llm_retry_delay)
-            self.resume(scope)
+        if step["status"] == "failed":
+            self._close_step(scope, step, SpanStatus.ERROR, int(step["attempts"]))
+            return
+        self._stop.wait(self._ctx.config.llm_retry_delay)
+        self.resume(scope)
 
-    def _delta(self, scope: Scope, step_id: str) -> Any:
+    # -- trace ---------------------------------------------------------------
+
+    def _trace(self, scope: Scope, span: Span) -> None:
+        """写一条 span。**写失败不上抛**：trace 是派生的，journal 才是事实来源。"""
+        try:
+            self._ctx.traces.append(scope, span)
+        except Exception:
+            _log.exception("写 trace 失败，推理不受影响")
+
+    def _open_step(
+        self, scope: Scope, step: State, claimed: list[tuple[str, float | None, State]]
+    ) -> None:
+        """step 认领时的第一条 span。`end` 为空 —— 进程崩在这一步中途就留个空 end。"""
+        started = int(step["trace_started"])
+        self._trace(
+            scope,
+            Span(
+                trace_id=step["trace_id"],
+                span_id=_step_span_id(step["step_id"]),
+                name=OP_INVOKE_AGENT,
+                kind=SpanKind.INTERNAL,
+                start_unix_nano=started,
+                status=SpanStatus.UNSET,
+                attributes={
+                    GEN_AI_OPERATION_NAME: OP_INVOKE_AGENT,
+                    OATH_RUN_ID: step["run_id"],
+                    OATH_STEP_ID: step["step_id"],
+                    OATH_STEP_STATUS: step["status"],
+                    OATH_STEP_TRIGGERS: list(step["trigger"]),
+                    OATH_STEP_INPUT_COUNT: len(claimed),
+                    OATH_STEP_LLM_CALLS: 0,
+                },
+                events=_input_events(started, claimed),
+            ),
+        )
+
+    def _close_step(self, scope: Scope, step: State, status: str, llm_calls: int) -> None:
+        """step 到终态时的第二条 span。同一个 span_id，读的时候后写的赢。
+
+        输入事件在这里重读一遍，不靠认领时那份：后写的整条覆盖先写的，事件不补回来
+        就等于从没写过。
+        """
+        start = int(step["trace_started"])
+        end = time.time_ns()
+        entries = self._store.read(scope)["inputs"]
+        claimed = [
+            (entries[key]["queue"], entries[key]["buffered_at"], entries[key]["item"])
+            for key in step["input_ids"]
+            if key in entries
+        ]
+        self._trace(
+            scope,
+            Span(
+                trace_id=step["trace_id"],
+                span_id=_step_span_id(step["step_id"]),
+                name=OP_INVOKE_AGENT,
+                kind=SpanKind.INTERNAL,
+                start_unix_nano=start,
+                end_unix_nano=end,
+                status=status,
+                attributes={
+                    GEN_AI_OPERATION_NAME: OP_INVOKE_AGENT,
+                    OATH_RUN_ID: step["run_id"],
+                    OATH_STEP_ID: step["step_id"],
+                    OATH_STEP_STATUS: step["status"],
+                    OATH_STEP_TRIGGERS: list(step["trigger"]),
+                    OATH_STEP_INPUT_COUNT: len(step["input_ids"]),
+                    OATH_STEP_LLM_CALLS: llm_calls,
+                    OATH_STEP_DURATION_MS: round((end - start) / 1_000_000, 3),
+                },
+                events=_input_events(start, claimed),
+            ),
+        )
+
+    def _record_llm(
+        self,
+        scope: Scope,
+        step: State,
+        attempt: int,
+        started_ns: int,
+        clock: float,
+        first_delta: list[float],
+        response: LlmResponse | None,
+        error: str | None,
+    ) -> None:
+        """一次模型调用。请求与响应原样进 span event，耗时进 attribute。"""
+        end = time.monotonic()
+        end_ns = time.time_ns()
+        request = step["request"]
+        duration_ms = (end - clock) * 1000
+        attributes: JsonObject = {
+            GEN_AI_OPERATION_NAME: OP_CHAT,
+            GEN_AI_REQUEST_MODEL: request["model"],
+            GEN_AI_REQUEST_MAX_TOKENS: request["max_output_tokens"],
+            OATH_STEP_ID: step["step_id"],
+            OATH_LLM_ATTEMPT: attempt,
+            OATH_LLM_DURATION_MS: round(duration_ms, 3),
+        }
+        if request.get("temperature") is not None:
+            attributes[GEN_AI_REQUEST_TEMPERATURE] = request["temperature"]
+        ttft_ms = (first_delta[0] - clock) * 1000 if first_delta else None
+        if ttft_ms is not None:
+            attributes[OATH_LLM_TTFT_MS] = round(ttft_ms, 3)
+        output_tokens = _output_tokens(response)
+        if ttft_ms is not None and output_tokens is not None and output_tokens > 1:
+            attributes[OATH_LLM_TPOT_MS] = round((duration_ms - ttft_ms) / (output_tokens - 1), 4)
+        if response is not None:
+            attributes[GEN_AI_RESPONSE_FINISH_REASONS] = [response.finish_reason]
+            for key, name in (
+                ("prompt_tokens", GEN_AI_USAGE_INPUT_TOKENS),
+                ("completion_tokens", GEN_AI_USAGE_OUTPUT_TOKENS),
+            ):
+                value = response.usage.get(key)
+                if isinstance(value, int):
+                    attributes[name] = value
+        events = [SpanEvent(REQUEST_EVENT, started_ns, {BODY: canonical_json(request)})]
+        if response is not None:
+            raw = canonical_json(_body(response))
+            events.append(SpanEvent(RESPONSE_EVENT, end_ns, {BODY: raw}))
+        self._trace(
+            scope,
+            Span(
+                trace_id=step["trace_id"],
+                span_id=_llm_span_id(step["step_id"], attempt),
+                parent_span_id=_step_span_id(step["step_id"]),
+                name=chat_span_name(request["model"]),
+                kind=SpanKind.CLIENT,
+                start_unix_nano=started_ns,
+                end_unix_nano=end_ns,
+                status=SpanStatus.OK if error is None else SpanStatus.ERROR,
+                attributes=attributes,
+                events=tuple(events),
+            ),
+        )
+
+    def _delta(self, scope: Scope, step_id: str) -> Callable[[str, str], None]:
         counter = itertools.count(1)
 
         def emit(channel: str, text: str) -> None:
@@ -365,6 +571,61 @@ class AgentBrain(Brain):
             for worker in workers:
                 if worker.thread:
                     worker.thread.join(timeout=2)
+
+
+def _input_events(
+    started: int, claimed: Sequence[tuple[str, float | None, State]]
+) -> tuple[SpanEvent, ...]:
+    """step 的每条输入各一个 span event，body 是那条 `Inbound` 的原始 JSON。
+
+    时间用输入进 buffer 的时刻；没有就退回 step 开始的时间 —— 比统一填 0 诚实。
+    """
+    return tuple(
+        SpanEvent(
+            input_event_name(queue),
+            int(at * 1_000_000_000) if at else started,
+            {BODY: canonical_json(item)},
+        )
+        for queue, at, item in claimed
+    )
+
+
+def _step_span_id(step_id: str) -> str:
+    """step 的 span_id 由 step_id 决定。
+
+    认领和收尾各写一次，必须落到同一个 id 上（读的时候后写的赢）；失败重试走同一个
+    step，同一个 id 也对得上。step_id 是 32 位 hex，取前 16 位正好是 OTel 的 span_id。
+    """
+    return step_id[:SPAN_ID_LENGTH]
+
+
+def _llm_span_id(step_id: str, attempt: int) -> str:
+    """一次模型调用一个 span。重试的每一次都留一条 —— 失败了几次是排查的第一现场。"""
+    return f"{step_id[: SPAN_ID_LENGTH // 2]}{attempt:08x}"
+
+
+def _output_tokens(response: LlmResponse | None) -> int | None:
+    """输出 token 数。provider 没报就估算 —— tpot 的分母，宁可粗一点也不要没有。"""
+    if response is None:
+        return None
+    usage = response.usage.get("completion_tokens")
+    if isinstance(usage, int):
+        return usage
+    return estimate_text(response.content) + estimate_text(response.reasoning or "")
+
+
+def _body(response: LlmResponse) -> JsonObject:
+    """模型这一次原样说了什么。不经 `_response` 归一 —— 那是给对话历史用的。"""
+    return {
+        "content": response.content,
+        "reasoning": response.reasoning,
+        "finish_reason": response.finish_reason,
+        "usage": dict(response.usage),
+        "tool_calls": [
+            {"id": call.tool_call_id, "name": call.tool, "arguments": call.arguments}
+            for call in response.tool_calls
+        ],
+    }
 
 
 def _request(raw: State) -> LlmRequest:

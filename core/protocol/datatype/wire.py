@@ -79,6 +79,10 @@ class CommandType:
     #: 显式重试暂停 / 失败的原 step。
     STEP_RETRY: Final = "step.retry"
     SESSION_STATUS: Final = "session.status"
+    #: 当前 session 有哪些 trace。
+    TRACE_LIST: Final = "trace.list"
+    #: 取一条 trace 的全部 span。
+    TRACE_GET: Final = "trace.get"
     PING: Final = "ping"
 
     ALL: Final = frozenset(
@@ -90,8 +94,13 @@ class CommandType:
             PING,
             STEP_RETRY,
             SESSION_STATUS,
+            TRACE_LIST,
+            TRACE_GET,
         }
     )
+
+    #: 查询与心跳：不产生输入，也不改任何状态。
+    QUERY: Final = frozenset({PING, SESSION_STATUS, TRACE_LIST, TRACE_GET})
 
     #: 不需要 `session_id` 的 command —— 绑定 session 之前还没有 session_id。
     ANONYMOUS: Final = frozenset({SESSION_OPEN})
@@ -136,6 +145,8 @@ COMMAND_SCHEMAS: Final[dict[str, PayloadSchema]] = {
     CommandType.RUN_CANCEL: PayloadSchema(optional=frozenset({"reason", "run_id"})),
     CommandType.STEP_RETRY: PayloadSchema(),
     CommandType.SESSION_STATUS: PayloadSchema(),
+    CommandType.TRACE_LIST: PayloadSchema(),
+    CommandType.TRACE_GET: PayloadSchema(required=frozenset({"trace_id"})),
     CommandType.PING: PayloadSchema(),
 }
 

@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from websockets.asyncio.server import ServerConnection
 
+from biz.api import AgentApi
 from bootstrap.runtime import Runtime
 from bootstrap.ws import _serve_connection
 from core.protocol.datatype.config import OathConfig
@@ -65,7 +66,9 @@ class Connection:
 
     def serve(self, runtime: Runtime) -> asyncio.Task[None]:
         """按 `_serve_connection` 声明的参数类型起这条连接的处理协程。"""
-        return asyncio.create_task(_serve_connection(runtime, cast(ServerConnection, self)))
+        return asyncio.create_task(
+            _serve_connection(runtime, AgentApi(runtime), cast(ServerConnection, self))
+        )
 
 
 def tool_system(runtime: Runtime) -> ThreadedToolSystem:
@@ -129,7 +132,7 @@ async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> Non
         assert state["calls"][call["invocation_id"]]["source"] == "system"
         assert state["inputs"]["invoke:approve"]["item"]["payload"]["decided_by"] == "u1"
         with pytest.raises(WireProtocolError):
-            runtime.submit(
+            AgentApi(runtime).submit(
                 Command(
                     "bad",
                     "permission.decide",

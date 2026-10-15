@@ -36,11 +36,14 @@ user_id 由服务端认证决定。credential 不认则 close unauthorized，不
 | run.cancel | run_id?, reason? | 可靠接纳 ACK；未指定 run_id 时绑定处理时的当前 run |
 | step.retry | 空对象 | 可靠接纳 ACK；重试失败或暂停的原 step |
 | session.status | 空对象 | 当前 session.status 事件，不触发模型 |
+| trace.list | 空对象 | 当前 session 的 trace.list 事件，不触发模型 |
+| trace.get | trace_id: string | trace.get 事件，不触发模型 |
 | ping | 空对象 | pong，不落盘 |
 
 ACK 表示已保存命令，不代表模型已回答、权限已生效或工具完成。写入失败回 error，不回成功 ACK。
 命令 ID 使用唯一字符串；重发同一命令复用原 ID 和内容。同 ID 不同内容报错。
 客户端不得替换审批对应的工具 / 参数；decided_by 即使携带也由服务端认证身份覆盖。
+session.status / trace.list / trace.get 不产生输入、不改任何状态，可以随时重发。
 
 ## 3 审批与重连
 
@@ -55,7 +58,7 @@ permission.requested 带 invocation_id、batch_id、tool、arguments、expires_a
 
 断线后重新 session.open，再 session.status。响应包含：
 
-- run_id、step_id、step_status、error。
+- run_id、step_id、step_status、error、trace_id。
 - calls：原调用身份、工具 / 参数、审批 / 执行状态、期限与终态。
 - messages：固定的对话视图；末尾可能是尚未获得响应的工具声明。
 - input_errors：被隔离的无效内部输入。
@@ -63,7 +66,29 @@ permission.requested 带 invocation_id、batch_id、tool、arguments、expires_a
 按原 invocation_id 恢复授权卡；不要通过重新生成调用找回它。查询快照当前不分页。
 step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；新用户消息不会越过失败 step。
 
-## 4 Event
+## 4 Trace 查询
+
+一条 trace 是一段 ReAct 循环：一个 step 产出工具调用，工具结果唤醒下一个 step，
+直到某个 step 不再要工具为止。trace.list 返回当前 session 的全部 trace，
+trace.get 返回其中一条的 span 列表。两者都只读，不触发模型。
+
+```json
+{"v":1,"type":"trace.list","id":"t1","session_id":"default","payload":{}}
+{"v":1,"type":"event","session_id":"default","event_type":"trace.list","payload":{"trace_ids":[{"trace_id":"...","span_count":4,"step_count":2,"duration_ms":812.4}]}}
+
+{"v":1,"type":"trace.get","id":"t2","session_id":"default","payload":{"trace_id":"..."}}
+{"v":1,"type":"event","session_id":"default","event_type":"trace.get","payload":{"trace_id":"...","duration_ms":812.4,"spans":[{"trace_id":"...","span_id":"...","parent_span_id":null,"name":"invoke_agent","start_unix_nano":1,"end_unix_nano":2,"status":"ok","attributes":{...},"events":[...],"duration_ms":0.9}]}}
+```
+
+span 字段与 OpenTelemetry 一致，详见 [Trace](feature-trace.md)。`parent_span_id` 为空的
+是 step span，它下面的 `chat <模型>` 是模型调用 span。`end_unix_nano` 为空表示这一步
+还没结束 —— 进程在步骤中途崩掉时就是这个状态。请求与响应的原文在 span 的 `events` 里，
+`body` 字段是 JSON 文本。
+
+trace 找不到时返回空列表，不报错，也不区分「不存在」和「无权查看」。客户端按
+`step_count` 展示循环轮数、按 `duration_ms` 展示耗时即可，不要试图还原成对话。
+
+## 5 Event
 
 事件信封：
 
@@ -80,6 +105,8 @@ step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；
 | step.status | status, error, step_id? |
 | intake.rejected | input_id, error |
 | session.status | 当前快照 |
+| trace.list | trace_id, span_count, step_count, duration_ms |
+| trace.get | trace_id, duration_ms, spans |
 
 tool.terminal outcome 为 succeeded / failed / timeout / cancelled / outcome_unknown。
 结果正文超过阈值时 content 是截断后的文本，detail_key 指到全文，original_chars 是原长度；
@@ -91,7 +118,7 @@ assistant.delta 的 channel 为 content / reasoning，只用于草稿展示；�
 用完整 assistant.message 或重连查询替换草稿。tool.terminal 通知可重复，按 event_id 去重。
 在线事件不补发，occur_dt 不用于消费排序。持久化事务日志是 runtime.commit，客户端不需要解析它。
 
-## 5 错误与连接
+## 6 错误与连接
 
 error 带 id、code、message。帧结构 / 协议版本不合法时断开；已解析 command 的业务失败保留连接。
 常见 code：bad_frame、bad_payload、not_bound、session_mismatch、already_bound、not_found、internal_error。
@@ -99,7 +126,7 @@ error 带 id、code、message。帧结构 / 协议版本不合法时断开；已
 close reason：unauthorized、session_replaced、slow_consumer、protocol_error。
 慢连接发送队列满会断开，重连应退避并查询状态。idle_timeout 尚未启用。
 
-## 6 压缩事件与端到端验证
+## 7 压缩事件与端到端验证
 
 `context.compaction` 走同一条 WebSocket，下行 payload 为：
 

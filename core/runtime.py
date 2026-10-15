@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from core.context import ContextManager
 from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.config import AgentConfig
-from core.protocol.interface import AgentEventSink, EventQueue, Journal, ToolSystem
+from core.protocol.interface import AgentEventSink, EventQueue, Journal, ToolSystem, TraceStore
 from core.skill.system import SkillSystem
 
 
@@ -30,6 +30,8 @@ class AgentContext:
     context_manager: ContextManager
     #: 启动时扫好的技能索引，只读。
     skills: SkillSystem
+    #: 可观测记录。派生数据：写失败只丢 span，不影响推理。
+    traces: TraceStore
     config: AgentConfig
 
 

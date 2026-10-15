@@ -20,10 +20,8 @@ from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
 from core.outbound import OutboundHub, WsEventSink
 from core.protocol.datatype.config import OathConfig
-from core.protocol.datatype.inbound import of_command
 from core.protocol.datatype.scope import Scope
-from core.protocol.datatype.wire import Command, CommandType
-from core.protocol.error import PermissionDeniedError, WireProtocolError
+from core.protocol.error import PermissionDeniedError
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.llm import ModelProvider
@@ -35,6 +33,7 @@ from core.runtime import AgentContext
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
+from core.trace.impl import FileTraceStore
 from core.utils.encoding import JsonObject
 
 #: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
@@ -105,6 +104,7 @@ class Runtime:
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
         details = FileDetailStore(data_root / "details")
+        self.traces = FileTraceStore(data_root / "traces")
         skills = SkillSystem(config.agent.skill_dir, scan_dirs=config.agent.skill_scan_dirs)
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))
@@ -131,6 +131,7 @@ class Runtime:
             tools=tool_system,
             context_manager=ContextManager(self.journal, config.agent),
             skills=skills,
+            traces=self.traces,
             config=config.agent,
         )
         model = provider or OpenAICompatibleProvider(config.agent.provider)
@@ -158,61 +159,6 @@ class Runtime:
         self._resume_buffered()
 
     # -- 上行 --------------------------------------------------------------
-
-    def open_session(self, command: Command) -> Scope:
-        """验 credential，绑定 session。认不出就抛错 —— 不回落到匿名账号。"""
-        identity = self.authenticator.authenticate(str(command.payload.get("credential", "")))
-        return Scope(user_id=identity.user_id, session_id=identity.session_id)
-
-    def submit(self, command: Command, scope: Scope) -> None:
-        if command.session_id != scope.session_id:
-            raise WireProtocolError("session 与认证身份不匹配", code="session_mismatch")
-        if command.type == CommandType.PERMISSION_DECIDE:
-            if command.payload.get("status") not in {"approved", "denied"}:
-                raise WireProtocolError("审批只接受 approved / denied", code="bad_payload")
-            if not isinstance(command.payload.get("invocation_id"), str):
-                raise WireProtocolError("审批缺 invocation_id", code="bad_payload")
-            if self.ctx.tools.status(scope, str(command.payload["invocation_id"])) is None:
-                raise WireProtocolError("找不到调用", code="not_found")
-            command = Command(
-                command.id,
-                command.type,
-                command.session_id,
-                {**command.payload, "decided_by": scope.user_id},
-            )
-        if command.type == CommandType.USER_MESSAGE and not isinstance(
-            command.payload.get("content"), str
-        ):
-            raise WireProtocolError("content 必须是文本", code="bad_payload")
-        inbound = of_command(command)
-        if inbound is not None:
-            self.buffers.accept(scope, inbound)
-            self.ctx.queue.put(scope, inbound)
-            self.ensure_session(scope)
-
-    def status(self, scope: Scope) -> JsonObject:
-        state = self.ctx.store.read(scope)
-        active = state["meta"].get("active_step")
-        step = state["steps"].get(active, {})
-        return {
-            "run_id": state["meta"].get("run_id"),
-            "step_id": active,
-            "step_status": step.get("status", "idle"),
-            "error": step.get("error") or state["meta"].get("intake_error"),
-            "calls": list(state["calls"].values()),
-            "messages": state["conversation"].get("messages", []),
-            "compaction": {
-                key: {
-                    field: value.get(field) for field in ("compression_id", "covers", "created_dt")
-                }
-                for key, value in state["compactions"].items()
-            },
-            "input_errors": [
-                {"input_id": key, "error": entry["error"]}
-                for key, entry in state["inputs"].items()
-                if entry["phase"] == "rejected"
-            ],
-        }
 
     def ensure_session(self, scope: Scope) -> None:
         with self._workers_lock:

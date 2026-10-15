@@ -13,6 +13,7 @@ from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.queue import EventQueue
 from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
 from core.protocol.interface.tool import Tool, ToolSystem
+from core.protocol.interface.trace import TraceStore
 from core.protocol.interface.transport import OutboundTransport, SendResult
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "SessionIdentity",
     "Tool",
     "ToolSystem",
+    "TraceStore",
 ]
