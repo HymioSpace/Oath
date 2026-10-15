@@ -1,76 +1,157 @@
-# Oath
+<p align="center">
+  <img src="assets/oath-banner.png" alt="Oath — A durable, event-driven agent runtime." width="880" />
+</p>
 
-持久化、事件驱动的 agent runtime。
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b70ff?style=flat-square" alt="MIT License" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11%2B-101b2d?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
+  <a href="https://github.com/HymioSpace"><img src="https://img.shields.io/badge/by-HymioSpace-101b2d?style=flat-square" alt="By HymioSpace" /></a>
+</p>
 
-core 提供机制：事件运行时、状态机、追加日志、工具生命周期、超时、权限判定、context 组装、
-skill 加载、模型调用、trace 记录。扩展只提供业务内容和动作。日志是所有状态的唯一来源，
-崩溃后从这里恢复；trace 是派生的，不参与恢复。
+<p align="center">
+  <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a><br />
+  <a href="#quick-start">Quick start</a> · <a href="#how-it-works">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
+</p>
 
-**状态**：三 consumer、工具批次、审批执行、durable drain、三级压缩、技能索引、trace、
-bash 执行环境与 CLI 代理已实现。
-当前为单进程 JSONL runtime；语义和恢复边界见 [Intake](spec/feature-intake.md)。
+Oath is a Python runtime for agents that need to handle incoming messages, run tools, wait for approvals, and recover after interruptions. It brings execution state, context management, and tracing into one extensible foundation for your application.
 
-## 目录
+Connect your client over WebSocket, add your tools and skills, and use HTTP APIs to inspect runs. Oath is part of [HymioSpace](https://github.com/HymioSpace) and can also run independently.
 
-| 目录 | 放什么 | 可缺省 |
+> **Early development.** Oath currently runs in a single process with local JSONL persistence. APIs may change; distributed execution and automatic supervision are not yet available.
+
+## Why Oath?
+
+- **Events drive execution.** User messages, tool results, and system decisions have separate queues. Each consumer decides when to wake the agent, so a pending approval does not have to hold up unrelated tool results.
+- **State survives restarts.** An append-only journal records accepted inputs and execution state. Recovery preserves call identities and pending approvals; uncertain tool outcomes are reported explicitly rather than automatically repeated.
+- **Tools have a lifecycle.** Schema validation, permissions, deadlines, cancellation, and terminal results are managed by the runtime. Built-in Bash runs through a replaceable execution environment.
+- **Context stays manageable.** Large tool outputs are shortened with on-demand access to the original. Background and synchronous compaction preserve complete tool-call/result groups.
+- **Runs are inspectable.** Follow input events, model requests and responses, causal links between steps, and timing metrics through traces modeled on OpenTelemetry spans.
+- **Extensions stay simple.** Add Python tools, CLI commands, and Markdown skills through configured directories. Keep private extensions in the gitignored `extensions-local/` directory.
+
+## Quick start
+
+You need **Python 3.11+**, [uv](https://docs.astral.sh/uv/getting-started/installation/), Bash, and credentials for an OpenAI-compatible model endpoint.
+
+### 1. Install
+
+```bash
+git clone https://github.com/HymioSpace/Oath.git
+cd Oath
+uv sync
+cp oath.example.toml oath.toml
+mkdir -p workspace
+```
+
+### 2. Configure and start
+
+In `oath.toml`, set `model`, `api_base`, and `api_key_env` under `[agent.provider]` for your provider. The example uses `OPENAI_API_KEY`:
+
+```bash
+export OPENAI_API_KEY="your-api-key"
+uv run python scripts/run_runtime.py --config oath.toml
+```
+
+Run commands from the repository root. This starts both services:
+
+| Service | Default address | Purpose |
 | --- | --- | --- |
-| [core/](core/) | 机制，含 JSONL 日志 | 否 |
-| `extensions/` | 业务 tool、业务 CLI 命令、业务 skill、额外 context 来源 | 是 |
-| `extensions-local/` | 同上，但只在本机、不进版本库 | 是 |
-| `biz/` | runtime 对外暴露的功能，不是进程 | 否 |
-| `spec/` | 设计文档 | 否 |
+| WebSocket | `ws://127.0.0.1:8765` | Messages, approvals, and streamed events |
+| HTTP | `http://127.0.0.1:8766` | Trace queries and CLI commands |
 
-`core/` 内部：
+The example is for local use: it includes a demo credential and the default tool policy allows all calls. Bash executes on the host; `workspace_root` is its default working directory, **not a sandbox boundary**. See the [tool permissions](spec/feature-tool-system.md) and [execution environment](spec/feature-bash-cli.md) designs before exposing it to other users.
 
-| 目录 | 放什么 |
+### 3. Talk to the agent
+
+In another terminal, from the same repository:
+
+```bash
+PYTHONPATH=. uv run python scripts/terminal_client.py \
+  --url ws://127.0.0.1:8765 \
+  --token demo-token
+```
+
+Try: `Use bash to list the files in the workspace.` The client prints replies and runtime events. Enter `:quit` to exit.
+
+To inspect recent traces:
+
+```bash
+curl -H "Authorization: Bearer demo-token" \
+  "http://127.0.0.1:8766/list_traces?limit=10"
+```
+
+Building your own client? The [integration guide](spec/manual.md) covers session binding, message payloads, approval decisions, reconnection, and trace queries. Design and protocol documentation is currently in Chinese.
+
+## How it works
+
+```mermaid
+flowchart LR
+    Client[Your application] -->|WebSocket commands| Journal[Durable journal]
+    Journal --> Intake[User / tool / system consumers]
+    Intake --> Brain[Context → model → tool calls]
+    Brain --> Tools[Tool system]
+    Tools -->|Results and decisions| Journal
+    Brain -->|Replies and events| Client
+    Brain -.-> Traces[Trace storage]
+    Client -->|HTTP queries| API[HTTP API]
+    API --> Traces
+```
+
+Each consumer buffers events and applies its own wake-up rule. When the agent wakes, it claims the available inputs from all three buffers in one durable operation. Model steps are serialized within a session; tools execute through their own lifecycle.
+
+State is scoped by `user_id` and `session_id`, with run, step, and trace IDs for inspection. The journal drives recovery; traces provide an observable view of execution. Storage and execution environments are defined through interfaces, with local file storage and host execution supplied today.
+
+## Extend Oath
+
+Add capabilities to a configured extension directory and restart the runtime:
+
+```text
+extensions-local/
+├── tools/
+│   └── notes.py             # Tool subclasses
+├── cli/
+│   └── echo.py              # CLI command declarations and handlers
+└── skills/
+    └── research/
+        └── SKILL.md         # Instructions and supporting resources
+```
+
+Tools are exposed to the model, skills provide reusable instructions, and CLI commands are available through `oath-cli <command>` inside Bash. Both `extensions/` and `extensions-local/` use the same loading rules.
+
+Start with the [extension guide](spec/feature-extensions.md) and the included [CLI example](extensions/cli/echo.py).
+
+## Documentation
+
+| Guide | What you will find |
 | --- | --- |
-| `core/protocol/datatype/` | 数据类型：`Scope` / `Message` / `AgentState` / `Cursor` + journal 专属的记录格式与值对象 |
-| `core/protocol/interface/` | 接口，按模块分文件（`journal.Journal`） |
-| `core/protocol/error.py` | 契约层的异常 |
-| `core/utils/` | 编码、时间戳与 token 估算，不构成契约 |
-| `core/journal/` | 机制：校验、幂等语义、游标运算、messages 投影 |
-| `core/journal/impl/` | 存储后端（v1 只有 JSONL） |
-| `core/trace/impl/` | trace 存储后端（v1 只有 JSONL） |
-| `core/shell/` | bash 工具与执行环境接口，宿主机实现在 `impl/` |
-| `biz/trace/` | 按 trace_id 取回一条 trace（`api.py`） |
-| `biz/cli/` | 业务 CLI 的路由与代理 |
-| `extensions/cli/` | 命令声明与纯函数实现 |
+| [Architecture](spec/overview.md) | Components, boundaries, and recovery model |
+| [Client integration](spec/manual.md) | WebSocket protocol, HTTP APIs, and examples |
+| [Events and approvals](spec/feature-intake.md) | Scheduling, tool batches, and approval handling |
+| [Durability](spec/feature-journal.md) | Journal, state persistence, and restart recovery |
+| [Context compaction](spec/feature-compaction.md) | Tool output limits and history compression |
+| [Tracing](spec/feature-trace.md) | Step relationships, model calls, and metrics |
+| [Extensions](spec/feature-extensions.md) | Tools, CLI commands, and skills |
 
-数据类型和接口是跨仓库契约，进 `core/protocol/`，依赖方向单向指向它；编码只是
-手段，进 `core/utils/`。消费方从 `core.protocol.datatype`、
-`core.protocol.error`、`core.protocol.interface` 三个包入口 import，不碰子模块，
-也不走 `core.protocol` 这一层——两个 `__init__.py` 都不重导出符号。
-`bootstrap/` 负责配置读取、模块装配与运行入口，并监听两个 server：WebSocket 收
-command，HTTP（`bootstrap/biz_server.py`）供 biz 只读查询与 CLI 代理。
+## Contributing
 
-「可缺省」指删掉它 runtime 照样启动，而且照样能恢复 —— 因为日志在 `core/` 里。
+Bug reports, documentation improvements, and focused pull requests are welcome. For changes to execution semantics or public interfaces, open an [issue](https://github.com/HymioSpace/Oath/issues) to discuss the design first.
 
-`extensions/` 与 `extensions-local/` 走同一套规则（`tools/` `cli/` `skills/` 三个子目录），启动时按 `agent.extension_dirs` 的顺序扫；后者只在本机，不进版本库。
-
-## 怎么跑
+See [spec/](spec/) for the architecture and feature designs. To run the local checks:
 
 ```bash
 uv sync
 uv run ruff check .
 uv run mypy .
-uv run pytest tests/ -q        # 默认跳过 slow
-uv run pytest tests/ -m ""     # 含 slow（真实进程 SIGKILL）
+uv run pytest tests/ -q
 ```
 
-## 设计文档
+The default test run excludes slow tests. See [pytest configuration](pyproject.toml) for the full test setup.
 
-- [整体架构](spec/overview.md)
-- [feature 模板](spec/feature-template.md)
-- [Journal：追加日志、状态存储与恢复](spec/feature-journal.md)
-- [Intake：三个 consumer、工具批次与 Brain 唤醒](spec/feature-intake.md)
-- [Intake 场景与崩溃推演](spec/intake-cases.md)
-- [Trace：一次 ReAct 循环的 span](spec/feature-trace.md)
-- [Bash 执行环境与 CLI 代理](spec/feature-bash-cli.md)
-- [user_context：客户端带来的会话上下文](spec/feature-user-context.md)
+## Part of HymioSpace
 
-Oath 服务于 [Hymio](https://github.com/HymioSpace/Hymio)。
-[Nostalgia](https://github.com/HymioSpace/Nostalgia) 通过扩展提供个人 context。
+[Hymio](https://github.com/HymioSpace/Hymio) brings agents into everyday applications. [Nostalgia](https://github.com/HymioSpace/Nostalgia) manages personal context. Oath provides the runtime beneath them.
 
-## 许可证
+The name comes from [MONO’s *Oath*](https://monoofjapan.bandcamp.com/album/oath), and the commitment to carry work through interruptions.
 
-Oath 采用 [MIT License](LICENSE)。
+## License
+
+[MIT](LICENSE) © HymioSpace.
