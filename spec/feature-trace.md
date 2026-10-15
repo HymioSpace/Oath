@@ -155,17 +155,21 @@ step 的 `trace_id` 和 `trace_started` 一起写进 step 状态，重启后仍�
 
 ## 7 查询
 
-`biz/trace/` 给出传输无关的读模型，和操作放在一起：
+biz 只管这一件事，把 runtime 手里的 span 变成能直接返回的对象：
 
 ```
-traces(scope)        -> 该 scope 的 trace 列表，每条带 step 数与累计耗时
-trace(scope, id)     -> 一条 trace 的全部 span，含每条 span 的耗时
+list_traces(store, scope)        -> 该 scope 的 trace 列表，每条带 step 数与累计耗时
+get_trace(store, scope, trace_id) -> 一条 trace 的全部 span，含每条 span 的耗时
 ```
 
-`trace` 返回的 span 顺序按开始时间，`parent_span_id` 指向 llm span 的父 step，
+两个函数只吃 `TraceStore`，不认识 runtime —— 换后端不用改调用方。会话身份、输入接纳、
+状态快照都在 `Runtime` 上，biz 不碰。
+
+`get_trace` 返回的 span 顺序按开始时间，`parent_span_id` 指向 llm span 的父 step，
 所以一次完整的 ReAct 循环在返回值里就是一棵两层的树。trace 找不到返回空列表，
 不区分「不存在」和「无权查看」。
 
+客户端的入口是 `session.status` 里的 `trace_id` —— 当前 step 认领时就定了，之后不变。
 WebSocket 上对应 `trace.list` 与 `trace.get` 两条只读 command，帧的形状见
 [接入手册](manual.md)。
 

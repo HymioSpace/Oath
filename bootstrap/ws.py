@@ -16,7 +16,7 @@ import websockets
 from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as _ws_serve
 
-from biz import AgentApi
+from biz import get_trace, list_traces
 from bootstrap.runtime import Runtime
 from core.outbound.hub import ClientChannel
 from core.protocol.datatype.scope import Scope
@@ -30,7 +30,7 @@ from core.protocol.datatype.wire import (
     pong,
 )
 from core.protocol.error import WireProtocolError
-from core.utils.encoding import canonical_json
+from core.utils.encoding import JsonObject, canonical_json
 
 _log = logging.getLogger("oath.server")
 
@@ -56,7 +56,7 @@ class WebSocketChannel(ClientChannel):
         await self._connection.close()
 
 
-async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerConnection) -> None:
+async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> None:
     scope: Scope | None = None
     channel = WebSocketChannel(connection)
     try:
@@ -76,7 +76,7 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
                     )
                     return
                 try:
-                    scope = api.open_session(command)
+                    scope = runtime.open_session(command)
                 except Exception as exc:
                     await connection.send(
                         canonical_json(close_frame(CloseReason.UNAUTHORIZED, str(exc)))
@@ -108,9 +108,7 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
                 continue
 
             try:
-                # 查询命令回 event 帧，其余走接纳路径回 ACK。分派在 biz 里 ——
-                # 这一层只管把帧搬来搬去。
-                query = await asyncio.to_thread(api.answer, command, scope)
+                query = await _query(runtime, command, scope)
                 if query is not None:
                     event_type, payload = query
                     await connection.send(
@@ -125,7 +123,7 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
                         )
                     )
                     continue
-                await asyncio.to_thread(api.submit, command, scope)
+                await asyncio.to_thread(runtime.submit, command, scope)
                 await connection.send(canonical_json(ack(command.id, session_id=scope.session_id)))
             except WireProtocolError as exc:
                 await _fail(connection, command.id, exc)
@@ -141,6 +139,23 @@ async def _serve_connection(runtime: Runtime, api: AgentApi, connection: ServerC
             runtime.hub.detach(scope, channel)
 
 
+async def _query(runtime: Runtime, command: Command, scope: Scope) -> tuple[str, JsonObject] | None:
+    """查询类 command 回一个 event 帧，不是 ACK —— 它没接纳任何东西。
+
+    阻塞读走 `asyncio.to_thread`，与 submit 一样 —— 文件 I/O 不能占住事件循环。
+    """
+    if command.type == CommandType.SESSION_STATUS:
+        return CommandType.SESSION_STATUS, await asyncio.to_thread(runtime.status, scope)
+    if command.type == CommandType.TRACE_LIST:
+        return CommandType.TRACE_LIST, await asyncio.to_thread(list_traces, runtime.traces, scope)
+    if command.type == CommandType.TRACE_GET:
+        trace_id = str(command.payload["trace_id"])
+        return CommandType.TRACE_GET, await asyncio.to_thread(
+            get_trace, runtime.traces, scope, trace_id
+        )
+    return None
+
+
 async def _fail(connection: ServerConnection, command_id: str | None, exc: Exception) -> None:
     """回一帧 error 就断。**帧不合法时不能只回错误继续收** —— 两端的认知已经分叉了。"""
     code = getattr(exc, "code", "internal_error")
@@ -151,8 +166,7 @@ async def _fail(connection: ServerConnection, command_id: str | None, exc: Excep
 
 
 async def serve(runtime: Runtime, *, host: str, port: int, max_connections: int) -> None:
-    """起 server，一直跑到被取消。命令一律走 `AgentApi` —— 这一层只管传输。"""
-    api = AgentApi(runtime)
+    """起 server，一直跑到被取消。这一层只管把帧搬来搬去。"""
     active = 0
 
     async def handler(connection: ServerConnection) -> None:
@@ -166,7 +180,7 @@ async def serve(runtime: Runtime, *, host: str, port: int, max_connections: int)
             return
         active += 1
         try:
-            await _serve_connection(runtime, api, connection)
+            await _serve_connection(runtime, connection)
         finally:
             active -= 1
 

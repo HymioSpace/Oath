@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
 
-from biz import AgentApi
 from bootstrap.runtime import Runtime
 from core.compaction import CompactionCoordinator
 from core.protocol.datatype.config import OathConfig
@@ -104,7 +103,7 @@ async def test_runtime_pushes_compaction_over_client_channel(tmp_path: Path) -> 
         assert frame is not None
         assert frame["payload"]["mode"] == "sync"
         assert frame["session_id"] == "s1"
-        saved = cast(dict[str, Any], AgentApi(runtime).status(Scope("u1", "s1"))["compaction"])
+        saved = cast(dict[str, Any], runtime.status(Scope("u1", "s1"))["compaction"])
         assert saved["applied"]["compression_id"] == frame["payload"]["compression_id"]
     finally:
         await connection.close()
