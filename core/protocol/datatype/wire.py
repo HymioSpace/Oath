@@ -93,6 +93,9 @@ class CommandType:
         }
     )
 
+    #: 查询与心跳：不产生输入，也不改任何状态。
+    QUERY: Final = frozenset({PING, SESSION_STATUS})
+
     #: 不需要 `session_id` 的 command —— 绑定 session 之前还没有 session_id。
     ANONYMOUS: Final = frozenset({SESSION_OPEN})
 

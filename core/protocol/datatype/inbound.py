@@ -85,7 +85,7 @@ class Batch:
 
 def of_command(command: Command) -> Inbound | None:
     """用户输入与控制命令分别进入 user / system；查询与心跳不产生输入。"""
-    if command.type in {CommandType.PING, CommandType.SESSION_STATUS}:
+    if command.type in CommandType.QUERY:
         return None
     if command.type == CommandType.USER_MESSAGE:
         return Inbound(

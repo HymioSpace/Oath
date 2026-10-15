@@ -25,9 +25,11 @@ from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.journal import Journal
 from core.protocol.interface.queue import EventQueue
 from core.protocol.interface.tool import ToolSystem
+from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
 from core.skill import SkillSystem
+from tests._support.trace_fixtures import RecordingTraceStore
 
 #: 模型与 key 都是占位 —— 测的是接线，没有 provider 会真的去调它。技能目录指向一个
 #: 不存在的位置：索引必须为空，测试不能读开发者本机的技能目录。
@@ -88,6 +90,7 @@ def agent_ctx(
     queue: EventQueue | None = None,
     config: AgentConfig | None = None,
     skills: SkillSystem | None = None,
+    traces: TraceStore | None = None,
 ) -> AgentContext:
     config = config or DEFAULT_CONFIG
     return AgentContext(
@@ -98,6 +101,7 @@ def agent_ctx(
         tools=tools or NoTools(),
         context_manager=ContextManager(journal, config),
         skills=skills or SkillSystem(config.skill_dir),
+        traces=traces or RecordingTraceStore(),
         config=config,
     )
 

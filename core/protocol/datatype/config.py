@@ -113,10 +113,13 @@ class AgentConfig:
 
 @dataclass(frozen=True, slots=True)
 class ServerConfig:
-    """WebSocket server 的监听参数。"""
+    """两个 server 的监听参数：WebSocket 收 command，HTTP 供 biz 只读查询。"""
 
     host: str = "127.0.0.1"
     port: int = 8765
+    #: biz server 的端口。整个 biz 一个端口，每条查询是其中一个 path。与 WebSocket
+    #: 分开：查询不是 command，不该占会话连接。
+    http_port: int = 8766
     #: 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
     send_queue_size: int = 256
     #: 一条连接多久没有任何 command 就断开。
@@ -146,6 +149,7 @@ class OathConfig:
             "server": {
                 "host": self.server.host,
                 "port": self.server.port,
+                "http_port": self.server.http_port,
                 "send_queue_size": self.server.send_queue_size,
                 "idle_timeout_seconds": self.server.idle_timeout_seconds,
                 "max_connections": self.server.max_connections,

@@ -26,12 +26,14 @@ from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.llm import DeltaSink, ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.tool import Tool
+from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 from tests._support.tool_fixtures import RecordingSink, VerdictPolicy
+from tests._support.trace_fixtures import RecordingTraceStore
 
 SCOPE = Scope("u1", "s1")
 
@@ -98,6 +100,7 @@ class Harness:
         responses: Sequence[ScriptedResponse] = (),
         config: AgentConfig | None = None,
         compactor: Compactor | None = None,
+        traces: TraceStore | None = None,
         admission_timeout: float = 0.2,
         approval_ttl: float = 10,
         max_concurrency: int = 8,
@@ -110,6 +113,8 @@ class Harness:
         self.config = config or AgentConfig(tool_round_timeout_seconds=0.5, llm_retry_delay=0.01)
         self.details = FileDetailStore(root / "details")
         self.skills = SkillSystem(root / "skills", scan_dirs=[root / "external-skills"])
+        # 内存替身：要问的是「写了什么」，不是「落到磁盘没有」。文件后端另有测试。
+        self.traces = traces or RecordingTraceStore()
         self.registry = ToolRegistry(default_timeout_seconds=self.config.tool_timeout_seconds)
         self.registry.register(DetailReadTool(self.details))
         self.registry.register(SkillTool(self.skills))
@@ -143,6 +148,7 @@ class Harness:
             self.tools,
             ContextManager(self.journal, self.config),
             self.skills,
+            self.traces,
             self.config,
         )
         self.compaction = CompactionCoordinator(

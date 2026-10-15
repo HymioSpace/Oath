@@ -8,6 +8,9 @@ data_root = "./data"
 [server]
 host = "127.0.0.1"
 port = 8765
+# biz server 的端口。整个 biz 一个端口，每条查询是其中一个 path（当前是 /traces）。
+# 与 WebSocket 分开：查询不是 command，不占会话连接。
+http_port = 8766
 # 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
 send_queue_size = 256
 max_connections = 32

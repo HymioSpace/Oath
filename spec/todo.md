@@ -11,4 +11,5 @@
 | LLM | provider fallback | 失败有限重试原请求；跨 provider 切换另定请求与计费语义 |
 | 客户端 | 分页、历史增量与流式重试 | session.status 提供当前全量快照；delta 不可靠重放 |
 | 接入 | 生产认证 / TLS / 限流 | 默认凭据映射和 AllowAllPolicy 仅演示，Hymio 装配实际策略 |
+| Trace | OTLP 导出与语义化检索 | span 形状已按 OpenTelemetry 定；当前只落文件，无 exporter，按属性检索未做 |
 | Supervisor | 独立观察与恢复 | system.invoke 已可消费，尚无独立监督进程 |

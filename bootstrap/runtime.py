@@ -30,11 +30,13 @@ from core.protocol.interface.llm import ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
 from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
 from core.protocol.interface.tool import Tool
+from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
 from core.runtime import AgentContext
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
+from core.trace.impl import FileTraceStore
 from core.utils.encoding import JsonObject
 
 #: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
@@ -105,6 +107,7 @@ class Runtime:
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
         details = FileDetailStore(data_root / "details")
+        self.traces: TraceStore = FileTraceStore(data_root / "traces")
         skills = SkillSystem(config.agent.skill_dir, scan_dirs=config.agent.skill_scan_dirs)
         registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
         registry.register(DetailReadTool(details))
@@ -131,6 +134,7 @@ class Runtime:
             tools=tool_system,
             context_manager=ContextManager(self.journal, config.agent),
             skills=skills,
+            traces=self.traces,
             config=config.agent,
         )
         model = provider or OpenAICompatibleProvider(config.agent.provider)
@@ -197,6 +201,9 @@ class Runtime:
         return {
             "run_id": state["meta"].get("run_id"),
             "step_id": active,
+            # 客户端拿 trace_id 去查这条运行：认领 step 时定的，之后不变。没有在飞的
+            # step 时退回最后开过的那条 —— 否则刚结束的一轮就查不到了。
+            "trace_id": step.get("trace_id") or state["meta"].get("trace_id"),
             "step_status": step.get("status", "idle"),
             "error": step.get("error") or state["meta"].get("intake_error"),
             "calls": list(state["calls"].values()),

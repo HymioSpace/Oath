@@ -1,6 +1,6 @@
 # Oath 整体架构
 
-状态：单进程运行链路、三级压缩与技能索引已实现；Supervisor、多机 HA 待实现。
+状态：单进程运行链路、三级压缩、技能索引与 trace 已实现；Supervisor、多机 HA 待实现。
 
 ## 定位
 
@@ -21,6 +21,7 @@ flowchart TD
     Tools --> Inputs
     UI[WebSocket 客户端] --> Inputs
     Store --> Status[重连状态查询]
+    Brain -.->|span| Trace[core/trace → biz 查询]
 ```
 
 **三个 consumer 独立判断唤醒；Brain 串行执行。** 一次 step 固定一次输入和请求，不在
@@ -42,9 +43,16 @@ flowchart TD
 | core/skill | 技能索引、优先级预算与 skill 工具 |
 | core/tool | 注册、完整批次、权限裁定、执行资格、deadline 与真实终态 |
 | core/llm | provider adapter，当前支持 OpenAI-compatible API |
+| core/trace | 按 scope 记录 ReAct 循环的 span，OpenTelemetry 形状 |
 | core/outbound | 在线事件与客户端背压 |
-| bootstrap | 配置、认证装配、启动恢复、WebSocket |
-| extensions / biz | 业务能力扩展 / 面向客户端的操作能力，逐步建设 |
+| bootstrap | 配置、认证装配、启动恢复；WebSocket server 与 biz server |
+| biz | runtime 对外暴露的功能，当前只有 trace 的读模型 |
+| extensions | 业务能力扩展 |
+
+biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是
+`biz/trace/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
+一个 biz server 供查询。整个 biz 一个端口，每条查询是其中一个 path。
+依赖单向 `biz` → `bootstrap` → `core`。
 
 core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。
 Journal 是事实来源，队列和内存状态可重建；各模块共用 RuntimeStore，不另建审批 / buffer 持久化文件。
@@ -55,6 +63,7 @@ Journal 是事实来源，队列和内存状态可重建；各模块共用 Runti
 - run_id 关联一段运行；新用户输入开始新 run，旧调用结果与审批仍保留原归属。
 - step_id 在认领事务中保存；batch_id 标识一次响应的完整工具批次，当前取 step_id。
 - invocation_id 由 Oath 生成，用于审批、状态和恢复；tool_call_id 由模型生成，仅用于消息配对。
+- trace_id 关联一段 ReAct 循环；上一个 step 产出过工具调用就续用，否则开新的。
 - cursor 表达 Journal 顺序，runtime.commit.version 表达事务顺序；不使用时间戳排序。
 
 不引入 runtime_id。user_id 来自认证主体，跨 scope 不泄露调用是否存在。
@@ -81,5 +90,6 @@ queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown�
 
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
 [Compaction](feature-compaction.md)、[Skill](feature-skill.md)、[Journal](feature-journal.md)、
+[Trace](feature-trace.md)、
 [客户端接入](manual.md) 与
 [场景推演](intake-cases.md)。

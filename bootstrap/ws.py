@@ -3,6 +3,8 @@
 同一连接按顺序 await submit；fsync 放在线程中，成功后回 ACK。
 在线事件经 OutboundHub 投递，断线后用 session.status 查询当前持久化状态。
 session 绑定后不允许客户端重新声明身份。
+
+只读查询不在这里 —— biz 的 trace 查询走 `bootstrap/http.py`。查询不是 command。
 """
 
 from __future__ import annotations
@@ -108,15 +110,15 @@ async def _serve_connection(runtime: Runtime, connection: ServerConnection) -> N
 
             try:
                 if command.type == CommandType.SESSION_STATUS:
-                    snapshot = await asyncio.to_thread(runtime.status, scope)
+                    payload = await asyncio.to_thread(runtime.status, scope)
                     await connection.send(
                         canonical_json(
                             {
                                 "v": 1,
                                 "type": "event",
                                 "session_id": scope.session_id,
-                                "event_type": "session.status",
-                                "payload": snapshot,
+                                "event_type": CommandType.SESSION_STATUS,
+                                "payload": payload,
                             }
                         )
                     )
@@ -147,7 +149,7 @@ async def _fail(connection: ServerConnection, command_id: str | None, exc: Excep
 
 
 async def serve(runtime: Runtime, *, host: str, port: int, max_connections: int) -> None:
-    """起 server，一直跑到被取消。"""
+    """起 server，一直跑到被取消。这一层只管把帧搬来搬去。"""
     active = 0
 
     async def handler(connection: ServerConnection) -> None:
