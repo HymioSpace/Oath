@@ -49,8 +49,9 @@ flowchart TD
 | biz | runtime 对外暴露的功能，当前只有 trace 的读模型 |
 | extensions | 业务能力扩展 |
 
-biz 只放 runtime 需要暴露给上层的能力，不放协议与生命周期 —— 那两样在
-`bootstrap/`。依赖单向 `biz` → `bootstrap` → `core`。
+biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是
+`biz/trace/`），不放协议与生命周期 —— 那两样在 `bootstrap/`。
+依赖单向 `biz` → `bootstrap` → `core`。
 
 core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。
 Journal 是事实来源，队列和内存状态可重建；各模块共用 RuntimeStore，不另建审批 / buffer 持久化文件。

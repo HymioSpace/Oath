@@ -16,7 +16,7 @@ import websockets
 from websockets.asyncio.server import ServerConnection
 from websockets.asyncio.server import serve as _ws_serve
 
-from biz import get_trace, list_traces
+from biz.trace import get_trace, list_traces
 from bootstrap.runtime import Runtime
 from core.outbound.hub import ClientChannel
 from core.protocol.datatype.scope import Scope

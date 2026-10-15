@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import pytest
 
-from biz import get_trace, list_traces
+from biz.trace import get_trace, list_traces
 from bootstrap.runtime import Runtime
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope

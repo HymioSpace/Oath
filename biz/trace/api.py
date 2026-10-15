@@ -2,7 +2,10 @@
 
 这一层只做一件事：把 `TraceStore` 里的 span 变成能直接 JSON 序列化的对象返回。
 它不新增语义，也不改任何状态 —— 会话身份、输入接纳、状态快照都留在 `bootstrap`
-的 `Runtime` 上，biz 只多管 trace 这一样。
+的 `Runtime` 上。
+
+两个函数只吃 `TraceStore`，不认识 `Runtime`：换存储后端不用改调用方，也不会因为
+runtime 装配变了就把这里一起拖下水。
 """
 
 from __future__ import annotations

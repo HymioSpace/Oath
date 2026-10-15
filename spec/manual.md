@@ -72,21 +72,82 @@ step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；
 直到某个 step 不再要工具为止。trace.list 返回当前 session 的全部 trace，
 trace.get 返回其中一条的 span 列表。两者都只读，不触发模型。
 
-```json
-{"v":1,"type":"trace.list","id":"t1","session_id":"default","payload":{}}
-{"v":1,"type":"event","session_id":"default","event_type":"trace.list","payload":{"trace_ids":[{"trace_id":"...","span_count":4,"step_count":2,"duration_ms":812.4}]}}
+### 4.1 拿 trace_id
 
-{"v":1,"type":"trace.get","id":"t2","session_id":"default","payload":{"trace_id":"..."}}
-{"v":1,"type":"event","session_id":"default","event_type":"trace.get","payload":{"trace_id":"...","duration_ms":812.4,"spans":[{"trace_id":"...","span_id":"...","parent_span_id":null,"name":"invoke_agent","start_unix_nano":1,"end_unix_nano":2,"status":"ok","attributes":{...},"events":[...],"duration_ms":0.9}]}}
+`trace_id` 在 step 被认领时就定了，之后不变。当前运行的那个从 session.status 拿：
+
+```json
+{"v":1,"type":"session.status","id":"s1","session_id":"default","payload":{}}
+{"v":1,"type":"event","session_id":"default","event_type":"session.status","payload":{"run_id":"...","step_id":"...","trace_id":"6f1c9b2d...","step_status":"prepared"}}
 ```
 
-span 字段与 OpenTelemetry 一致，详见 [Trace](feature-trace.md)。`parent_span_id` 为空的
-是 step span，它下面的 `chat <模型>` 是模型调用 span。`end_unix_nano` 为空表示这一步
-还没结束 —— 进程在步骤中途崩掉时就是这个状态。请求与响应的原文在 span 的 `events` 里，
-`body` 字段是 JSON 文本。
+运行结束后 `step_id` 变 `null`，`trace_id` 随之变 `null` —— 这一轮已经不在飞了。
+要留住 id 就自己存，没有别的来源。
 
-trace 找不到时返回空列表，不报错，也不区分「不存在」和「无权查看」。客户端按
-`step_count` 展示循环轮数、按 `duration_ms` 展示耗时即可，不要试图还原成对话。
+### 4.2 列历史
+
+```json
+{"v":1,"type":"trace.list","id":"t1","session_id":"default","payload":{}}
+{"v":1,"type":"event","session_id":"default","event_type":"trace.list","payload":{"trace_ids":[{"trace_id":"6f1c9b2d...","span_count":4,"step_count":2,"duration_ms":812.4}]}}
+```
+
+`span_count` 是这条 trace 的 span 总数，`step_count` 是它跑了几步。
+`duration_ms` 为 `null` 表示一个 span 都没结束 —— 见 4.4。
+
+### 4.3 取一条
+
+```json
+{"v":1,"type":"trace.get","id":"t2","session_id":"default","payload":{"trace_id":"6f1c9b2d..."}}
+{"v":1,"type":"event","session_id":"default","event_type":"trace.get","payload":{"trace_id":"6f1c9b2d...","duration_ms":812.4,"spans":[
+  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4e5f60718","parent_span_id":null,"name":"invoke_agent","kind":"internal","start_unix_nano":1760000000000000000,"end_unix_nano":1760000000400000000,"status":"ok","duration_ms":400.0,"attributes":{"oath.step.id":"step-example-0","oath.step.status":"completed","oath.step.llm_calls":1,"oath.step.duration_ms":400.0},"events":[{"name":"oath.input.user","unix_nano":1760000000000000000,"attributes":{"body":"{...}"}}]},
+  {"trace_id":"6f1c9b2d...","span_id":"a1b2c3d4f6071801","parent_span_id":"a1b2c3d4e5f60718","name":"chat m1","kind":"client","start_unix_nano":1760000000100000000,"end_unix_nano":1760000001200000000,"status":"ok","duration_ms":1100.0,"attributes":{"gen_ai.request.model":"m1","gen_ai.usage.input_tokens":812,"gen_ai.usage.output_tokens":64,"oath.llm.ttft_ms":420.0,"oath.llm.tpot_ms":12.1},"events":[{"name":"gen_ai.request","unix_nano":1760000000100000000,"attributes":{"body":"{...}"}},{"name":"gen_ai.response","unix_nano":1760000001200000000,"attributes":{"body":"{...}"}}]}
+]}}
+```
+
+### 4.4 怎么读
+
+**span 树只有两层。** `parent_span_id` 为空的是 step span（`invoke_agent`），
+它下面 `chat <模型>` 的是那一步的模型调用 span。step 之间是平级的 —— 第二步发生在
+第一步结束之后，不嵌在第一步里。
+
+**耗时直接读 `duration_ms`**，服务端算好的，不要用 `start_unix_nano` 自己减。
+
+**原始输入输出在 `events` 里**，不在 `attributes`：
+`oath.input.<队列名>` 是唤醒这一步的每一条输入（`user` / `tool` / `system`），
+`gen_ai.request` 是发给模型的那一份，`gen_ai.response` 是模型回来的那一份。
+`attributes.body` 是 JSON 文本，要 parse。
+
+**字段缺席是有意义的。** 非流式调用没有 `oath.llm.ttft_ms`，也就没有
+`oath.llm.tpot_ms` —— 别把缺席当 0。同理 step span 的 `oath.step.llm_calls` 为 0
+表示还没调过模型（`events` 里也就只有输入、没有 request）。
+
+**`end_unix_nano` 为 `null`** 表示这一步还没结束：进程崩在了步骤中途。
+按 `status` 分 `ok` 与 `error`，`unset` 配 `null` 就是崩在半路。
+
+span 字段与 OpenTelemetry 一致，属性名清单见 [Trace](feature-trace.md)。
+客户端按 `step_count` 展示循环轮数、按 `duration_ms` 展示耗时即可，
+不要试图从 trace 还原成对话。
+
+### 4.5 找不到的时候
+
+`trace_id` 不存在、或属于别的 session，都返回 `spans: []` 与 `duration_ms: null`，
+不报错，也不区分「不存在」和「无权查看」。按空态处理即可。
+
+### 4.6 手工试
+
+当前终端客户端只发聊天消息。用支持原始帧的客户端连上后依次发：
+
+```json
+{"v":1,"type":"session.status","id":"q1","session_id":"default","payload":{}}
+{"v":1,"type":"trace.list","id":"q2","session_id":"default","payload":{}}
+{"v":1,"type":"trace.get","id":"q3","session_id":"default","payload":{"trace_id":"<4.1 拿到的>"}}
+```
+
+自动化链路检查使用替身模型和文件后端，不调用真实模型：
+
+```bash
+uv run pytest -q tests/test_biz_trace.py tests/test_trace_store.py tests/test_trace_brain.py
+```
 
 ## 5 Event
 

@@ -155,7 +155,7 @@ step 的 `trace_id` 和 `trace_started` 一起写进 step 状态，重启后仍�
 
 ## 7 查询
 
-biz 只管这一件事，把 runtime 手里的 span 变成能直接返回的对象：
+biz 只管这一件事 —— `biz/trace/api.py`，把 runtime 手里的 span 变成能直接返回的对象：
 
 ```
 list_traces(store, scope)        -> 该 scope 的 trace 列表，每条带 step 数与累计耗时
