@@ -1,33 +1,48 @@
 # Oath 整体架构
 
-状态：单进程运行链路、三级压缩、技能索引、trace、bash 执行环境与 CLI 代理已实现；
-Supervisor、多机 HA 待实现。
+状态：每 scope 一进程、队列与 buffer 外置、manager 管 session 生命周期已实现；多机 HA 待实现。
 
 ## 定位
 
-Oath 是持久化、事件驱动的 agent runtime。core 负责执行语义、工具生命周期、context build
-和模型请求；extensions 提供业务工具、skill 和 context 来源，由扩展目录在启动时扫出来；
-bootstrap 装配并连接客户端。
-账号、订阅、渠道采集和 Kit 业务逻辑属于 Hymio。
+Oath 是持久化、事件驱动的 agent runtime。core 负责执行语义、工具生命周期、context build 和
+模型请求；extensions 提供业务工具、skill 和 context 来源，由扩展目录在启动时扫出来；bootstrap
+装配并连接客户端。账号、订阅、渠道采集和 Kit 业务逻辑属于 Hymio。
 
+## 进程模型
+
+**一个 scope（user_id + session_id）一套进程。** 没有任何进程同时服务两个 scope：
+
+```
+  biz（单例，进程内带 manager）
+    ├── agent 进程 × N     每个 scope 一个：3 个 consumer 线程 + 1 个 Brain 线程 + WS server
+    └── supervisor 进程 × N 每个 scope 一个：周期投 system.invoke
+              queue（Redis Streams，独立于任何进程）
+```
+
+队列是进程外的中间件，任何进程都能往里投，消费端不在队列这一侧。scope 因此可以单独崩、单独
+重启：进程没了，队列里的输入还在，等新进程接上。
 ## 运行链路
 
 ```mermaid
 flowchart TD
-    Inputs[用户 / 工具 / 系统输入] --> Store[RuntimeStore → append-only Journal]
-    Store --> Queues[三条内存通知队列]
-    Queues --> Consumers[三个 consumer 各自 buffer / 判断唤醒]
-    Consumers --> Brain[Brain 原子认领全部 buffer]
-    Brain --> Request[固定请求 → LLM → 保存响应]
-    Request --> Tools[登记完整工具批次]
-    Tools --> Inputs
-    UI[WebSocket 客户端] --> Inputs
-    Store --> Status[重连状态查询]
-    Brain -.->|span| Trace[core/trace → biz 查询]
+    Q[三条持久队列 user / tool / system] --> C[consumer 线程]
+    C -->|add| B[持久 buffer]
+    C -->|判断唤醒| B2[一次 get_all 全取走]
+    B2 -->|wake| I[Intake 原子认领]
+    I --> J[(Journal：只有 Brain 写)]
+    I --> Br[Brain]
+    Br --> L[LLM]
+    L --> T[工具系统]
+    T -->|终态| J
+    T -->|终态 Inbound| Q
+    S[supervisor] -->|system.invoke 强制唤醒| Q
+    M[manager] -.->|拉起 / 回收| A[agent 进程]
+    Br -.->|span| TR[trace → biz 只读]
 ```
 
-**三个 consumer 独立判断唤醒；Brain 串行执行。** 一次 step 固定一次输入和请求，不在
-模型循环里阻塞等待整批工具。工具结果、用户输入和控制决定分别经各自队列处理。
+**输入到达不落 journal。** 它先进队列、再进 buffer，被 Brain 认领时才写进去 —— journal 里
+没有「收到但没处理」这一档。**只有 Brain 写输入与 step**：工具终态写在它自己的事务里，
+投递到队列发生在事务提交之后；supervisor 连 journal 的接口都没有，它只是投一条事件。
 
 ## 模块边界
 
@@ -35,65 +50,51 @@ flowchart TD
 | --- | --- |
 | core/protocol | datatype、接口和错误契约 |
 | core/journal | 追加日志、RuntimeStore 原子提交与恢复 |
-| core/queue | 三条按 scope 隔离的内存通知队列 |
-| core/buffer | 持久化输入接纳、receipt、输入阶段 |
-| core/consumer.py | user / tool / system 各自消费和唤醒规则 |
+| core/queue | `EventQueue` 接口与 Redis Streams 实现 |
+| core/buffer | `EventBuffer` 接口与 diskcache 实现 |
+| core/consumer.py | user / tool / system 各自的收、buffer、唤醒规则 |
+| core/intake | 原子认领三个 buffer，把输入固定成一次 step |
 | core/agent | 固定请求、模型调用、持久化响应与后处理 |
 | core/context | 固定 tool 槽位、迟到结果通知；journal 查询视图 |
 | core/compaction | 历史压缩：切点、阈值、产物生效 |
 | core/detail | 超阈值结果的全文存储、截断与 detail_read |
-| core/skill | 技能索引、优先级预算与 skill 工具 |
-| core/shell | bash 工具与执行环境接口；宿主机实现、沙箱实现待补 |
-| core/tool | 注册、完整批次、权限裁定、执行资格、deadline 与真实终态 |
-| core/llm | provider adapter，当前支持 OpenAI-compatible API |
-| core/trace | 按 scope 记录 ReAct 循环的 span，OpenTelemetry 形状 |
-| core/outbound | 在线事件与客户端背压 |
-| bootstrap | 配置、认证装配、启动恢复；WebSocket server 与 biz server |
-| biz | runtime 对外暴露的功能：trace 的读模型与 CLI 命令的代理 |
-| extensions | 业务能力扩展：`tools/` `cli/` `skills/`，目录在启动时扫 |
+| core/skill、core/shell、core/llm | 技能索引；bash 与执行环境；provider adapter |
+| core/trace、core/outbound、core/supervisor | span 记录；在线事件与背压；周期调度 |
+| bootstrap/agent | 单个 scope 的进程装配、WS server、service 端点 |
+| bootstrap/manager | session 表、拉起、端口分配、按连接数回收 |
+| bootstrap/supervisor | 单个 scope 的 supervisor 进程 |
+| bootstrap/biz | biz 的 HTTP 路由与装配 |
+| biz、extensions | trace 读模型与 CLI 执行；`tools/` `cli/` `skills/` |
 
-biz 只放 runtime 需要暴露给上层的能力，一个能力一个子目录（当前是 `biz/trace/` 与
-`biz/cli/`），不放协议与生命周期 —— 那两样在 `bootstrap/`：一个 WebSocket server 收 command，
-一个 biz server 供查询与 CLI 代理。整个 biz 一个端口，每条能力是其中一个 path。
-依赖单向 `bootstrap` → `biz` → `core`。
-
-core 不依赖具体客户端和业务；扩展可缺省，删除业务扩展仍能恢复状态。
-Journal 是事实来源，队列和内存状态可重建；各模块共用 RuntimeStore，不另建审批 / buffer 持久化文件。
+依赖单向 `bootstrap` → `biz` → `core`。core 不反向查找插件，也不 import 任何上层。
 
 ## 身份与隔离
 
-- user_id + session_id 是两级隔离，同 session 内至多一个 active Brain step。
-- run_id 关联一段运行；新用户输入开始新 run，旧调用结果与审批仍保留原归属。
-- step_id 在认领事务中保存；batch_id 标识一次响应的完整工具批次，当前取 step_id。
-- invocation_id 由 Oath 生成，用于审批、状态和恢复；tool_call_id 由模型生成，仅用于消息配对。
-- trace_id 关联一段 ReAct 循环；上一个 step 产出过工具调用就续用，否则开新的。
-- cursor 表达 Journal 顺序，runtime.commit.version 表达事务顺序；不使用时间戳排序。
+两级凭证，作用范围不同：**服务级**在配置里，能调 `create_session` / `list_sessions`；**session 级**
+由 manager 签发，只认那一个 scope，不进配置文件也不进命令行，走 `OATH_SESSION_CREDENTIAL`
+环境变量注入那个 agent 子进程。
 
-不引入 runtime_id。user_id 来自认证主体，跨 scope 不泄露调用是否存在。
+其余标识：run_id 关联一段运行；step_id 在认领事务中保存；invocation_id 由 Oath 生成，用于审批
+与恢复；tool_call_id 由模型生成，仅用于消息配对；trace_id 关联一段 ReAct 循环；cursor 表达
+Journal 顺序。排序不依赖时间戳。
 
 ## 三个核心原则
 
-1. **Event-driven**：各 consumer 独立处理输入；不是每条事件都调用 LLM。批准直接提交原调用，
-   工具终态由 ToolConsumer 按初次提交集合、presented 与固定 deadline 决定何时唤醒。
-2. **Durable**：输入先保存再 ACK；执行意图先保存再派发；一次原子 claim 固定三个 buffer 的输入、
-   tool 槽位和请求草稿，压缩后另行固定最终请求。重启沿用原请求和调用身份，已保存响应不重新生成。
-3. **Supervisor**：计划作为独立观察与恢复模块，基于日志产生可审计控制命令；当前尚未实现。
+1. **Event-driven**：三个 consumer 各自决定唤醒，不是每条事件都调 LLM。工具终态由
+   ToolConsumer 按初次提交集合与固定 deadline 判断何时唤醒。`system.invoke` 是强制唤醒，
+   投递本身不进 buffer。
+2. **Durable**：输入先在持久 buffer 里，再由一次原子认领固定成 step；执行意图先保存再
+   派发；已保存的响应不重新生成。队列的 ack 是中间件自己的可用性保障，不进 Oath 接口。
+3. **Supervisor**：每个 scope 一个独立进程，只做一件事 —— 定时投 `system.invoke`。
+   **回收只看 WS 连接数**：连续为 0 且过了冷却期就停掉那两个进程。agent 崩了没人拉起它；
+   客户端带着原 `session_id` 再调一次 `create_session`，这个 scope 的进程就重开了，数据还在原目录里。
 
-## 恢复与限制
+详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、[Compaction](feature-compaction.md)、
+[Skill](feature-skill.md)、[Journal](feature-journal.md)、[Trace](feature-trace.md)、[Supervisor](feature-supervisor.md)、[扩展目录](feature-extensions.md)、
+[Bash 与 CLI](feature-bash-cli.md)、[User Context](feature-user-context.md)、[客户端接入](manual.md) 与 [场景推演](intake-cases.md)。
 
-RuntimeStore 用单条 JSONL runtime.commit 保存跨表变化，只有一个进程 writer。
-启动枚举所有 journal scope，恢复审批、工具、buffer 和 step，再接入客户端。
-queued 原调用可以续发；running 无可靠结果时报告 outcome_unknown，不自动重做外部动作。
+## 限制
 
-模型失败有限重试，预算耗尽或永久错误暂停原 step；客户端显式 step.retry。
-重连通过 session.status 恢复视图，在线 delta 不重放。线程执行器不承诺终止外部副作用。
-
-当前全量日志恢复和状态复制适合原型规模；事务快照、分页、外部 operation 对账与多进程 fencing
-后续建设。压缩产物落在一张表里，一个 scope 同时只有备好的和生效的两份。单机 JSONL 不等于多机高可用，不承诺第三方副作用 exactly-once。
-
-详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、
-[Compaction](feature-compaction.md)、[Skill](feature-skill.md)、[Journal](feature-journal.md)、
-[Trace](feature-trace.md)、[扩展目录](feature-extensions.md)、[Bash 与 CLI](feature-bash-cli.md)、
-[User Context](feature-user-context.md)、
-[客户端接入](manual.md) 与
-[场景推演](intake-cases.md)。
+单机进程模型：容量上限是 `max_sessions` × 一个 scope 一套进程，没有跨机共享一个 scope 的机制。
+JSONL journal 不等于多机高可用，不承诺第三方副作用 exactly-once。线程执行器不承诺终止外部副作用。
+事务快照、分页、外部 operation 对账与多机 fencing 后续建设。

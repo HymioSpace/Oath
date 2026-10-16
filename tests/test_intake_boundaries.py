@@ -6,11 +6,12 @@ from unittest.mock import patch
 
 import pytest
 
-from core.buffer.journal_buffer import JournalEventBuffer, input_id
+from core.consumer import input_key
 from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.config import AgentConfig
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
+from core.protocol.datatype.queue import QueueName
 from core.utils.deadlines import Deadlines
 from tests._support.intake_fixtures import Harness, requests, until
 from tests._support.tool_fixtures import EchoTool, VerdictPolicy
@@ -18,30 +19,51 @@ from tests.test_agent_brain import call_response
 
 
 def test_concurrent_wakes_claim_all_buffers_once(tmp_path: Path) -> None:
+    """三个 consumer 同时叫，Brain 只认领一次 —— 一个 step 里两条输入。"""
     with Harness(tmp_path) as h:
-        user = Inbound(InboundKind.USER, "user.message", {"content": "hi"}, "u")
-        system = Inbound(InboundKind.INVOKE, "system.invoke", {"note": "check"}, "s")
-        for item in (user, system):
-            h.buffers.receive(h.scope, item)
+        h.queue.add(h.scope, Inbound(QueueName.USER, "user.message", {"content": "hi"}, "u"))
+        h.queue.add(h.scope, Inbound(QueueName.USER, "user.message", {"content": "check"}, "s"))
+        for consumer in h.consumers:
+            consumer.deliver(h.scope)
         barrier = threading.Barrier(3)
 
-        def wake(item: Inbound) -> None:
+        def wake() -> None:
             barrier.wait()
-            h.brain.wake(h.scope, item.kind, (input_id(item),))
+            h.brain.wake(h.scope)
 
-        threads = [threading.Thread(target=wake, args=(i,)) for i in (user, system)]
+        threads = [threading.Thread(target=wake) for _ in range(2)]
         for thread in threads:
             thread.start()
         barrier.wait()
         for thread in threads:
             thread.join(2)
+
         h.provider.wait(1)
         until(lambda: h.state()["meta"].get("active_step") is None)
-        h.brain.wake(h.scope, "stale", (input_id(user), input_id(system)))
+        h.brain.wake(h.scope)  # 认领完了再叫是空的
         assert len(h.state()["steps"]) == 1
-        assert all(i["phase"] == "done" for i in h.state()["inputs"].values())
-        first = h.provider.requests[0].messages
-        assert [m.role for m in first if m.role != "system"] == ["user", "user"]
+        assert all(entry["phase"] == "done" for entry in h.state()["inputs"].values())
+        assert len(h.state()["inputs"]) == 2
+
+
+def test_an_input_claimed_twice_keeps_one_step(tmp_path: Path) -> None:
+    """同一条输入重投（崩在写 buffer 之后）不算新的事实。"""
+    with Harness(tmp_path) as h:
+        item = Inbound(QueueName.USER, "user.message", {"content": "hi"}, "u")
+        h.queue.add(h.scope, item)
+        h.consumers[0].deliver(h.scope)
+        h.brain.wake(h.scope)
+        h.provider.wait(1)
+        until(lambda: h.state()["meta"].get("active_step") is None)
+
+        h.queue.add(h.scope, item)
+        h.consumers[0].deliver(h.scope)
+        h.brain.wake(h.scope)
+        until(lambda: not h.queue.listen(h.scope, QueueName.USER, 0.05))
+
+        assert len(h.state()["steps"]) == 1
+        assert list(h.state()["inputs"]) == [input_key(item)]
+        assert len(h.provider.requests) == 1
 
 
 def test_approval_expires_without_another_user_message(tmp_path: Path) -> None:
@@ -70,7 +92,7 @@ def test_postprocessing_failure_is_bounded_and_retry_reuses_saved_response(tmp_p
             assert bad.call_count == h.config.llm_max_attempts
             assert len(h.provider.requests) == 1
         assert h.tools.submit_batch == submit
-        h.submit(Inbound(InboundKind.INVOKE, "step.retry", {}, "retry"))
+        h.submit(Inbound(QueueName.SYSTEM, "step.retry", {}, "retry"))
         h.provider.wait(2)
         assert len(h.calls()) == 1
         assert h.provider.requests[1] != h.provider.requests[0]
@@ -101,34 +123,24 @@ def test_cancel_while_model_running_prevents_dispatch(tmp_path: Path) -> None:
         try:
             h.start().send()
             assert entered.wait(3)
-            item = Inbound(InboundKind.INVOKE, "run.cancel", {}, "cancel")
+            item = Inbound(QueueName.SYSTEM, "run.cancel", {}, "cancel")
             h.submit(item)
-            until(lambda: input_id(item) in h.state()["controls"])
+            h.consumers[2].deliver(h.scope)
+            until(lambda: input_key(item) in h.state()["controls"])
             first_run = h.state()["meta"]["run_id"]
             release.set()
             until(lambda: h.state()["meta"].get("active_step") is None)
             assert not h.calls()
+
             h.send("new run", "new")
-            h.provider.wait(2)
+            until(lambda: len(h.state()["inputs"]) >= 2)
             new_run = h.state()["meta"]["run_id"]
             assert first_run != new_run
-            # 模拟 apply 成功而 receipt 尚未提交时的控制命令重放。
+            # 控制命令重放：已经 applied 的不能把新 run 也取消掉。
             h.consumers[2].apply(h.scope, item)
             assert not h.state()["meta"].get(f"cancelled:{new_run}")
         finally:
             release.set()
-
-
-def test_saved_buffer_deadline_survives_new_configuration(tmp_path: Path) -> None:
-    with Harness(tmp_path, tools=[EchoTool("a")]) as h:
-        h.tools.execute(h.scope, requests("a"))
-        until(lambda: h.call("a")["terminal"])
-        h.consumers[1].consume(h.scope)
-        batch = h.state()["batches"]["b1"]
-        restored = JournalEventBuffer(RuntimeStore(h.journal), tool_buffer_timeout=999)
-        result = h.buffers.snapshot(h.scope, "tool")[0]
-        restored.receive(h.scope, result)
-        assert restored.store.read(h.scope)["batches"]["b1"] == batch
 
 
 def test_monotonic_deadline_ignores_wall_clock_changes() -> None:
@@ -162,17 +174,39 @@ def test_store_preserves_null_and_rejects_accidental_deletion(tmp_path: Path) ->
         assert "optional" in h.state()["meta"]
 
 
-def test_invalid_tool_notice_does_not_block_valid_result(tmp_path: Path) -> None:
+def test_a_forged_tool_result_never_reaches_the_buffer(tmp_path: Path) -> None:
+    """队列通知不能伪造调用或改写终态。进 buffer 就是让模型读一条不存在的工具结果。"""
     with Harness(tmp_path, tools=[EchoTool("a")]) as h:
         h.tools.execute(h.scope, requests("a"))
         until(lambda: h.call("a")["terminal"])
-        invalid = Inbound(
-            InboundKind.TOOL_RESULT,
+        forged = Inbound(
+            QueueName.TOOL,
             "tool.terminal",
             {"invocation_id": ["invalid"], "batch_id": "unknown"},
             "forged",
         )
-        h.submit(invalid)
-        h.consumers[1].consume(h.scope)
-        assert h.state()["inputs"][input_id(invalid)]["phase"] == "rejected"
-        assert len(h.buffers.snapshot(h.scope, "tool")) == 1
+        h.submit(forged)
+        h.consumers[1].deliver(h.scope)
+
+        # a 的真结果照常进 buffer，伪造的那条不到场。
+        assert [item.source_id for item in h.buffer.peek(h.scope, QueueName.TOOL)] == ["result:a"]
+        assert h.state()["inputs"] == {}
+        assert any(event.type == "intake.rejected" for event in h.sink.events)
+
+
+def test_a_valid_result_still_gets_through_alongside_a_forged_one(tmp_path: Path) -> None:
+    with Harness(tmp_path, tools=[EchoTool("a")]) as h:
+        h.tools.execute(h.scope, requests("a"))
+        until(lambda: h.call("a")["terminal"])
+        h.submit(
+            Inbound(
+                QueueName.TOOL,
+                "tool.terminal",
+                {"invocation_id": ["invalid"], "batch_id": "unknown"},
+                "forged",
+            )
+        )
+        h.consumers[1].deliver(h.scope)
+
+        buffered = h.buffer.peek(h.scope, QueueName.TOOL)
+        assert [item.source_id for item in buffered] == ["result:a"]

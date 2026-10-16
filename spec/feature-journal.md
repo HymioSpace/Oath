@@ -4,8 +4,11 @@
 
 ## 背景与目标
 
-Oath 长期运行，两条硬约束：**durable** 与 **event-driven**。影响后续行为的输入、决定、
-effect intent、结果与状态迁移必须先落盘再 ACK；恢复时只重建状态，不重做外部副作用。
+Oath 长期运行，两条硬约束：**durable** 与 **event-driven**。影响后续行为的执行意图、
+结果与状态迁移必须先落盘再对外生效；恢复时只重建状态，不重做外部副作用。
+
+**输入本身不落这里。** 输入到达时在队列里、在持久 buffer 里，被 Brain 认领的那次事务才写
+进来 —— journal 里没有「收到但没处理」这一档。
 
 两条都压在一个模块上：**journal 是唯一状态来源**。broker、快照、索引、trace 视图都是从
 它恢复出来的 derived 设施。
@@ -15,7 +18,8 @@ effect intent、结果与状态迁移必须先落盘再 ACK；恢复时只重建
 
 不包含：事件运行时、工具生命周期与终态、Supervisor、日志裁剪、多机高可用。
 
-**JSONL 实现只保证单机单进程。** 不加文件锁，不假装支持多写者。
+**JSONL 实现只保证单 scope 单进程。** 一个 scope 一个进程持有它的 writer，用 `data_root` 下
+一把按 scope 命名的排他锁保证同一个 scope 不会被两个进程同时写。不假装支持多机写者。
 
 ## 前置依赖
 
@@ -226,12 +230,14 @@ fsync 成功后发布缓存。记录版本从 1 连续递增，缺失或乱序�
 
 表为 inputs、batches、calls、steps、meta、conversation、controls、compactions。修改保存 key 的完整新值，
 不允许删除 key；输入完成通过 phase=done 表达。changes 是事务 delta，不是 AgentState 快照。
-审批裁定与 queued、工具终态与可靠输入、claim 与请求草稿各自属于同一条提交记录；最终模型请求另以 step.request 提交。
+审批裁定与 queued、工具终态与 claim、请求草稿各自属于同一条提交记录；最终模型请求另以
+step.request 提交。
 reason 如 step.input / tool.terminal 表示提交原因；这些不再额外追加另一份裸事件作为恢复依据。
 
 append 报错时丢弃缓存，下一次重新读取，处理 fsync 已成功但返回失败的歧义。
 恢复只 fold 已提交的 delta，不执行模型或工具。当前扫描所有 runtime.commit，不使用事务快照加速。
-Journal.scopes 枚举所有会话；不能仅靠有 buffer 的 session 判断恢复范围。
+Journal.scopes 枚举所有会话。一个 agent 进程只恢复自己那个 scope —— 进程数由 manager 按
+session 表决定，不靠扫目录决定。
 
 有 runtime conversation 的日志，messages 投影返回截止 cursor 最近的固定视图：
 原 tool 槽位不回填，晚到真实结果以 user role 追加。它是查询视图，末尾可仍是工具声明；
@@ -291,5 +297,4 @@ fsync 过的上一条记录一起截掉。崩溃落在 `write()` 之后、`fsync
 
 ## 待决事项
 
-- MySQL 实现的具体表结构与事务边界；消费者要不要显式声明自己认识的 type（目前是不报错）。
-- 消息裁剪 / token 预算策略；`assistant.message.reasoning` 重放给模型时的 provider 策略。
+- MySQL 实现的具体表结构与事务边界；消费者要不要显式声明自己认识的 type（目前是不报错）；消息裁剪 / token 预算策略。

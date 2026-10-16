@@ -89,6 +89,12 @@ class OutboundHub(OutboundTransport):
                 return
         self._stop_pump(scope)
 
+    @property
+    def connections(self) -> int:
+        """在线连接数。同 scope 只保留一条，所以只会是 0 或 1。"""
+        with self._lock:
+            return len(self._conns)
+
     # -- OutboundTransport -------------------------------------------------
 
     def send(self, scope: Scope, frame: JsonObject) -> SendResult:

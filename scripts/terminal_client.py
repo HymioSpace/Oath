@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""终端客户端：连上 Oath，发一句话，把回来的事件打出来。
+"""终端客户端：向 biz 要一个 session，连上去，发一句话，把回来的事件打出来。
 
-    uv run python scripts/terminal_client.py --url ws://127.0.0.1:8765 --token demo-token
+    OATH_SERVICE_TOKEN=... uv run python scripts/terminal_client.py
 
 输入一行发一条 `user.message`；`:quit` 退出。
 **验证用的** —— 它不做任何本地状态，界面上看到什么就是 Oath 推过来的。
@@ -13,7 +13,10 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from uuid import uuid4
 
 import websockets
@@ -154,10 +157,34 @@ async def _run(url: str, token: str, context: dict[str, JsonValue]) -> None:
         reader.cancel()
 
 
+def _create_session(biz_url: str, service_token: str, user_id: str) -> dict[str, str]:
+    """先向 biz 要一个 session。
+
+    **scope 是开出来的，不是客户端起的名字。** biz 认服务级凭证，回 ws 地址与那个
+    session 专属的 token —— 拿到之后连哪里、用哪个凭证就都定死了。
+    """
+    request = urllib.request.Request(
+        biz_url.rstrip("/") + "/create_session",
+        data=json.dumps({"user_id": user_id}).encode(),
+        headers={
+            "authorization": f"Bearer {service_token}",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(f"create_session 失败：{exc.code} {exc.read().decode()}") from None
+    return {str(key): str(value) for key, value in body.items()}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Oath 终端客户端")
-    parser.add_argument("--url", default="ws://127.0.0.1:8765")
-    parser.add_argument("--token", default="demo-token")
+    parser.add_argument("--biz-url", default="http://127.0.0.1:8766")
+    parser.add_argument("--service-token", default=os.environ.get("OATH_SERVICE_TOKEN", ""))
+    parser.add_argument("--user-id", default="demo")
     parser.add_argument(
         "--context",
         action="append",
@@ -169,8 +196,11 @@ def main() -> None:
     context: dict[str, JsonValue] = {
         key: value for key, value in (pair.split("=", 1) for pair in args.context)
     }
+    if not args.service_token:
+        raise SystemExit("缺服务级凭证：设 OATH_SERVICE_TOKEN 或传 --service-token")
+    session = _create_session(args.biz_url, args.service_token, args.user_id)
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(_run(args.url, args.token, context))
+        asyncio.run(_run(session["ws_url"], session["credential"], context))
 
 
 if __name__ == "__main__":

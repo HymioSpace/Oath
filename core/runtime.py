@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from core.context import ContextManager
 from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.config import AgentConfig
-from core.protocol.interface import AgentEventSink, EventQueue, Journal, ToolSystem, TraceStore
+from core.protocol.interface import (
+    AgentEventSink,
+    EventBuffer,
+    EventQueue,
+    Journal,
+    ToolSystem,
+    TraceStore,
+)
 from core.skill.system import SkillSystem
 
 
@@ -21,8 +28,10 @@ class AgentContext:
     #: 各模块共用的追加日志。
     journal: Journal
     store: RuntimeStore
-    #: 三条内存输入队列。只管叫醒，不碰 journal。
+    #: 三条输入队列。中间件，不是可靠性的来源。
     queue: EventQueue
+    #: 待认领输入。consumer 收下就进这里，brain 从这里认领并落 journal。
+    buffer: EventBuffer
     #: 客户端在线投递口；推送失败不影响已保存的结果，重连查询状态。
     sink: AgentEventSink
     tools: ToolSystem

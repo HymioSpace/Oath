@@ -14,15 +14,15 @@ import threading
 import time
 import uuid
 from collections.abc import Sequence
-from typing import cast
+from typing import Any, cast
 
 from jsonschema import validate
 
-from core.buffer.journal_buffer import accept_input
 from core.detail.shrink import ResultShrinker
 from core.journal.runtime_store import RuntimeStore, State
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.permission import PermissionEvent, PermissionEventType
+from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import (
     BatchExecution,
@@ -92,7 +92,6 @@ class ThreadedToolSystem(ToolSystem):
         self._scopes: set[Scope] = set()
         self._scheduled: set[tuple[Scope, str]] = set()
         self._announced: set[tuple[Scope, str]] = set()
-        self._last_sent: dict[tuple[Scope, str], float] = {}
         self._stop = threading.Event()
         self._deadlines = Deadlines()
         self.permissions = PermissionManager(store, policy, self._deadlines, approval_ttl)
@@ -103,6 +102,46 @@ class ThreadedToolSystem(ToolSystem):
 
     def definitions(self) -> tuple[ToolDefinition, ...]:
         return self._registry.definitions()
+
+    # -- 终态发布 ------------------------------------------------------------
+
+    def _collect(
+        self, out: list[Inbound], state: State, call: State, outcome: str, **kw: Any
+    ) -> None:
+        """在事务里终结一次调用，把要发布的终态攒到 `out`。"""
+        item = _terminal(state, call, outcome, **kw)
+        if item is not None:
+            out.append(item)
+
+    def _publish(self, scope: Scope, items: list[Inbound]) -> None:
+        """把刚提交的工具终态投进它该去的队列，并通知在线客户端。
+
+        **队列是通知，不是事实。** journal 里已经有终态了，投递失败不重试也不回滚 ——
+        投递失败只意味着模型晚一点知道，终态本身不会丢。
+        """
+        for item in items:
+            try:
+                self._queue.add(scope, item)
+            except Exception:
+                _log.exception("工具终态投递失败；终态已落 journal")
+            if item.kind != QueueName.TOOL:
+                continue
+            payload = item.payload
+            try:
+                self._sink.emit(
+                    ToolEvent(
+                        type=ToolEventType.TERMINAL,
+                        scope=scope,
+                        outcome=str(payload["outcome"]),
+                        invocation_id=str(payload["invocation_id"]),
+                        tool_call_id=str(payload["tool_call_id"]),
+                        payload=payload,
+                        idempotency_key=item.source_id,
+                        occur_dt=item.occur_dt,
+                    )
+                )
+            except Exception:
+                _log.exception("终态通知失败；已保存结果保持不变")
 
     def execute(self, scope: Scope, requests: Sequence[ToolCallRequest]) -> BatchExecution:
         ids = [r.invocation_id or uuid.uuid4().hex for r in requests]
@@ -162,6 +201,8 @@ class ThreadedToolSystem(ToolSystem):
                 "admission_deadline": now + self._admission_timeout,
                 "admitted": False,
                 "presented_by_step": None,
+                #: 这一批的真结果进过模型的上下文。占位符不算。
+                "delivered": False,
             }
             for item in manifest:
                 state["calls"][item["invocation_id"]] = {
@@ -245,7 +286,7 @@ class ThreadedToolSystem(ToolSystem):
         self.store.transact(scope, "tool.classified", change)
         self.maintain(scope)
 
-    def _activate(self, scope: Scope, state: State, now: float) -> None:
+    def _activate(self, scope: Scope, state: State, now: float, out: list[Inbound]) -> None:
         for batch in state["batches"].values():
             if batch["admitted"]:
                 continue
@@ -267,7 +308,7 @@ class ThreadedToolSystem(ToolSystem):
                 admission = call["admission"] or {"verdict": "deny", "error": "接纳超时"}
                 call["admission"] = admission
                 if state["meta"].get(f"cancelled:{call['run_id']}"):
-                    _terminal(state, call, "cancelled", error="运行已取消，工具未执行")
+                    self._collect(out, state, call, "cancelled", error="运行已取消，工具未执行")
                     continue
                 verdict = admission["verdict"]
                 if verdict == "ask":
@@ -281,12 +322,14 @@ class ThreadedToolSystem(ToolSystem):
                         c["status"] in {"queued", "running"} for c in state["calls"].values()
                     )
                     if active >= self._max_pending:
-                        _terminal(state, call, "failed", error="工具执行容量已满")
+                        self._collect(out, state, call, "failed", error="工具执行容量已满")
                     else:
                         call.update(status="queued", deadline=now + admission["timeout"])
                         initial.append(call["invocation_id"])
                 else:
-                    _terminal(state, call, "failed", error=admission.get("error", "权限拒绝"))
+                    self._collect(
+                        out, state, call, "failed", error=admission.get("error", "权限拒绝")
+                    )
             batch.update(admitted=True, initial_submitted=initial)
 
     def batch_status(self, scope: Scope, batch_id: str) -> State | None:
@@ -324,11 +367,14 @@ class ThreadedToolSystem(ToolSystem):
     def apply_permission(
         self, scope: Scope, invocation_id: str, decision: str, command_id: str
     ) -> bool:
-        result = self.permissions.decide(scope, invocation_id, decision, command_id)
+        result, produced = self.permissions.decide(scope, invocation_id, decision, command_id)
+        self._publish(scope, list(produced))
         self.maintain(scope)
         return result
 
     def cancel(self, scope: Scope, run_id: str | None = None) -> None:
+        out: list[Inbound] = []
+
         def change(state: State) -> None:
             for call in state["calls"].values():
                 if run_id is not None and call["run_id"] != run_id:
@@ -336,7 +382,8 @@ class ThreadedToolSystem(ToolSystem):
                 if call["status"] not in TERMINAL:
                     running = call["status"] == "running"
                     call["source"] = "system"
-                    _terminal(
+                    self._collect(
+                        out,
                         state,
                         call,
                         "outcome_unknown" if running else "cancelled",
@@ -346,13 +393,17 @@ class ThreadedToolSystem(ToolSystem):
                     )
 
         self.store.transact(scope, "tool.cancelled", change)
+        self._publish(scope, out)
         self.maintain(scope)
 
     def recover_scope(self, scope: Scope) -> None:
+        out: list[Inbound] = []
+
         def change(state: State) -> None:
             for call in state["calls"].values():
                 if call["status"] == "running":
-                    _terminal(
+                    self._collect(
+                        out,
                         state,
                         call,
                         "outcome_unknown",
@@ -360,6 +411,7 @@ class ThreadedToolSystem(ToolSystem):
                     )
 
         self.store.transact(scope, "tool.recovered", change)
+        self._publish(scope, out)
         with self._lock:
             self._scopes.add(scope)
         self.maintain(scope)
@@ -367,10 +419,11 @@ class ThreadedToolSystem(ToolSystem):
     def maintain(self, scope: Scope) -> None:
         if self._stop.is_set():
             return
+        out: list[Inbound] = []
 
         def tick(state: State) -> None:
             now = time.time()
-            self._activate(scope, state, now)
+            self._activate(scope, state, now, out)
             for call in state["calls"].values():
                 if (
                     call["status"] in {"queued", "running"}
@@ -381,8 +434,12 @@ class ThreadedToolSystem(ToolSystem):
                     )
                     <= 0
                 ):
-                    _terminal(
-                        state, call, "timeout", error="执行 deadline 已到；外部副作用可能已发生"
+                    self._collect(
+                        out,
+                        state,
+                        call,
+                        "timeout",
+                        error="执行 deadline 已到；外部副作用可能已发生",
                     )
                 elif (
                     call["status"] == "waiting_approval"
@@ -393,17 +450,20 @@ class ThreadedToolSystem(ToolSystem):
                     )
                     <= 0
                 ):
-                    accept_input(
-                        state,
+                    out.append(
                         Inbound(
-                            kind=InboundKind.INVOKE,
+                            kind=QueueName.SYSTEM,
                             source="permission.expire",
                             source_id=f"expire:{call['invocation_id']}",
-                            payload={"invocation_id": call["invocation_id"], "status": "expired"},
-                        ),
+                            payload={
+                                "invocation_id": call["invocation_id"],
+                                "status": "expired",
+                            },
+                        )
                     )
 
         self.store.transact(scope, "tool.deadlines", tick)
+        self._publish(scope, out)
         state = self.store.read(scope)
         for invocation_id, call in state["calls"].items():
             key = (scope, invocation_id)
@@ -445,35 +505,9 @@ class ThreadedToolSystem(ToolSystem):
                         with self._lock:
                             self._announced.discard(key)
                         _log.exception("审批通知失败，状态可查询")
-        for key, entry in state["inputs"].items():
-            if entry["phase"] != "accepted" or entry["queue"] == "user":
-                continue
-            with self._lock:
-                now = time.monotonic()
-                if now - self._last_sent.get((scope, key), -1) < 0.2:
-                    continue
-                self._last_sent[(scope, key)] = now
-            item = Inbound.from_dict(entry["item"])
-            self._queue.put(scope, item)
-            if item.kind == InboundKind.TOOL_RESULT:
-                try:
-                    p = item.payload
-                    self._sink.emit(
-                        ToolEvent(
-                            type=ToolEventType.TERMINAL,
-                            scope=scope,
-                            outcome=str(p["outcome"]),
-                            invocation_id=str(p["invocation_id"]),
-                            tool_call_id=str(p["tool_call_id"]),
-                            payload=p,
-                            idempotency_key=item.source_id,
-                            occur_dt=item.occur_dt,
-                        )
-                    )
-                except Exception:
-                    _log.exception("终态通知失败；已保存结果保持不变")
 
     def _run(self, scope: Scope, invocation_id: str) -> None:
+        out: list[Inbound] = []
         try:
 
             def start(state: State) -> State | None:
@@ -481,7 +515,7 @@ class ThreadedToolSystem(ToolSystem):
                 if self._stop.is_set() or call["status"] != "queued":
                     return None
                 if state["meta"].get(f"cancelled:{call['run_id']}"):
-                    _terminal(state, call, "cancelled", error="运行已取消，未执行")
+                    self._collect(out, state, call, "cancelled", error="运行已取消，未执行")
                     return None
                 if (
                     self._deadlines.remaining(
@@ -491,12 +525,14 @@ class ThreadedToolSystem(ToolSystem):
                     )
                     <= 0
                 ):
-                    _terminal(state, call, "timeout", error="排队超时，工具未执行")
+                    self._collect(out, state, call, "timeout", error="排队超时，工具未执行")
                     return None
                 call.update(status="running", started_dt=utc_now_iso())
                 return cast(State, call)
 
             call = self.store.transact(scope, "tool.started", start)
+            self._publish(scope, out)
+            out.clear()
             if call is None:
                 return
             registered = self._registry.get(call["tool"])
@@ -541,9 +577,13 @@ class ThreadedToolSystem(ToolSystem):
                         )
                         <= 0
                     ):
-                        _terminal(state, current, "timeout", error="执行期限已到，结果迟到")
+                        self._collect(
+                            out, state, current, "timeout", error="执行期限已到，结果迟到"
+                        )
                     else:
-                        _terminal(state, current, "succeeded", content=content, detail=detail)
+                        self._collect(
+                            out, state, current, "succeeded", content=content, detail=detail
+                        )
 
                 self.store.transact(scope, "tool.terminal", finish)
             except Exception as exc:
@@ -551,13 +591,20 @@ class ThreadedToolSystem(ToolSystem):
                     return
                 error = str(exc)
                 error_kind = "tool_error" if isinstance(exc, ToolExecutionError) else "unexpected"
-                self.store.transact(
-                    scope,
-                    "tool.terminal",
-                    lambda s: _terminal(
-                        s, s["calls"][invocation_id], "failed", error=error, error_kind=error_kind
-                    ),
-                )
+
+                def failed(state: State, error: str = error, kind: str = error_kind) -> None:
+                    self._collect(
+                        out,
+                        state,
+                        state["calls"][invocation_id],
+                        "failed",
+                        error=error,
+                        error_kind=kind,
+                    )
+
+                self.store.transact(scope, "tool.terminal", failed)
+            finally:
+                self._publish(scope, out)
         except Exception:
             _log.exception("工具 worker 故障；deadline / 恢复负责收尾")
         finally:

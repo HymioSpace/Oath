@@ -12,17 +12,18 @@ from tests._support.intake_fixtures import Harness, requests, until
 from tests._support.tool_fixtures import EchoTool, VerdictPolicy
 
 
-def test_terminal_and_reliable_input_share_one_journal_commit(tmp_path: Path) -> None:
+def test_a_terminal_is_a_fact_on_its_own(tmp_path: Path) -> None:
+    """终态自己就是事实 —— 输入还没被 Brain 认领，它照样完整落着。"""
     with Harness(tmp_path, tools=[EchoTool("a")]) as h:
         h.tools.execute(h.scope, requests("a"))
         until(lambda: h.call("a")["terminal"])
         records = list(h.journal.read_range(h.scope, Cursor(CursorKind.LINE, 0)))
         terminal = next(r for r in records if r.payload.get("reason") == "tool.terminal")
+
         # `changes` 的形状正是这个测试要断言的东西，wire 上只有 JsonValue。
         changes = cast("dict[str, dict[str, Any]]", terminal.payload["changes"])
         assert changes["calls"]["a"]["terminal"]
-        assert len(changes["inputs"]) == 1
-        assert next(iter(changes["inputs"].values()))["phase"] == "accepted"
+        assert "inputs" not in changes
 
 
 def test_terminal_payload_is_valid_public_contract(tmp_path: Path) -> None:
@@ -50,7 +51,7 @@ def test_waiting_approval_is_state_not_a_terminal_record(tmp_path: Path) -> None
         h.tools.execute(h.scope, requests("a"))
         until(lambda: h.call("a")["status"] == "waiting_approval")
         assert not h.call("a")["terminal"]
-        assert not h.state()["inputs"]
+        assert h.state()["inputs"] == {}
         execution = h.tools.status(h.scope, "a")
         assert execution is not None
         assert not execution.is_terminal

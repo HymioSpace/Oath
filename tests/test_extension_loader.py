@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-from bootstrap.extension_loader import ExtensionError, _package_name, load_extensions
+from bootstrap.common.extension_loader import ExtensionError, _package_name, load_extensions
 
 TOOL_SOURCE = """
 from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult

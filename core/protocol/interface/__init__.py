@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from core.protocol.interface.agent_access import AgentAccess, AgentUnavailable
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.buffer import EventBuffer
 from core.protocol.interface.compaction import Compactor
@@ -18,7 +19,9 @@ from core.protocol.interface.trace import TraceStore
 from core.protocol.interface.transport import OutboundTransport, SendResult
 
 __all__ = [
+    "AgentAccess",
     "AgentEventSink",
+    "AgentUnavailable",
     "Brain",
     "Compactor",
     "DeltaChannel",

@@ -54,6 +54,8 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
                 )
             messages.append({"role": "tool", "content": text, "tool_call_id": call["tool_call_id"]})
         batch["presented_by_step"] = step_id
+        # 这次呈现带的是不是真结果。带占位符不算 —— 真结果到了还要再叫模型一次。
+        batch["delivered"] = all(call["invocation_id"] in selected for call in calls)
     for key, entry in entries:
         item = Inbound.from_dict(entry["item"])
         if entry["queue"] == "tool" and key not in used:
@@ -70,15 +72,6 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
             )
         elif entry["queue"] == "user":
             messages.append({"role": "user", "content": str(item.payload["content"])})
-        elif item.source == "system.invoke":
-            messages.append(
-                {
-                    "role": "user",
-                    "content": "<system_event>"
-                    + escape(str(item.payload.get("note", "继续处理当前任务")))
-                    + "</system_event>",
-                }
-            )
     validate_messages(messages)
     return messages
 

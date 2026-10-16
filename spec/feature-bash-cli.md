@@ -10,7 +10,7 @@ agent 需要两样现在没有的能力：在自己指定的目录里跑一条�
 - **`bash` 是 core 工具**：命令在哪执行要能换（宿主机 → 沙箱），所以执行环境是接口。
   命令默认在 workspace 下跑，workspace 根目录来自配置，并写进 system prompt。
 - **`oath-cli` 是模型能用的命令行**：它在 bash 里执行，把 `oath-cli echo foo` 代理到
-  runtime 的 CLI server；业务逻辑在 `extensions/cli/`。
+  biz 的 CLI server；业务逻辑在 `extensions/cli/`。
 
 不包含：沙箱执行环境；让 CLI 命令参与调度或权限扩展。
 
@@ -19,7 +19,7 @@ agent 需要两样现在没有的能力：在自己指定的目录里跑一条�
 - [工具系统](feature-tool-system.md)：bash 是注册进去的一个 `Tool`，权限、deadline、
   截断、终态都走同一条路。
 - [user_context](feature-user-context.md)：CLI 命令拿到的额外入参。
-- [Event runtime](feature-event-runtime.md)：biz server 是同进程的另一个 server。
+- [事件通路](feature-event-runtime.md)：biz 是独立进程，通过 service 通道读这个 scope 的数据。
 
 ## 3 总览
 
@@ -118,7 +118,7 @@ class ExecutionEnvironment(ABC):
 ### 4.3 workspace
 
 `AgentConfig.workspace_root`，默认 `./workspace`；`AgentConfig.cli_bin_dir`，默认 `./scripts`。
-两者在装配期解析成绝对路径：**相对路径按 runtime 进程的 cwd 算，不是按命令的 cwd** ——
+两者在装配期解析成绝对路径：**相对路径按 agent 进程的 cwd 算，不是按命令的 cwd** ——
 命令默认落在 workspace 下，相对的 `cli_bin_dir` 若照原样进 `PATH`，命令就会去找
 `workspace/scripts/oath-cli`。它们也决定 system prompt 里那段说明写的路径。
 
@@ -138,8 +138,8 @@ body：缺失、拼错、类型换不过去一律 400。
 `scope` 与 `user_context` 由框架传入，用不上的命令也照收 —— 签名一致，要鉴权的命令才能
 自己写在那儿，不必改框架。`extensions/cli/` 里的函数不知道自己被 HTTP 调过。
 
-命令在 `<扩展目录>/cli/<名字>.py` 里声明，装配期扫出来进 `runtime.commands`；路由在
-`biz/cli/cli_server.py`，那张表从 runtime 读。**声明与路由分开**：路由是框架的事，所有命令
+命令在 `<扩展目录>/cli/<名字>.py` 里声明，biz 装配期扫出来进 `BizApplication.commands`；路由在
+`biz/cli/cli_server.py`，那张表从 biz 本进程读取。**声明与路由分开**：路由是框架的事，所有命令
 一条路；声明是业务的事，放在业务自己的目录里。加命令不用改框架。
 细节见[扩展目录](feature-extensions.md)。
 
@@ -158,14 +158,14 @@ body：缺失、拼错、类型换不过去一律 400。
 | `core/protocol/interface/execution.py` | 执行环境接口与 `ExecutionResult` |
 | `core/shell/impl/host_environment.py` | 宿主机实现：subprocess、超时 kill、输出上限、PATH |
 | `core/shell/bash_tool.py` | `BashTool` 与 system prompt 的 workspace 段落 |
-| `biz/cli/cli_server.py` | 路由、参数校验、透传；命令表从 `runtime.commands` 读 |
+| `biz/cli/cli_server.py` | 路由、参数校验、透传；命令表从 `BizApplication.commands` 读 |
 | `biz/session_scope.py` | 从请求认出 scope；认证与参数错误的回法，观测查询与 CLI 共用 |
 | `extensions/cli/` | 业务命令：纯函数 + 模块级 `COMMANDS` 声明 |
 
 命令走 `POST /cli/<name>`、参数是 JSON body，命令目录是 `GET /cli_commands`。**执行不用
 GET**：命令是动作，将来代理写操作时 GET 的缓存、预取与重试语义都不对。
 
-装配在 `bootstrap/runtime.py`：`HostEnvironment` 无条件建，`BashTool` 无条件注册 ——
+装配在 `bootstrap/agent/agent.py`：`HostEnvironment` 无条件建，`BashTool` 无条件注册 ——
 与 `detail_read`、`skill` 一样属于 core 给模型的固有工具。`cli_env(scope)` 由 bootstrap
 注入，按 scope 现算 `OATH_CLI_SERVER` / `OATH_CLI_TOKEN`。
 
@@ -197,11 +197,12 @@ CLI 路由与 `/list_traces`、`/query_trace` 同一个 server、同一个端口
 
 - **Hymio / 客户端**：无新增字段。客户端看到的是 bash 工具调用与终端里 `oath-cli` 的输出。
 - **Hymio**：要提供 bash 的权限策略，否则默认配置下 agent 可以在宿主机上执行任意命令。
-- **Hymio 生产认证**：需要能按 scope 出 credential（当前从配置里的 credential 映射反查）。
-  做不到时要签一个范围更小的委托 token，不能给所有 session 共用一个 credential。
+- **Hymio 生产认证**：服务级凭证进配置，session 级凭证由 manager 签发。若 Hymio 要自己
+  接管身份，替换的是 manager 的签发与 `SessionAuthenticator`，不能给所有 session 共用一个
+  credential。
 
 ## 8 待决事项
 
 - 沙箱执行环境的接口细化：远端还是本地进程、凭据怎么带、能不能访问宿主网络。
-- 沙箱里 `oath-cli` 是预装还是同样由 PATH 注入 —— 预装更简单，但要保证版本跟 runtime 对得上。
+- 沙箱里 `oath-cli` 是预装还是同样由 PATH 注入 —— 预装更简单，但要保证版本跟 biz 对得上。
 - 单条命令能读多少文件、能不能出网，由执行环境决定；沙箱方案出来前没有约束。

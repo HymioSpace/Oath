@@ -15,7 +15,7 @@ from typing import Any, cast
 
 import pytest
 
-from bootstrap.config import from_dict
+from bootstrap.common.config import from_dict
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolInvocation, ToolResult
 from core.protocol.error import ToolExecutionError

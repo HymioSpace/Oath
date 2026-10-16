@@ -4,9 +4,10 @@ import threading
 from pathlib import Path
 
 from core.context.intake import validate_messages
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.llm import LlmRequest, LlmResponse, LlmToolCall
-from tests._support.intake_fixtures import Harness, until
+from core.protocol.datatype.queue import QueueName
+from tests._support.intake_fixtures import Harness, arrived, until
 from tests._support.tool_fixtures import EchoTool, GatedTool, VerdictPolicy
 
 
@@ -58,7 +59,7 @@ def test_mixed_batch_including_fast_approval(tmp_path: Path) -> None:
             until(lambda: h.call("c") and h.call("c")["status"] == "waiting_approval")
             a.gate.set()
             h.decide(h.call("c")["invocation_id"])
-            until(lambda: len(h.buffers.snapshot(h.scope, "tool")) == 2)
+            until(lambda: h.call("a")["terminal"] and h.call("c")["terminal"])
             assert len(h.provider.requests) == 1
             b.gate.set()
             request = h.provider.wait(2)
@@ -91,7 +92,6 @@ def test_user_interrupt_freezes_placeholder_before_answer_and_late_result_is_use
             tool_message = next(m for m in second.messages if m.role == "tool")
             assert "尚未返回" in tool_message.content
             b.gate.set()
-            until(lambda: h.buffers.snapshot(h.scope, "tool"))
             assert len(h.provider.requests) == 2
             assert (
                 next(m for m in second.messages if m.role == "tool").content == tool_message.content
@@ -139,7 +139,7 @@ def test_failed_request_retries_identical_input_and_preserves_new_input(tmp_path
             h.start().send()
             assert entered.wait(3)
             h.send("后来的消息", "u2")
-            until(lambda: h.buffers.snapshot(h.scope, "user"))
+            until(lambda: arrived(h, QueueName.USER))
             release.set()
             second = h.provider.wait(2)
             assert second == h.provider.requests[0]
@@ -154,10 +154,10 @@ def test_retry_exhaustion_keeps_claim_and_needs_explicit_retry(tmp_path: Path) -
         h.start().send()
         until(lambda: any(s["status"] == "failed" for s in h.state()["steps"].values()))
         h.send("新消息", "u2")
-        until(lambda: h.buffers.snapshot(h.scope, "user"))
+        until(lambda: arrived(h, QueueName.USER))
         assert len(h.provider.requests) == 3
         assert any(e["phase"] == "claimed" for e in h.state()["inputs"].values())
-        item = Inbound(InboundKind.INVOKE, "step.retry", {}, "retry1")
+        item = Inbound(QueueName.SYSTEM, "step.retry", {}, "retry1")
         h.submit(item)
         h.provider.wait(5)
         assert h.provider.requests[3] == h.provider.requests[0]
@@ -192,6 +192,6 @@ def test_duplicate_user_command_does_not_ask_again(tmp_path: Path) -> None:
         h.provider.wait(1)
         until(lambda: h.state()["meta"].get("active_step") is None)
         h.submit(item)
-        h.consumers[0].consume(h.scope)
-        h.consumers[0].evaluate(h.scope)
+        h.consumers[0].deliver(h.scope)
+        h.consumers[0].evaluate(h.scope, True)
         assert len(h.provider.requests) == 1

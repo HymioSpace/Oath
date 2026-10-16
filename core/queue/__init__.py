@@ -1,7 +1,6 @@
-"""队列的实现。协议层的 `EventQueue` 在 `core/protocol/interface/queue.py`。"""
-
-from __future__ import annotations
+"""两条 `EventQueue` 实现。选型换掉了就换掉其中一个。"""
 
 from core.queue.in_memory_queue import InMemoryEventQueue
+from core.queue.redis_queue import RedisEventQueue
 
-__all__ = ["InMemoryEventQueue"]
+__all__ = ["InMemoryEventQueue", "RedisEventQueue"]

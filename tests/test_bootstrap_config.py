@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from bootstrap.config import from_dict, load_config
+from bootstrap.common.config import from_dict, load_config
+from core.protocol.datatype.config import SupervisorConfig
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,10 +47,10 @@ def test_the_nested_provider_is_read(tmp_path: Path) -> None:
 
 def test_the_server_block_is_read(tmp_path: Path) -> None:
     config = load_config(
-        _write(tmp_path, '[server]\nhost = "0.0.0.0"\nport = 9000\nmax_connections = 4\n')
+        _write(tmp_path, '[server]\nhost = "0.0.0.0"\nhttp_port = 9000\nmax_connections = 4\n')
     )
 
-    assert (config.server.host, config.server.port, config.server.max_connections) == (
+    assert (config.server.host, config.server.http_port, config.server.max_connections) == (
         "0.0.0.0",
         9000,
         4,
@@ -61,6 +62,33 @@ def test_the_server_keeps_its_defaults_when_absent(tmp_path: Path) -> None:
 
     assert config.server.send_queue_size == 256
     assert config.server.host == "127.0.0.1"
+
+
+def test_the_supervisor_block_is_read(tmp_path: Path) -> None:
+    config = load_config(
+        _write(
+            tmp_path,
+            "[supervisor]\ninvoke_interval_seconds = 12.5\ninvoke_timeout_seconds = 2.5\n",
+        )
+    )
+
+    assert config.supervisor.invoke_interval_seconds == 12.5
+    assert config.supervisor.invoke_timeout_seconds == 2.5
+    # 没写的那些各自有自己的默认值。
+    assert config.supervisor.shutdown_timeout_seconds == 5.0
+
+
+def test_the_supervisor_keeps_its_defaults_when_absent(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, MINIMAL))
+
+    assert config.supervisor.invoke_interval_seconds == 30.0
+    assert config.supervisor.invoke_timeout_seconds == 5.0
+
+
+def test_an_infinite_invoke_interval_is_refused() -> None:
+    """这些值是要拿来当定时与超时的。`inf` 会让这个周期任务永远等不到下一轮。"""
+    with pytest.raises(ValueError, match="invoke_interval_seconds"):
+        SupervisorConfig(invoke_interval_seconds=float("inf"))
 
 
 def test_the_agent_block_is_read(tmp_path: Path) -> None:
@@ -128,60 +156,48 @@ def test_an_unset_variable_expands_to_nothing(
     assert config.agent.provider.api_base == "xy"
 
 
-def test_a_credential_token_can_come_from_the_environment(
+def test_a_service_credential_can_come_from_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("OATH_TEST_TOKEN", "s3cret")
     config = load_config(
-        _write(
-            tmp_path,
-            MINIMAL
-            + '\n[[credentials]]\ntoken = "${OATH_TEST_TOKEN}"\nuser_id = "u"\nsession_id = "s"\n',
-        )
+        _write(tmp_path, 'service_credentials = ["${OATH_TEST_TOKEN}"]\n' + MINIMAL)
     )
 
-    assert config.credential_for("s3cret") == ("u", "s")
+    assert config.service_authorised("s3cret")
 
 
 # --------------------------------------------------------------------------
-# 凭证
+# 服务级凭证
 # --------------------------------------------------------------------------
 
 
-def test_credentials_map_a_token_to_an_identity(tmp_path: Path) -> None:
-    config = load_config(
-        _write(
-            tmp_path,
-            MINIMAL + '\n[[credentials]]\ntoken = "t"\nuser_id = "u"\nsession_id = "s"\n',
-        )
-    )
+def test_a_service_credential_authorises_its_token(tmp_path: Path) -> None:
+    config = load_config(_write(tmp_path, 'service_credentials = ["t", "u"]\n' + MINIMAL))
 
-    assert config.credential_for("t") == ("u", "s")
+    assert config.service_authorised("t")
+    assert config.service_authorised("u")
 
 
-def test_an_unknown_token_has_no_identity(tmp_path: Path) -> None:
-    """返回 None 是「不认」，不是「随便给一个」—— 认证器据此拒绝，不回落匿名。"""
+def test_an_unknown_token_is_not_authorised(tmp_path: Path) -> None:
+    """不认就是不认 —— 认证器据此拒绝，不回落匿名。"""
     config = load_config(_write(tmp_path, MINIMAL))
 
-    assert config.credential_for("nobody") is None
+    assert not config.service_authorised("nobody")
 
 
-def test_a_tokenless_credential_is_dropped(tmp_path: Path) -> None:
-    config = load_config(
-        _write(tmp_path, MINIMAL + '\n[[credentials]]\nuser_id = "u"\nsession_id = "s"\n')
-    )
+def test_an_empty_token_is_never_authorised(tmp_path: Path) -> None:
+    """`${VAR}` 在变量没设时展开成空串。空串当成一个凭证就是无凭证可过。"""
+    config = load_config(_write(tmp_path, 'service_credentials = ["${OATH_NOPE}"]\n' + MINIMAL))
 
-    assert config.credentials == {}
+    assert config.service_credentials == ()
+    assert not config.service_authorised("")
 
 
-def test_to_json_never_carries_the_credentials(tmp_path: Path) -> None:
+def test_to_json_never_carries_the_service_credentials(tmp_path: Path) -> None:
     """`to_json` 会被人打日志、发监控。凭证的值不能出现在里面。"""
     config = load_config(
-        _write(
-            tmp_path,
-            MINIMAL
-            + '\n[[credentials]]\ntoken = "a-long-demo-token"\nuser_id = "u"\nsession_id = "s"\n',
-        )
+        _write(tmp_path, 'service_credentials = ["a-long-demo-token"]\n' + MINIMAL)
     )
 
     assert "a-long-demo-token" not in json.dumps(config.to_json())
@@ -263,7 +279,7 @@ def test_an_empty_dict_still_gives_a_usable_shape() -> None:
     """装配层拿到的是配置对象，不是 None —— 缺省值在这里定死。"""
     config = from_dict({})
 
-    assert config.server.port == 8765
+    assert config.server.http_port == 8766
     assert config.agent.system_prompt == ""
 
 

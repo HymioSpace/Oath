@@ -6,6 +6,7 @@ import pytest
 
 from core.journal.runtime_store import State
 from core.protocol.datatype import Scope, ToolCallRequest
+from core.protocol.datatype.queue import QueueName
 from core.protocol.error import ToolRequestError
 from core.utils.encoding import JsonObject
 from tests._support.intake_fixtures import Harness, requests, until
@@ -91,9 +92,10 @@ def test_idle_approval_expiry_goes_through_system_consumer(tmp_path: Path) -> No
         tmp_path, tools=[EchoTool("a")], policy=VerdictPolicy(default="ask"), approval_ttl=0.05
     ) as h:
         pending(h)
-        until(lambda: any(e["queue"] == "system" for e in h.state()["inputs"].values()))
+        # 过期由工具系统自己判定并投进 system 队列；那条事件要过 consumer 才生效。
+        until(lambda: h.queue.listen(h.scope, QueueName.SYSTEM, 0))
         assert h.call("a")["status"] == "waiting_approval"
-        h.consumers[2].consume(h.scope)
+        h.consumers[2].deliver(h.scope)
         assert h.call("a")["permission"] == "expired"
         assert h.call("a")["terminal"]["source"] == "system"
         assert h.call("a")["started_dt"] is None

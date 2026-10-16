@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# 完整关闭：biz 连同它拉起的 agent / supervisor 一起收，脚本自己起的 Redis 也停掉。
+#
+# 正常路径是 SIGTERM → manager.close() 逐个停两个子进程。这里额外扫一遍 agent，是为了
+# 兜住 biz 被 kill -9 过的情况：那种情况下 session 表没了，残留的 agent 没人管。
+set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/oath-common.sh"
+
+cd "$OATH_ROOT"
+oath_load_config
+
+oath_say "停 Oath"
+oath_stop_biz
+
+oath_say "停 Redis"
+oath_stop_redis
+
+oath_say "收干净了"

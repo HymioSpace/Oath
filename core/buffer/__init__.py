@@ -1,5 +1,5 @@
-"""基于统一 Journal 事务的三个持久化 buffer。"""
+"""待认领输入的持久存放。"""
 
-from core.buffer.journal_buffer import JournalEventBuffer
+from core.buffer.disk_buffer import DiskEventBuffer
 
-__all__ = ["JournalEventBuffer"]
+__all__ = ["DiskEventBuffer"]

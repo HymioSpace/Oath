@@ -32,12 +32,12 @@
 ### 3.2 流程
 
 ```mermaid flowchart TD
-    C[agent.extension_dirs] -->|按顺序| L[bootstrap.extension_loader]
+    C[agent.extension_dirs] -->|按顺序| L[bootstrap.common.extension_loader]
     L --> T[tools/*.py → Tool 子类]
     L --> M[cli/*.py → COMMANDS]
     L --> S[skills/ → 目录]
     T --> R[ToolRegistry]
-    M --> RT[Runtime.commands]
+    M --> RT[BizApplication.commands]
     S --> SK[SkillSystem]
     RT --> B[biz server /cli/*]
 ```
@@ -61,7 +61,7 @@ extensions-local/
   skills/standup/SKILL.md
 ```
 
-重启 runtime，三件事同时成立：
+重启 biz 后新开一个 session，三件事同时成立：
 
 - 模型看到的工具列表里多了 `note`，与 `bash` `skill` `detail_read` 并列；
 - `GET /cli_commands` 里多了 `now`，`POST /cli/now` 能调通，credential 与 `user_context`
@@ -81,7 +81,7 @@ extensions-local/
 
 ### 4.1 配置
 
-`agent.extension_dirs` 是一串目录。相对路径按 runtime 进程的 cwd 解析，与
+`agent.extension_dirs` 是一串目录。相对路径按 biz 进程的 cwd 解析，与
 `workspace_root` / `cli_bin_dir` 同一条规则；写 `[]` 就是关掉扫描，那是一个有意义的取值，
 不等于「没配」。
 
@@ -147,15 +147,14 @@ git 的本地目录 —— 仓库作者不再是唯一的把关人。`properties
 
 ## 5 实现方案
 
-`bootstrap/extension_loader.py` 是**唯一 import 扩展代码的地方**，产出
+`bootstrap/common/extension_loader.py` 是**唯一 import 扩展代码的地方**，产出
 `Extensions(tools, commands, skill_dirs)`。它只报技能目录：技能文件由 `SkillSystem`
 按自己的 frontmatter 规则扫，那里已经有读坏就跳过的逻辑。
 
-`Runtime.__init__` 装好扩展后才继续：命令表存进 `runtime.commands`，工具注册进
-`ToolRegistry`，技能目录排在 `skill_dir` 之后交给 `SkillSystem`。装配期失败意味着
-进程不启动，而不是「模型看不到它」。
+agent 装配时注册 tools，并把 skills 目录交给 SkillSystem；biz 装配时构建
+`BizApplication.commands`。各进程只导入自己的扩展类别，装配失败时该进程不启动。
 
-`biz/cli/cli_server.py` 只管路由与鉴权，命令表从 `runtime.commands` 读 —— 它不 import
+`biz/cli/cli_server.py` 只管路由与鉴权，命令表从 `BizApplication.commands` 读 —— 它不 import
 任何一个扩展。
 
 ## 6 失败与恢复
@@ -171,7 +170,7 @@ git 的本地目录 —— 仓库作者不再是唯一的把关人。`properties
 | 技能文件读坏 | 跳过该文件并告警（`SkillSystem` 的既有行为） |
 | 改了扩展没重启 | 不生效。索引与命令表只在启动时构建 |
 
-**已知的缺口**：扩展没有热加载。改了一个本地工具要重启 runtime 才看得见，这对开发体验
+**已知的缺口**：扩展没有热加载。改了一个本地工具要等下一个 session 才看得见，这对开发体验
 是真实的损失，先记在这里而不是假装没有。
 
 ## 7 跨仓库影响
@@ -184,3 +183,8 @@ Hymio / Nostalgia 把自己的工具、命令、技能放进 `extension_dirs` �
 - 扩展之间的依赖声明：一个扩展要用另一个扩展的东西，现在靠 import 同级模块。
 - 扩展目录可以配到仓库之外（当前允许，但没有对应的路径约定与文档）。
 - 目录扫描要不要给一个上限，防止误把巨大的目录树当扩展目录。
+
+## 服务归属
+
+agent 只装载 tools / skills；biz 只装载 CLI。两者复用发现规则，但各自导入、实例化自己的扩展。
+supervisor 不导入扩展。CLI 通过 service 通道取当前 scope 的 user_context，在 biz 进程执行。

@@ -1,4 +1,4 @@
-"""真实装配与 WebSocket command handler；模型和 socket 使用受控替身。"""
+"""真实装配与 WebSocket command handler；模型走脚本，socket 走替身。"""
 
 import asyncio
 import json
@@ -9,13 +9,14 @@ from typing import Any, cast
 import pytest
 from websockets.asyncio.server import ServerConnection
 
-from bootstrap.runtime import Runtime
-from bootstrap.ws_server import _serve_connection
-from core.protocol.datatype.config import AgentConfig, OathConfig
+from bootstrap.agent.agent import Agent
+from bootstrap.agent.server import _serve_connection
+from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command
 from core.protocol.error import WireProtocolError
 from core.tool.impl import ThreadedToolSystem
+from tests._support.agent_fixtures import CREDENTIAL, SCOPE, agent_config, build
 from tests._support.intake_fixtures import ScriptedProvider, until
 from tests._support.tool_fixtures import EchoTool, VerdictPolicy
 from tests.test_agent_brain import call_response
@@ -63,55 +64,52 @@ class Connection:
             until, lambda: next((f for f in self.frames if predicate(f)), None)
         )
 
-    def serve(self, runtime: Runtime) -> asyncio.Task[None]:
+    def serve(self, agent: Agent) -> asyncio.Task[None]:
         """按 `_serve_connection` 声明的参数类型起这条连接的处理协程。"""
-        return asyncio.create_task(_serve_connection(runtime, cast(ServerConnection, self)))
+        return asyncio.create_task(_serve_connection(agent, cast(ServerConnection, self)))
 
 
-def tool_system(runtime: Runtime) -> ThreadedToolSystem:
+def tool_system(agent: Agent) -> ThreadedToolSystem:
     """装配层放进去的一定是 `ThreadedToolSystem`，`AgentContext.tools` 上只声明了 `ToolSystem`。"""
-    return cast(ThreadedToolSystem, runtime.ctx.tools)
+    return cast(ThreadedToolSystem, agent.ctx.tools)
 
 
-async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> None:
+async def test_ack_then_claim_then_approval(tmp_path: Path) -> None:
+    """ACK 只说明「已投进队列」；journal 里出现这条输入要等 Brain 认领。断线重连拿得到全部。"""
     provider = ScriptedProvider([call_response("a")])
-    runtime = Runtime(
-        OathConfig(
-            data_root=tmp_path,
-            credentials={"synthetic-test-token": ("u1", "s1")},
-            agent=AgentConfig(extension_dirs=()),
-        ),
-        loop=asyncio.get_running_loop(),
+    agent = build(
+        tmp_path,
+        provider=provider,
         tools=[EchoTool("a")],
         policy=VerdictPolicy(default="ask"),
-        provider=provider,
+        loop=asyncio.get_running_loop(),
     )
-    scope = Scope("u1", "s1")
     connections: list[Connection] = []
     handlers: list[asyncio.Task[None]] = []
 
-    async def connect() -> Connection:
-        conn = Connection()
+    async def connect(conn: Connection | None = None) -> Connection:
+        conn = conn if conn is not None else Connection()
         connections.append(conn)
-        handlers.append(conn.serve(runtime))
-        await conn.command("session.open", "open", {"credential": "synthetic-test-token"})
+        handlers.append(conn.serve(agent))
+        await conn.command("session.open", "open", {"credential": CREDENTIAL})
         await conn.wait_for(lambda f: f["type"] == "ack")
         return conn
 
     try:
+        agent.start()
         first = await connect()
 
         def check_ack(frame: Frame) -> None:
             if frame["type"] == "ack" and frame["id"] == "user-1":
-                # ACK 发出瞬间，输入已可从独立 journal reader 恢复。
-                from core.journal.runtime_store import RuntimeStore
-
-                assert "user:user-1" in RuntimeStore(runtime.journal).read(scope)["inputs"]
+                # ACK 发出瞬间还没有 inputs —— 认领还没发生，这正是新契约。
+                assert RuntimeStore(agent.journal).read(SCOPE)["inputs"] == {}
 
         first.on_send = check_ack
         await first.command("user.message", "user-1", {"content": "do it", "user_context": {}})
         await first.wait_for(lambda f: f["type"] == "ack" and f["id"] == "user-1")
-        await asyncio.to_thread(until, lambda: tool_system(runtime).permissions.pending(scope))
+        await asyncio.to_thread(until, lambda: tool_system(agent).permissions.pending(SCOPE))
+        assert "user:user-1" in RuntimeStore(agent.journal).read(SCOPE)["inputs"]
+
         await first.close()
         await handlers[0]
         second = await connect()
@@ -121,6 +119,7 @@ async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> Non
         call = frame["payload"]["calls"][0]
         assert call["status"] == "waiting_approval"
         assert len(provider.requests) == 1
+
         await second.command(
             "permission.decide",
             "approve",
@@ -128,12 +127,15 @@ async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> Non
         )
         await second.wait_for(lambda f: f["type"] == "ack" and f["id"] == "approve")
         await asyncio.to_thread(provider.wait, 2)
-        state = runtime.ctx.store.read(scope)
+        state = agent.ctx.store.read(SCOPE)
         assert len(state["calls"]) == 1
         assert state["calls"][call["invocation_id"]]["source"] == "system"
-        assert state["inputs"]["invoke:approve"]["item"]["payload"]["decided_by"] == "u1"
+        # 控制命令当场生效，不进 buffer —— 它在 journal 里的位置是 controls。
+        assert state["controls"]["approve"]["identity"]["decision"] == "approved"
+        assert state["controls"]["approve"]["applied"] is True
+
         with pytest.raises(WireProtocolError):
-            runtime.submit(
+            agent.submit(
                 Command(
                     "bad",
                     "permission.decide",
@@ -146,36 +148,56 @@ async def test_durable_ack_pending_reconnect_and_approval(tmp_path: Path) -> Non
         for conn in connections:
             await conn.close()
         await asyncio.gather(*handlers)
-        await asyncio.to_thread(runtime.close)
+        await asyncio.to_thread(agent.close)
 
 
-async def test_no_command_ack_when_durable_acceptance_fails(
+async def test_an_undeliverable_command_gets_no_ack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    runtime = Runtime(
-        OathConfig(
-            data_root=tmp_path,
-            credentials={"synthetic-test-token": ("u1", "s1")},
-            agent=AgentConfig(extension_dirs=()),
-        ),
-        loop=asyncio.get_running_loop(),
-        provider=ScriptedProvider(),
-    )
+    """投递失败要报错帧，不发 ACK —— ACK 的含义是「队列收到了」，答不到就不能说收到了。"""
     connection = Connection()
-    handler = connection.serve(runtime)
+    agent = build(tmp_path, loop=asyncio.get_running_loop())
+    handler = connection.serve(agent)
     try:
-        await connection.command("session.open", "open", {"credential": "synthetic-test-token"})
+        await connection.command("session.open", "open", {"credential": CREDENTIAL})
         await connection.wait_for(lambda f: f["type"] == "ack")
 
-        def fail(*args: Any) -> None:
-            raise OSError("disk full")
+        def fail(scope: Scope, item: Any) -> None:
+            raise OSError("queue unavailable")
 
-        monkeypatch.setattr(runtime.buffers, "accept", fail)
+        monkeypatch.setattr(agent.ctx.queue, "add", fail)
         await connection.command("user.message", "u", {"content": "hello", "user_context": {}})
         await connection.wait_for(lambda f: f["type"] == "error" and f["id"] == "u")
         assert not any(f["type"] == "ack" and f["id"] == "u" for f in connection.frames)
-        assert not runtime.ctx.store.read(Scope("u1", "s1"))["inputs"]
+        assert agent.ctx.store.read(SCOPE)["inputs"] == {}
     finally:
         await connection.close()
         await handler
-        await asyncio.to_thread(runtime.close)
+        await asyncio.to_thread(agent.close)
+
+
+async def test_a_command_for_another_session_is_refused(tmp_path: Path) -> None:
+    connection = Connection()
+    agent = build(tmp_path, loop=asyncio.get_running_loop())
+    handler = connection.serve(agent)
+    try:
+        await connection.command("session.open", "open", {"credential": CREDENTIAL})
+        await connection.wait_for(lambda f: f["type"] == "ack")
+        await connection.incoming.put(
+            {"v": 1, "type": "user.message", "id": "u", "session_id": "other", "payload": {}}
+        )
+        await connection.wait_for(lambda f: f["type"] == "error")
+    finally:
+        await connection.close()
+        await handler
+        await asyncio.to_thread(agent.close)
+
+
+def test_the_configuration_has_no_credential_values(tmp_path: Path) -> None:
+    """配置里只有环境变量名。序列化出去的配置里不该出现任何密钥。"""
+    import json
+
+    rendered = json.dumps(agent_config(tmp_path).to_json(), ensure_ascii=False)
+
+    assert "credential" not in rendered
+    assert CREDENTIAL not in rendered

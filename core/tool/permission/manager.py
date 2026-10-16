@@ -8,6 +8,7 @@ from typing import cast
 
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype import Scope
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.error import ToolRequestError
 from core.protocol.interface.permission import PermissionPolicy
 from core.tool.lifecycle import terminal
@@ -41,9 +42,17 @@ class PermissionManager:
             c for c in self.store.read(scope)["calls"].values() if c["status"] == "waiting_approval"
         )
 
-    def decide(self, scope: Scope, invocation_id: str, decision: str, command_id: str) -> bool:
+    def decide(
+        self, scope: Scope, invocation_id: str, decision: str, command_id: str
+    ) -> tuple[bool, tuple[Inbound, ...]]:
+        """落一条审批裁定。返回 `(是否生效, 本次终结出来的终态)`。
+
+        **终态要交给调用方发布。** 拒绝和过期走的是这里，不经过执行器 —— 采集它们要在
+        这个事务里做，投递要在这个事务之外做，两件事分开。
+        """
         if decision not in {"approved", "denied", "expired"}:
             raise ToolRequestError("无效审批结果")
+        produced: list[Inbound] = []
 
         def apply(state: State) -> bool:
             known = state["controls"].get(command_id)
@@ -58,7 +67,9 @@ class PermissionManager:
             if not applied:
                 return False
             if state["meta"].get(f"cancelled:{call['run_id']}"):
-                terminal(state, call, "cancelled", error="运行已取消，未执行")
+                collected = terminal(state, call, "cancelled", error="运行已取消，未执行")
+                if collected is not None:
+                    produced.append(collected)
                 state["controls"][command_id]["applied"] = False
                 return False
             now = time.time()
@@ -73,7 +84,10 @@ class PermissionManager:
             if verdict == "approved":
                 call.update(status="queued", deadline=now + call["admission"]["timeout"])
             else:
-                terminal(state, call, "failed", error=f"审批{verdict}，工具未执行")
+                collected = terminal(state, call, "failed", error=f"审批{verdict}，工具未执行")
+                if collected is not None:
+                    produced.append(collected)
             return True
 
-        return self.store.transact(scope, "permission.decided", apply)
+        result = self.store.transact(scope, "permission.decided", apply)
+        return bool(result), tuple(produced)

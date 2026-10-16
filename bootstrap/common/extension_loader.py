@@ -66,15 +66,19 @@ class Extensions:
     skill_dirs: tuple[Path, ...] = ()
 
 
-def load_extensions(extension_dirs: Sequence[Path]) -> Extensions:
+def load_extensions(
+    extension_dirs: Sequence[Path], *, kinds: frozenset[str] = frozenset({_TOOLS, _CLI, _SKILLS})
+) -> Extensions:
     """按给定顺序扫每个扩展目录。"""
     tools: list[tuple[Path, Tool]] = []
     commands: list[tuple[Path, CliCommand]] = []
     skill_dirs: list[Path] = []
     for root in extension_dirs:
-        tools.extend(_tools(root))
-        commands.extend(_commands(root))
-        if (root / _SKILLS).is_dir():
+        if _TOOLS in kinds:
+            tools.extend(_tools(root))
+        if _CLI in kinds:
+            commands.extend(_commands(root))
+        if _SKILLS in kinds and (root / _SKILLS).is_dir():
             skill_dirs.append(root / _SKILLS)
     return Extensions(
         tools=_unique_tools(tools),
