@@ -30,6 +30,19 @@ curl -X POST -H "Authorization: Bearer $OATH_SERVICE_TOKEN" \
 字，也不自己造凭证。scope 满了（`max_sessions`）直接回 `503 {"error":"session_limit"}`，
 不排队。
 
+要接着用已经存在过的 session（进程崩过、被回收过、或者 biz 重启后重建），把原来的
+`session_id` 一起传进来：
+
+```bash
+curl -X POST -H "Authorization: Bearer $OATH_SERVICE_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"demo","session_id":"6f1c9b2d3e4a5f60"}' \
+  http://127.0.0.1:8766/create_session
+```
+
+同一个 scope 已经在跑就回 `409 {"error":"already_open"}` —— 那说明不用重来，客户端接着连
+已有的那个 `ws_url` 就行。不传 `session_id` 就是新开一个 scope，每次都是新 id。
+
 再连上那个 `ws_url`，先发送：
 
 ```json

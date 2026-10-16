@@ -14,7 +14,12 @@ from typing import Any
 import pytest
 
 from bootstrap.manager import manager as manager_module
-from bootstrap.manager.manager import SessionEntry, SessionManager
+from bootstrap.manager.manager import (
+    SessionAlreadyOpen,
+    SessionEntry,
+    SessionLimitReached,
+    SessionManager,
+)
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
 
@@ -91,6 +96,12 @@ class FakeContext:
         return [p for p in self.processes if p.is_alive()]
 
 
+def _kill(entry: SessionEntry) -> None:
+    """让这个 entry 的 agent 变成「已经不在了」—— `poll()` 返回非 None。"""
+    assert entry.agent is not None
+    entry.agent.returncode = -9
+
+
 @pytest.fixture
 def wired(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """manager 装好替身：一个 entry。"""
@@ -163,3 +174,79 @@ def test_replacing_a_live_supervisor_stops_it_first(wired: dict[str, Any]) -> No
 
     assert first.stopped, "旧的 supervisor 必须先停"
     assert len(context.live) == 1
+
+
+# --------------------------------------------------------------------------
+# 重开一个已经存在过的 scope
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def launching(wired: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """`create_session` 会真去连一次端口。替身没有监听，替掉这一步。"""
+    monkeypatch.setattr(
+        SessionManager, "_launch", lambda self, entry, *, wait=True: self._start_supervisor(entry)
+    )
+    return wired
+
+
+def test_reopening_a_live_scope_is_refused(wired: dict[str, Any]) -> None:
+    """活着的 scope 不替掉 —— 那边可能正在跑一个 step，替掉它等于掐掉别人的活，
+    还往外发一把新凭证，把原来那条连接作废掉。
+    """
+    manager, entry = wired["manager"], wired["entry"]
+    manager._start_agent(entry)
+    first = entry.credential
+
+    with pytest.raises(SessionAlreadyOpen):
+        manager.create_session(SCOPE.user_id, SCOPE.session_id)
+
+    assert manager._sessions[SCOPE] is entry
+    assert entry.credential == first, "拒绝重开不该换掉那把还发出去的凭证"
+
+
+def test_reopening_replaces_a_dead_scope_without_growing_the_table(
+    launching: dict[str, Any],
+) -> None:
+    """agent 崩了以后那条记录还占着 `max_sessions` 的坑。重开就是顶掉它 —— 表里还是那一条。"""
+    manager, entry = launching["manager"], launching["entry"]
+    manager._start_agent(entry)
+    manager._start_supervisor(entry)
+    supervisor = entry.supervisor
+    _kill(entry)
+
+    issued = manager.create_session(SCOPE.user_id, SCOPE.session_id)
+
+    assert issued["session_id"] == SCOPE.session_id, "重开就是同一个 scope，不是另开一个"
+    assert len(manager._sessions) == 1
+    assert manager._sessions[SCOPE] is not entry
+    assert supervisor.stopped, "旧 supervisor 没人管就是孤儿"
+    assert issued["credential"] != entry.credential, "凭证重签，旧的作废"
+
+
+def test_a_dead_scope_reopen_does_not_count_towards_the_limit(launching: dict[str, Any]) -> None:
+    """失效的记录本来占着一个坑，顶掉它不该把新 scope 挤出去。"""
+    manager, entry = launching["manager"], launching["entry"]
+    manager._start_agent(entry)
+    _kill(entry)
+
+    issued = manager.create_session("u2", "fedcba9876543210")
+
+    assert issued["session_id"] == "fedcba9876543210"
+    assert len(manager._sessions) == 2, "崩掉的那个不算还占着上限"
+
+
+def test_a_full_table_still_refuses_a_new_scope(launching: dict[str, Any]) -> None:
+    """上限按表里的条数算。失效的记录还占着坑 —— 除非来重开它自己。"""
+    manager = launching["manager"]
+    limit = manager._config.manager.max_sessions
+    manager._sessions.clear()
+    for index in range(limit):
+        scope = Scope("u1", f"{index:016x}")
+        entry = SessionEntry(scope, 9100 + index, "credential")
+        manager._start_agent(entry)
+        _kill(entry)
+        manager._sessions[scope] = entry
+
+    with pytest.raises(SessionLimitReached):
+        manager.create_session("u1", "ffffffffffffffff")

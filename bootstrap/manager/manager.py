@@ -63,6 +63,14 @@ class SessionLimitReached(Exception):
     """已经到 `max_sessions` 了。"""
 
 
+class SessionAlreadyOpen(Exception):
+    """要重开的那个 scope 还有一个活着的 agent 在跑。"""
+
+    def __init__(self, scope: Scope) -> None:
+        super().__init__(f"session {scope.session_id} 还在运行")
+        self.scope = scope
+
+
 class SessionManager(SessionAuthenticator):
     """跑在 biz 进程里。**它拥有 agent 与 supervisor 这两个进程的生命周期。**
 
@@ -81,23 +89,41 @@ class SessionManager(SessionAuthenticator):
 
     # -- 对外 --------------------------------------------------------------
 
-    def create_session(self, user_id: str) -> JsonObject:
-        """给一个用户开一个新 session：签凭证、分端口、拉起两个进程。
+    def create_session(self, user_id: str, session_id: str | None = None) -> JsonObject:
+        """给一个用户开一个 session：签凭证、分端口、拉起两个进程。
+
+        **给了 `session_id` 就是重开那一个** —— agent 从磁盘上的 journal 把这个 scope 的
+        对话读回来，接着往下走，凭证重新签一把、旧的作废。不给就开一个全新的。
+
+        重开一个还活着的 scope 是拒绝的：那边可能正在跑一个 step，替掉它等于把别人的活
+        掐了，还往外发一把新凭证出去。活着的 scope 用它自己那把凭证继续连就行。
 
         **满了就报失败，不排队。** 排队意味着调用方要处理「等多久」这件事，而它拿到
         返回时那个 scope 未必还空着。
         """
         if not is_valid_scope_id(user_id):
             raise WireProtocolError("user_id 不合法", code="bad_payload")
+        if session_id is not None and not is_valid_scope_id(session_id):
+            raise WireProtocolError("session_id 不合法", code="bad_payload")
+        scope = Scope(user_id, session_id or uuid.uuid4().hex[:16])
+        stale: SessionEntry | None = None
         with self._lock:
-            if len(self._sessions) >= self._config.manager.max_sessions:
+            existing = self._sessions.get(scope)
+            if existing is not None and _agent_alive(existing):
+                raise SessionAlreadyOpen(scope)
+            if existing is not None:
+                # 失效的那个（探不到 agent）。它占着 max_sessions 的坑，重开就是顶掉它。
+                stale = existing
+            elif len(self._sessions) >= self._config.manager.max_sessions:
                 raise SessionLimitReached(
                     f"同时存在的 session 已达上限 {self._config.manager.max_sessions}"
                 )
-            scope = Scope(user_id, uuid.uuid4().hex[:16])
             port = self._allocate_port()
             entry = SessionEntry(scope, port, secrets.token_urlsafe(32))
             self._sessions[scope] = entry
+        # 停旧的那个不放在锁里：它要 join 子进程，锁被占住的话别的 create_session 全堵着。
+        if stale is not None:
+            self._stop_entry(stale)
         try:
             self._launch(entry)
         except Exception:
@@ -314,6 +340,11 @@ class SessionManager(SessionAuthenticator):
             with self._lock:
                 self._sessions.pop(entry.scope, None)
             self._stop_entry(entry)
+
+
+def _agent_alive(entry: SessionEntry) -> bool:
+    """这个 scope 的 agent 进程还在不在。"""
+    return entry.agent is not None and entry.agent.poll() is None
 
 
 def _supervise(config_path: str, user_id: str, session_id: str) -> None:

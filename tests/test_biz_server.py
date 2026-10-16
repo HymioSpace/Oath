@@ -21,6 +21,7 @@ from starlette.testclient import TestClient
 from biz.application import BizApplication
 from bootstrap.biz.assembly import build_application
 from bootstrap.biz.server import build_app
+from bootstrap.manager.manager import SessionEntry, SessionManager
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span, SpanStatus, new_trace_id
@@ -271,3 +272,103 @@ def test_a_blocking_query_does_not_stall_the_event_loop(
 
     # 一次查询 100ms。事件循环空转的话这段时间够上百次心跳。
     assert asyncio.run(main()) > 10
+
+
+# --------------------------------------------------------------------------
+# create_session：重开一个已经存在过的 scope
+# --------------------------------------------------------------------------
+
+
+class FakeAgentProcess:
+    """`_agent_alive` 只看 `poll()`。返回码非 None 就是不在了。
+
+    `poll` 读的是类上的开关而不是构造时的值 —— 已经登记在表里的那个也要能跟着一起死。
+    """
+
+    alive = True
+
+    def poll(self) -> int | None:
+        return None if type(self).alive else -9
+
+    def terminate(self) -> None:
+        type(self).alive = False
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        return self.poll()
+
+
+class LaunchingManager(SessionManager):
+    """登记 session 并挂一个进程替身，不真的监听端口。"""
+
+    def _launch(self, entry: SessionEntry, *, wait: bool = True) -> None:
+        entry.agent = FakeAgentProcess()  # type: ignore[assignment]
+
+
+@pytest.fixture(autouse=True)
+def _every_agent_is_alive() -> Iterator[None]:
+    """`terminate` 会把开关按下去，每个用例都得从「都活着」开始。"""
+    FakeAgentProcess.alive = True
+    yield
+    FakeAgentProcess.alive = True
+
+
+@pytest.fixture
+def launching_client(config: OathConfig) -> Iterator[TestClient]:
+    instance = LaunchingManager(config, "")
+    yield TestClient(build_app(build_application(config, instance), instance, config))
+    instance.close()
+
+
+def _service() -> dict[str, str]:
+    return {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_omitting_the_session_id_opens_a_new_scope_every_time(launching_client: TestClient) -> None:
+    """不给 `session_id` 就是新开 —— 每次一个不同的 scope。"""
+    first = launching_client.post("/create_session", json={"user_id": "u1"}, headers=_service())
+    second = launching_client.post("/create_session", json={"user_id": "u1"}, headers=_service())
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["session_id"] != second.json()["session_id"]
+
+
+def test_passing_the_session_id_reopens_that_scope(launching_client: TestClient) -> None:
+    """带着 `session_id` 回来拿的是同一个 scope 和一把新凭证。"""
+    first = launching_client.post("/create_session", json={"user_id": "u1"}, headers=_service())
+    session_id = first.json()["session_id"]
+    FakeAgentProcess.alive = False  # agent 崩了，那条记录已经不算「开着」
+    try:
+        again = launching_client.post(
+            "/create_session", json={"user_id": "u1", "session_id": session_id}, headers=_service()
+        )
+    finally:
+        FakeAgentProcess.alive = True
+
+    assert again.status_code == 200
+    assert again.json()["session_id"] == session_id, "重开是同一个 scope，不是另开一个"
+    assert again.json()["credential"] != first.json()["credential"], "凭证重签，旧的作废"
+
+
+def test_reopening_a_live_scope_is_a_conflict(launching_client: TestClient) -> None:
+    """那边还活着就别换那把凭证 —— 409 告诉客户端接着用原来那条连接。"""
+    first = launching_client.post("/create_session", json={"user_id": "u1"}, headers=_service())
+
+    again = launching_client.post(
+        "/create_session",
+        json={"user_id": "u1", "session_id": first.json()["session_id"]},
+        headers=_service(),
+    )
+
+    assert again.status_code == 409
+    assert again.json()["error"] == "already_open"
+
+
+def test_a_malformed_session_id_is_a_bad_payload(launching_client: TestClient) -> None:
+    response = launching_client.post(
+        "/create_session",
+        json={"user_id": "u1", "session_id": {"nested": True}},
+        headers=_service(),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "bad_payload"

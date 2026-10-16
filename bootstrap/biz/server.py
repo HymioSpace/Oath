@@ -36,7 +36,7 @@ from biz.service import BizService
 from biz.session_scope import BEARER, error_response, scope_of
 from biz.session_scope import BadQuery as _BadQuery
 from biz.session_scope import Unauthorized as _Unauthorized
-from bootstrap.manager import SessionLimitReached, SessionManager
+from bootstrap.manager import SessionAlreadyOpen, SessionLimitReached, SessionManager
 from core.protocol.datatype.config import OathConfig
 from core.protocol.error import WireProtocolError
 from core.protocol.interface.agent_access import AgentUnavailable
@@ -140,8 +140,16 @@ def build_app(service: BizService, manager: SessionManager, config: OathConfig) 
         user_id = body.get("user_id") if isinstance(body, dict) else None
         if not isinstance(user_id, str):
             return JSONResponse({"error": "bad_payload", "message": "缺 user_id"}, 400)
+        # `session_id` 是可选的：给了就是重开那一个，agent 从 journal 把对话读回来。
+        # 不给就开一个全新的。
+        raw_session = body.get("session_id") if isinstance(body, dict) else None
+        if raw_session is not None and not isinstance(raw_session, str):
+            return JSONResponse({"error": "bad_payload", "message": "session_id 不合法"}, 400)
         try:
-            return JSONResponse(manager.create_session(user_id))
+            return JSONResponse(manager.create_session(user_id, raw_session))
+        except SessionAlreadyOpen as exc:
+            # 那边还活着。用它自己那把凭证继续连，不要在这里换一把把别人的会话顶掉。
+            return JSONResponse({"error": "already_open", "message": str(exc)}, 409)
         except SessionLimitReached as exc:
             # 满了就是满了。排队意味着调用方要处理「等多久」，而它拿到返回时那个位置
             # 未必还空着。
