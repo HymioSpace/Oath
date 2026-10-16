@@ -9,8 +9,8 @@ from core.protocol.datatype.scope import Scope
 
 class Brain(ABC):
     @abstractmethod
-    def wake(self, scope: Scope, trigger: str, event_ids: tuple[str, ...]) -> None:
-        """非阻塞请求。已被其他 step 认领的触发输入不再产生新 step。"""
+    def wake(self, scope: Scope) -> None:
+        """非阻塞请求。buffer 空就什么都不做。"""
         ...
 
     @abstractmethod

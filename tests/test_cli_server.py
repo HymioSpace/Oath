@@ -6,27 +6,26 @@
 
 from __future__ import annotations
 
-import asyncio
-import time
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 from starlette.testclient import TestClient
 
-from bootstrap.biz_server import build_app
-from bootstrap.runtime import Runtime
-from core.context.user_context import TTL_SECONDS
+from biz.application import BizApplication
+from bootstrap.biz.assembly import build_application
+from bootstrap.biz.server import build_app
+from bootstrap.clients.agent_client import AgentClient
 from core.protocol.datatype import CliCommand
-from core.protocol.datatype.config import AgentConfig, OathConfig
+from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.scope import Scope
+from core.protocol.interface.agent_access import AgentUnavailable
 from core.utils.encoding import JsonObject
-from tests._support.intake_fixtures import ScriptedProvider
+from tests.test_service_boundaries import OfflineManager
 
-TOKEN = "synthetic-test-token"
-SCOPE = Scope("u1", "s1")
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
+TOKEN = "synthetic-service-token"
 
 #: 只扫仓库里那一份。缺省配置的第二个目录指向开发者本机的 `extensions-local/`，
 #: 测试不能读它。
@@ -41,28 +40,56 @@ SIZED: JsonObject = {
 }
 
 
+@pytest.fixture(autouse=True)
+def no_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """装一份空的 user_context —— agent 那一跳不归这个文件管。"""
+    monkeypatch.setattr(AgentClient, "user_context", lambda self, scope: {})
+
+
 @pytest.fixture
-def runtime(tmp_path: Path) -> Iterator[Runtime]:
-    instance = Runtime(
-        OathConfig(
-            data_root=tmp_path,
-            credentials={TOKEN: (SCOPE.user_id, SCOPE.session_id)},
-            agent=AgentConfig(extension_dirs=(COMMITTED,)),
-        ),
-        loop=asyncio.new_event_loop(),
-        provider=ScriptedProvider(),
+def config(tmp_path: Path) -> OathConfig:
+    return replace(
+        OathConfig(data_root=tmp_path, service_credentials=(TOKEN,)),
+        agent=replace(OathConfig().agent, extension_dirs=(COMMITTED,)),
     )
+
+
+@pytest.fixture
+def manager(config: OathConfig) -> Iterator[OfflineManager]:
+    """登记 session 但不拉进程 —— 这里验的是传输层。"""
+    instance = OfflineManager(config, "")
     yield instance
     instance.close()
 
 
 @pytest.fixture
-def client(runtime: Runtime) -> TestClient:
-    return TestClient(build_app(runtime))
+def session(manager: OfflineManager) -> tuple[Scope, str]:
+    issued = manager.create_session("u1")
+    return Scope("u1", str(issued["session_id"])), str(issued["credential"])
+
+
+@pytest.fixture
+def scope(session: tuple[Scope, str]) -> Scope:
+    return session[0]
+
+
+@pytest.fixture
+def auth(session: tuple[Scope, str]) -> dict[str, str]:
+    return {"Authorization": f"Bearer {session[1]}"}
+
+
+@pytest.fixture
+def app(config: OathConfig, manager: OfflineManager) -> BizApplication:
+    return build_application(config, manager)
+
+
+@pytest.fixture
+def client(app: BizApplication, manager: OfflineManager, config: OathConfig) -> TestClient:
+    return TestClient(build_app(app, manager, config))
 
 
 def command(
-    runtime: Runtime, monkeypatch: pytest.MonkeyPatch, name: str, parameters: JsonObject
+    app: BizApplication, monkeypatch: pytest.MonkeyPatch, name: str, parameters: JsonObject
 ) -> list[JsonObject]:
     """换掉命令表，装一条把收到的参数记下来的替身命令。
 
@@ -75,7 +102,7 @@ def command(
         return {"ok": True}
 
     monkeypatch.setattr(
-        runtime,
+        app,
         "commands",
         (
             CliCommand(
@@ -86,12 +113,14 @@ def command(
     return seen
 
 
-def test_the_command_table_carries_the_names_and_the_parameters(client: TestClient) -> None:
+def test_the_command_table_carries_the_names_and_the_parameters(
+    client: TestClient, auth: dict[str, str]
+) -> None:
     """`oath-cli` 不带参数时靠它列用法 —— 位置参数的顺序就在参数声明里。
 
     这条命令是从扩展目录扫出来的：它能出现在这里，就说明目录发现接上了。
     """
-    response = client.get("/cli_commands")
+    response = client.get("/cli_commands", headers=auth)
 
     [entry] = response.json()["commands"]
     assert entry["name"] == "echo"
@@ -99,44 +128,52 @@ def test_the_command_table_carries_the_names_and_the_parameters(client: TestClie
     assert entry["parameters"]["required"] == ["text"]
 
 
-def run(client: TestClient, name: str, **body: Any) -> Any:
-    return client.post(f"/cli/{name}", json=body, headers=AUTH)
+def run(client: TestClient, auth: dict[str, str], name: str, **body: Any) -> Any:
+    return client.post(f"/cli/{name}", json=body, headers=auth)
 
 
-def test_a_command_runs_with_the_arguments_it_was_given(client: TestClient) -> None:
-    response = run(client, "echo", text="工作区")
+def test_a_command_runs_with_the_arguments_it_was_given(
+    client: TestClient, auth: dict[str, str]
+) -> None:
+    response = run(client, auth, "echo", text="工作区")
 
     assert response.status_code == 200
     assert response.json() == {"text": "工作区"}
 
 
 def test_a_number_in_the_body_arrives_as_a_number(
-    client: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    app: BizApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    auth: dict[str, str],
 ) -> None:
     """body 是 JSON，类型本来就带着 —— 不必在服务端猜。"""
-    sized = command(runtime, monkeypatch, "sized", SIZED)
+    sized = command(app, monkeypatch, "sized", SIZED)
 
-    response = run(client, "sized", text="工作区", limit=1)
+    response = run(client, auth, "sized", text="工作区", limit=1)
 
     assert response.status_code == 200
     assert sized[0]["limit"] == 1
 
 
 def test_an_argument_from_the_command_line_arrives_as_the_type_it_declares(
-    client: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    app: BizApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    auth: dict[str, str],
 ) -> None:
     """`oath-cli --limit=2` 过来的是字符串 `"2"` —— 声明成整数就得按整数收。"""
-    sized = command(runtime, monkeypatch, "sized", SIZED)
+    sized = command(app, monkeypatch, "sized", SIZED)
 
-    response = client.post("/cli/sized", json={"text": "工作区", "limit": "1"}, headers=AUTH)
+    response = client.post("/cli/sized", json={"text": "工作区", "limit": "1"}, headers=auth)
 
     assert response.status_code == 200
     assert sized[0]["limit"] == 1
 
 
-def test_a_command_is_executed_with_post_not_get(client: TestClient) -> None:
+def test_a_command_is_executed_with_post_not_get(client: TestClient, auth: dict[str, str]) -> None:
     """命令是动作。GET 的缓存与重试语义不对，将来代理写操作会出事。"""
-    assert client.get("/cli/echo", params={"text": "工作区"}, headers=AUTH).status_code == 405
+    assert client.get("/cli/echo", params={"text": "工作区"}, headers=auth).status_code == 405
 
 
 @pytest.mark.parametrize(
@@ -147,29 +184,32 @@ def test_a_command_is_executed_with_post_not_get(client: TestClient) -> None:
     ],
 )
 def test_arguments_the_command_cannot_accept_are_refused(
-    client: TestClient, body: dict[str, Any], reason: str
+    client: TestClient, body: dict[str, Any], reason: str, auth: dict[str, str]
 ) -> None:
     """静默忽略的话，命令拼错参数名会跑出一个「成功但答非所问」的结果。"""
-    response = run(client, "echo", **body)
+    response = run(client, auth, "echo", **body)
 
     assert response.status_code == 400, reason
     assert response.json()["error"] == "bad_query"
 
 
 def test_an_argument_whose_text_is_not_the_declared_type_is_refused(
-    client: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    app: BizApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    auth: dict[str, str],
 ) -> None:
-    command(runtime, monkeypatch, "sized", SIZED)
+    command(app, monkeypatch, "sized", SIZED)
 
-    response = run(client, "sized", text="x", limit="三条")
+    response = run(client, auth, "sized", text="x", limit="三条")
 
     assert response.status_code == 400
     assert response.json()["error"] == "bad_query"
 
 
-def test_a_body_that_is_not_json_is_refused(client: TestClient) -> None:
+def test_a_body_that_is_not_json_is_refused(client: TestClient, auth: dict[str, str]) -> None:
     response = client.post(
-        "/cli/echo", content=b"text=x", headers={**AUTH, "Content-Type": "text/plain"}
+        "/cli/echo", content=b"text=x", headers={**auth, "Content-Type": "text/plain"}
     )
 
     assert response.status_code == 400
@@ -179,27 +219,32 @@ def test_a_request_without_a_credential_is_refused(client: TestClient) -> None:
     assert client.post("/cli/echo", json={"text": "x"}).status_code == 401
 
 
-def test_a_command_that_does_not_exist_is_not_found(client: TestClient) -> None:
+def test_a_command_that_does_not_exist_is_not_found(
+    client: TestClient, auth: dict[str, str]
+) -> None:
     """认不出的命令名是「没这个能力」，不是「没这个身份」。"""
-    response = run(client, "nope", text="x")
+    response = run(client, auth, "nope", text="x")
 
     assert response.status_code == 404
     assert response.json()["error"] == "unknown_command"
 
 
 def test_a_command_that_fails_is_reported_as_a_server_error(
-    client: TestClient, runtime: Runtime, monkeypatch: pytest.MonkeyPatch
+    client: TestClient,
+    app: BizApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    auth: dict[str, str],
 ) -> None:
     def boom(**_: Any) -> Any:
         raise RuntimeError("业务炸了")
 
     monkeypatch.setattr(
-        runtime,
+        app,
         "commands",
         (CliCommand("boom", "always fails", {"type": "object"}, boom),),
     )
 
-    response = run(client, "boom")
+    response = run(client, auth, "boom")
 
     assert response.status_code == 500
     assert response.json()["error"] == "command_failed"
@@ -209,10 +254,10 @@ def test_a_command_that_fails_is_reported_as_a_server_error(
 
 
 @pytest.fixture
-def probe(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> list[JsonObject]:
+def probe(app: BizApplication, monkeypatch: pytest.MonkeyPatch) -> list[JsonObject]:
     """一条把收到的参数原样交出来的替身命令。"""
     return command(
-        runtime,
+        app,
         monkeypatch,
         "probe",
         {
@@ -225,46 +270,41 @@ def probe(runtime: Runtime, monkeypatch: pytest.MonkeyPatch) -> list[JsonObject]
 
 
 def test_the_command_receives_the_scope_it_was_called_for(
-    client: TestClient, probe: list[JsonObject]
+    client: TestClient, probe: list[JsonObject], auth: dict[str, str], scope: Scope
 ) -> None:
     """HTTP 上没有 session —— 身份只能从 credential 反查出来的那一个。"""
-    run(client, "probe", text="x")
+    run(client, auth, "probe", text="x")
 
-    assert cast(object, probe[0]["scope"]) == SCOPE
+    assert cast(object, probe[0]["scope"]) == scope
 
 
-def test_the_command_receives_that_scope_s_user_context(
-    client: TestClient, runtime: Runtime, probe: list[JsonObject]
+def test_the_command_receives_the_context_the_agent_reports(
+    client: TestClient,
+    probe: list[JsonObject],
+    auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """透传：框架不解释这份 kv，也不拿它判权限。"""
-    runtime.ctx.store.transact(
-        SCOPE, "test.seed", lambda s: s["meta"].update(user_context=_table(time.time()))
+    """透传：biz 不解释这份 kv，也不拿它判权限。"""
+    monkeypatch.setattr(
+        AgentClient, "user_context", lambda self, scope: {"project": "oath", "env": "dev"}
     )
 
-    run(client, "probe", text="x")
+    run(client, auth, "probe", text="x")
 
     assert probe[0]["user_context"] == {"project": "oath", "env": "dev"}
 
 
-def test_an_expired_key_never_reaches_the_command(
-    client: TestClient, runtime: Runtime, probe: list[JsonObject]
+def test_an_unreachable_agent_is_reported_not_swallowed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, auth: dict[str, str]
 ) -> None:
-    """过期的在读的时候裁掉 —— 命令拿到的是当下还成立的 kv，不是历史。"""
-    stale = time.time() - TTL_SECONDS - 1
-    runtime.ctx.store.transact(
-        SCOPE,
-        "test.seed",
-        lambda s: s["meta"].update(user_context={"gone": {"value": "旧", "at": stale}}),
-    )
+    """拿不到 user_context 却把命令跑起来，命令就是在缺依据的情况下动手。"""
 
-    run(client, "probe", text="x")
+    def gone(self: AgentClient, scope: Scope) -> JsonObject:
+        raise AgentUnavailable("agent down")
 
-    assert probe[0]["user_context"] == {}
+    monkeypatch.setattr(AgentClient, "user_context", gone)
 
+    response = run(client, auth, "echo", text="工作区")
 
-def _table(now: float) -> JsonObject:
-    """两个还成立的 key。"""
-    return {
-        "project": {"value": "oath", "at": now - 60},
-        "env": {"value": "dev", "at": now - 120},
-    }
+    assert response.status_code == 503
+    assert response.json()["error"] == "agent_unavailable"

@@ -11,9 +11,9 @@ from typing import Final
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from biz.service import BizService
 from core.protocol.datatype.scope import Scope
 from core.protocol.error import PermissionDeniedError
-from core.protocol.interface.session import SessionAuthenticator
 
 #: credential 从这个头里取。查表换身份，与 WebSocket 的 `session.open` 同一份映射。
 BEARER: Final = "Bearer "
@@ -27,7 +27,7 @@ class BadQuery(Exception):
     """参数不合法。由 `error_response` 回 400。"""
 
 
-def scope_of(authenticator: SessionAuthenticator, request: Request) -> Scope:
+def scope_of(service: BizService, request: Request) -> Scope:
     """认出 scope。
 
     认不出就抛 `Unauthorized` 而不是回一个空 scope：认不出身份就只能当没登录，
@@ -36,7 +36,7 @@ def scope_of(authenticator: SessionAuthenticator, request: Request) -> Scope:
     header = request.headers.get("authorization", "")
     token = header[len(BEARER) :].strip() if header.startswith(BEARER) else ""
     try:
-        identity = authenticator.authenticate(token)
+        identity = service.authenticator.authenticate(token)
     except PermissionDeniedError:
         # 错误正文不带 credential 本身：它多半是错的或过期的，抄进日志等于再泄一次。
         raise Unauthorized() from None

@@ -1,22 +1,22 @@
-"""三条内部队列：输入从哪来。
+"""三条输入队列：输入从哪来。
 
 **队列只装输入。** 三条队列（`user` / `tool` / `system`）回答的是「现在该做什么」，不是
 「做了什么」。producer 侧压根没有产物 —— `assistant.message` 与 `tool.call` 是 `Brain`
 写出来的，它们不排队。
 
-映射是闭合的：`Inbound` 的三种 kind 每一种都有固定的队列，所以这张表没有「返回 None」
-那一支。
+队列名就是 `Inbound.kind`，两个名字指同一个东西。`user` / `tool` / `system` 三条，闭合成
+一张等式，没有「这件事不知道该进哪条队列」这种状态。
 """
 
 from __future__ import annotations
 
 from typing import Final
 
-from core.protocol.datatype.inbound import InboundKind
+from core.protocol.error import UnknownQueueError
 
 
 class QueueName:
-    """三条内部队列，各自由 UserConsumer / ToolConsumer / SystemConsumer 消费。"""
+    """三条输入队列，各自由 UserConsumer / ToolConsumer / SystemConsumer 消费。"""
 
     USER: Final = "user"
     TOOL: Final = "tool"
@@ -25,20 +25,15 @@ class QueueName:
     ALL: Final = frozenset({USER, TOOL, SYSTEM})
 
 
-#: kind 各进哪条队列。
-QUEUE_OF_KIND: Final[dict[str, str]] = {
-    InboundKind.USER: QueueName.USER,
-    InboundKind.TOOL_RESULT: QueueName.TOOL,
-    InboundKind.INVOKE: QueueName.SYSTEM,
-}
+def check_queue(name: str) -> str:
+    """校验队列名，返回原值。
+
+    名字不认识是调用方的 bug，当场暴露。与「读到一条不认识 type 的记录」不同：那种只是
+    没命中，静默跳过就够。
+    """
+    if name not in QueueName.ALL:
+        raise UnknownQueueError(f"未知的队列名: {name!r}")
+    return name
 
 
-def queue_of(kind: str) -> str:
-    """这件事该进哪条队列。"""
-    try:
-        return QUEUE_OF_KIND[kind]
-    except KeyError:
-        raise ValueError(f"未知的 InboundKind: {kind!r}") from None
-
-
-__all__ = ["QUEUE_OF_KIND", "QueueName", "queue_of"]
+__all__ = ["QueueName", "check_queue"]

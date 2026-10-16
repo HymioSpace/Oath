@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from core.agent import AgentBrain
-from core.buffer.journal_buffer import JournalEventBuffer
+from core.buffer import DiskEventBuffer
 from core.compaction import CompactionCoordinator
 from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
 from core.context import ContextManager
@@ -20,11 +20,13 @@ from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype import Scope, ToolCallRequest
 from core.protocol.datatype.config import AgentConfig
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
+from core.protocol.datatype.queue import QueueName
 from core.protocol.interface.compaction import Compactor
 from core.protocol.interface.llm import DeltaSink, ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
+from core.protocol.interface.queue import EventQueue
 from core.protocol.interface.tool import Tool
 from core.protocol.interface.trace import TraceStore
 from core.queue import InMemoryEventQueue
@@ -53,6 +55,15 @@ def until(predicate: Callable[[], _T], timeout: float = 3) -> _T:
             return result
         time.sleep(0.005)
     raise AssertionError("等待状态变化超时")
+
+
+def arrived(harness: Harness, queue: str) -> bool:
+    """队列里已经没有东西了 —— 那条输入已经被 consumer 取走，放进 buffer 了。
+
+    **不碰 buffer。** `get_all` 是取走，验「东西到了没有」不能拿它当观察手段；
+    队列空不空才是这里要的信号。
+    """
+    return not harness.queue.listen(harness.scope, queue, 0.05)
 
 
 class ScriptedProvider(ModelProvider):
@@ -104,17 +115,23 @@ class Harness:
         admission_timeout: float = 0.2,
         approval_ttl: float = 10,
         max_concurrency: int = 8,
+        queue: EventQueue | None = None,
     ) -> None:
         self.scope = SCOPE
         self.journal = FileJournal(root)
         self.store = RuntimeStore(self.journal)
-        self.queue = InMemoryEventQueue()
+        # 队列默认是这个 harness 私有的。验「重启后队列里还在」时要把它传进第二个
+        # harness —— 内存替身不会像 Redis 那样自己活过进程。
+        self.queue = queue or InMemoryEventQueue()
         self.sink = RecordingSink()
         self.config = config or AgentConfig(tool_round_timeout_seconds=0.5, llm_retry_delay=0.01)
         self.details = FileDetailStore(root / "details")
         self.skills = SkillSystem([root / "skills"], scan_dirs=[root / "external-skills"])
         # 内存替身：要问的是「写了什么」，不是「落到磁盘没有」。文件后端另有测试。
         self.traces = traces or RecordingTraceStore()
+        # buffer 是落盘的：它就是「已 ACK 但 Brain 还没认领」这件事的存放处，用替身
+        # 就测不到重启后还在不在。
+        self.buffer = DiskEventBuffer(root / "buffer")
         self.registry = ToolRegistry(default_timeout_seconds=self.config.tool_timeout_seconds)
         self.registry.register(DetailReadTool(self.details))
         self.registry.register(SkillTool(self.skills))
@@ -135,15 +152,13 @@ class Harness:
                 whole=frozenset({DETAIL_READ, SKILL}),
             ),
         )
-        self.buffers = JournalEventBuffer(
-            self.store, tool_buffer_timeout=self.config.tool_round_timeout_seconds
-        )
         self.provider = ScriptedProvider(responses)
         self.compactor = compactor or NeverCompactor()
         self.ctx = AgentContext(
             self.journal,
             self.store,
             self.queue,
+            self.buffer,
             self.sink,
             self.tools,
             ContextManager(self.journal, self.config),
@@ -156,9 +171,9 @@ class Harness:
         )
         self.brain = AgentBrain(self.ctx, self.provider, self.compaction)
         self.consumers = (
-            UserConsumer(self.ctx, self.brain, self.buffers),
-            ToolConsumer(self.ctx, self.brain, self.buffers),
-            SystemConsumer(self.ctx, self.brain, self.buffers),
+            UserConsumer(self.ctx, self.brain),
+            ToolConsumer(self.ctx, self.brain),
+            SystemConsumer(self.ctx, self.brain),
         )
         self.stop = threading.Event()
         self.threads: list[threading.Thread] = []
@@ -175,14 +190,14 @@ class Harness:
         return self
 
     def send(self, text: str = "你好", id: str = "u1") -> Inbound:
-        return self.submit(Inbound(InboundKind.USER, "user.message", {"content": text}, id))
+        return self.submit(Inbound(QueueName.USER, "user.message", {"content": text}, id))
 
     def decide(
         self, invocation_id: str, status: str = "approved", id: str | None = None
     ) -> Inbound:
         return self.submit(
             Inbound(
-                InboundKind.INVOKE,
+                QueueName.SYSTEM,
                 "permission.decide",
                 {"invocation_id": invocation_id, "status": status},
                 id or f"decide:{invocation_id}",
@@ -190,8 +205,8 @@ class Harness:
         )
 
     def submit(self, item: Inbound) -> Inbound:
-        self.buffers.accept(self.scope, item)
-        self.queue.put(self.scope, item)
+        """照 producer 的样子投：只进队列。落盘是 Brain 认领时的事。"""
+        self.queue.add(self.scope, item)
         return item
 
     def state(self) -> State:
@@ -216,6 +231,7 @@ class Harness:
         self.queue.close()
         for thread in self.threads:
             thread.join(2)
+        self.buffer.close()
         self.brain.close()
         self.compaction.shutdown()
         self.tools.shutdown()

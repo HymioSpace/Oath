@@ -16,6 +16,7 @@ from core.journal.runtime_store import State
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.llm import LlmRequest
 from core.protocol.datatype.scope import Scope
+from core.queue import InMemoryEventQueue
 from core.utils.encoding import canonical_json
 from core.utils.tokens import estimate, estimate_text
 from tests._support.intake_fixtures import Harness, until
@@ -103,7 +104,7 @@ def test_stale_wake_and_model_retry_do_not_prepare_context_again(tmp_path: Path)
         patch.object(h.compaction, "prepare", wraps=h.compaction.prepare) as prepare,
     ):
         h.start()
-        h.brain.wake(h.scope, "user", ("user:missing",))
+        h.brain.wake(h.scope)
         h.send()
         h.provider.wait(2)
         until(lambda: h.state()["meta"].get("active_step") is None)
@@ -112,16 +113,18 @@ def test_stale_wake_and_model_retry_do_not_prepare_context_again(tmp_path: Path)
 
 
 def test_restart_between_input_claim_and_request_freeze_keeps_input(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+    queue = InMemoryEventQueue()
+    h = Harness(tmp_path, queue=queue)
     h.send("original")
-    h.consumers[0].consume(h.scope)
-    step = h.brain._claim(h.scope, {"user": tuple(h.state()["inputs"])})
+    h.consumers[0].deliver(h.scope)
+    step = h.brain.intake.claim(h.scope)
     assert step is not None
     assert step["request"] is None
     draft = copy.deepcopy(step["request_draft"])
     h.send("later", "later")
     h.close()
-    with Harness(tmp_path) as restored:
+    # 队列在进程外：重启之后那条没被认领的输入还在队列里等着。
+    with Harness(tmp_path, queue=queue) as restored:
         restored.start()
         request = restored.provider.wait(1)
         assert [m.to_dict() for m in request.messages] == draft["messages"]

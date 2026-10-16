@@ -13,16 +13,16 @@ from typing import cast
 
 import pytest
 
-from bootstrap.runtime import Runtime
+from bootstrap.agent.agent import Agent
 from core.context.user_context import TTL_SECONDS, Table, current, merge
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
-from core.protocol.datatype.config import AgentConfig, OathConfig
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command, CommandType
 from core.protocol.error import WireProtocolError
 from core.utils.encoding import JsonObject, JsonValue
-from tests._support.intake_fixtures import ScriptedProvider, until
+from tests._support.agent_fixtures import build
+from tests._support.intake_fixtures import until
 
 SCOPE = Scope("u1", "s1")
 NOW = 1_760_000_000.0
@@ -34,10 +34,15 @@ def table(state: State) -> Table:
     return cast(Table, stored)
 
 
-def consumed(runtime: Runtime) -> bool:
-    """这条输入已经被 user consumer 处理过 —— 合并就在那一步里，早于进 buffer。"""
-    entries = list(runtime.ctx.store.read(SCOPE)["inputs"].values())
-    return bool(entries) and all(e["phase"] != "accepted" for e in entries)
+def merged(agent: Agent) -> Table:
+    """读到当前 scope 的 user_context 表。没写过的 scope 返回空表。"""
+    stored = agent.ctx.store.read(SCOPE)["meta"].get("user_context")
+    return cast(Table, stored) if isinstance(stored, dict) else {}
+
+
+def claimed(agent: Agent) -> bool:
+    """这条输入已经被 Brain 认领 —— 合并在那之前就完成了。"""
+    return bool(agent.ctx.store.read(SCOPE)["inputs"])
 
 
 def test_a_new_message_keeps_the_keys_it_did_not_mention() -> None:
@@ -86,21 +91,14 @@ def test_a_row_without_a_time_is_not_trusted() -> None:
 
 
 @pytest.fixture
-def runtime(tmp_path: Path) -> Generator[Runtime, None, None]:
-    runtime = Runtime(
-        OathConfig(
-            data_root=tmp_path,
-            credentials={"synthetic-test-token": (SCOPE.user_id, SCOPE.session_id)},
-            agent=AgentConfig(extension_dirs=()),
-        ),
-        loop=asyncio.new_event_loop(),
-        provider=ScriptedProvider(),
-    )
-    yield runtime
-    runtime.close()
+def runtime(tmp_path: Path) -> Generator[Agent, None, None]:
+    instance = build(tmp_path, loop=asyncio.new_event_loop(), scope=SCOPE)
+    instance.start()
+    yield instance
+    instance.close()
 
 
-def send(runtime: Runtime, context: JsonObject, id_: str) -> None:
+def send(runtime: Agent, context: JsonObject, id_: str) -> None:
     runtime.submit(
         Command(
             id_,
@@ -112,33 +110,31 @@ def send(runtime: Runtime, context: JsonObject, id_: str) -> None:
     )
 
 
-def test_the_context_of_a_message_lands_in_that_scope(runtime: Runtime) -> None:
+def test_the_context_of_a_message_lands_in_that_scope(runtime: Agent) -> None:
     send(runtime, {"project": "hymio"}, "u1")
 
-    until(lambda: consumed(runtime))
-    assert current(table(runtime.ctx.store.read(SCOPE)), now=time.time()) == {"project": "hymio"}
+    until(lambda: claimed(runtime))
+    assert current(merged(runtime), now=time.time()) == {"project": "hymio"}
     # 另一个 session 连表都没有 —— kv 不跨 scope。
     assert runtime.ctx.store.read(Scope("u1", "s2"))["meta"].get("user_context") is None
 
 
-def test_a_later_message_only_overwrites_what_it_carries(runtime: Runtime) -> None:
+def test_a_later_message_only_overwrites_what_it_carries(runtime: Agent) -> None:
     send(runtime, {"project": "hymio", "env": "dev"}, "u1")
-    until(lambda: consumed(runtime))
+    until(lambda: claimed(runtime))
     send(runtime, {"project": "oath"}, "u2")
-    until(
-        lambda: current(table(runtime.ctx.store.read(SCOPE)), now=time.time())["project"] == "oath"
-    )
+    until(lambda: current(merged(runtime), now=time.time())["project"] == "oath")
 
-    assert current(table(runtime.ctx.store.read(SCOPE)), now=time.time()) == {
+    assert current(merged(runtime), now=time.time()) == {
         "project": "oath",
         "env": "dev",
     }
 
 
-def test_the_context_survives_a_restart(runtime: Runtime, tmp_path: Path) -> None:
+def test_the_context_survives_a_restart(runtime: Agent, tmp_path: Path) -> None:
     """它活在 journal 里，不在内存里 —— 重启后 CLI 拿到的还是同一份。"""
     send(runtime, {"project": "hymio"}, "u1")
-    until(lambda: consumed(runtime))
+    until(lambda: claimed(runtime))
     runtime.close()
 
     with FileJournal(tmp_path / "journal") as journal:
@@ -147,7 +143,7 @@ def test_the_context_survives_a_restart(runtime: Runtime, tmp_path: Path) -> Non
     assert current(table(recovered), now=time.time()) == {"project": "hymio"}
 
 
-def test_a_message_without_a_usable_context_is_refused_whole(runtime: Runtime) -> None:
+def test_a_message_without_a_usable_context_is_refused_whole(runtime: Agent) -> None:
     """形状不对时整帧拒掉，不做部分接纳 —— 半份上下文比没有更难解释。"""
     for bad in cast("tuple[JsonValue, ...]", (None, "hymio", {"": "x"})):
         with pytest.raises(WireProtocolError):
@@ -163,11 +159,11 @@ def test_a_message_without_a_usable_context_is_refused_whole(runtime: Runtime) -
     assert runtime.ctx.store.read(SCOPE)["inputs"] == {}
 
 
-def test_a_message_carrying_no_context_writes_nothing(runtime: Runtime) -> None:
+def test_a_message_carrying_no_context_writes_nothing(runtime: Agent) -> None:
     """空的不动表：没有新事实就别制造一次状态写入。"""
     runtime.ctx.store.transact(SCOPE, "test.seed", lambda s: s["meta"].update(user_context={}))
 
     send(runtime, {}, "u1")
-    until(lambda: consumed(runtime))
+    until(lambda: claimed(runtime))
 
     assert runtime.ctx.store.read(SCOPE)["meta"].get("user_context") == {}

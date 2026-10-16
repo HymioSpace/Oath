@@ -11,31 +11,35 @@ import pytest
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore, State
 from core.protocol.datatype import Cursor, CursorKind, EventType
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
+from core.protocol.datatype.queue import QueueName
+from core.queue import InMemoryEventQueue
 from tests._support.intake_fixtures import SCOPE, Harness, requests, until
 from tests._support.tool_fixtures import EchoTool, VerdictPolicy
 
 
-def test_accepted_but_not_queued_input_recovers_without_client(tmp_path: Path) -> None:
+def test_an_input_in_the_buffer_recovers_without_a_client(tmp_path: Path) -> None:
+    """没被认领的输入住在持久 buffer 里 —— 客户端早就断开也不影响它被处理。"""
     h = Harness(tmp_path)
-    h.buffers.accept(SCOPE, Inbound(InboundKind.USER, "user.message", {"content": "已接纳"}, "u1"))
+    h.submit(Inbound(QueueName.USER, "user.message", {"content": "已投递"}, "u1"))
+    h.consumers[0].deliver(SCOPE)
     h.close()
     with Harness(tmp_path) as recovered:
         recovered.start()
-        assert recovered.provider.wait(1).messages[-1].content == "已接纳"
+        assert recovered.provider.wait(1).messages[-1].content == "已投递"
 
 
 def test_claim_all_is_one_commit_and_new_input_survives_completion(tmp_path: Path) -> None:
     with Harness(tmp_path) as h:
         h.send("first")
-        h.consumers[0].consume(SCOPE)
-        key = next(iter(h.state()["inputs"]))
-        step = h.brain._claim(SCOPE, {"user": (key,)})
+        h.consumers[0].deliver(SCOPE)
+        step = h.brain.intake.claim(SCOPE)
         assert step is not None
         h.send("second", "u2")
-        h.consumers[0].consume(SCOPE)
-        h.brain._execute(SCOPE, step)
-        assert [i.payload["content"] for i in h.buffers.snapshot(SCOPE, "user")] == ["second"]
+        h.consumers[0].deliver(SCOPE)
+        h.brain.execute(SCOPE, step)
+        # 这一轮跑的是 first，second 还在 buffer 里等下一轮。
+        assert [i.payload["content"] for i in h.buffer.get_all(QueueName.USER)] == ["second"]
         records = list(h.journal.read_range(SCOPE, Cursor(CursorKind.LINE, 0)))
         claim = next(
             r
@@ -51,7 +55,7 @@ def test_failed_claim_has_no_partial_buffer_ownership(
 ) -> None:
     with Harness(tmp_path) as h:
         h.send()
-        h.consumers[0].consume(SCOPE)
+        h.consumers[0].deliver(SCOPE)
         original = h.journal.append
 
         def fail(*args: Any, **kwargs: Any) -> Any:
@@ -60,11 +64,12 @@ def test_failed_claim_has_no_partial_buffer_ownership(
             return original(*args, **kwargs)
 
         monkeypatch.setattr(h.journal, "append", fail)
-        key = next(iter(h.state()["inputs"]))
         with pytest.raises(OSError):
-            h.brain._claim(SCOPE, {"user": (key,)})
+            h.brain.intake.claim(SCOPE)
+        # 认领是一次提交：要么整条成立，要么 journal 里什么都没有，输入退回 buffer。
         assert not h.state()["steps"]
-        assert h.state()["inputs"][key]["phase"] == "buffered"
+        assert h.state()["inputs"] == {}
+        assert [i.payload["content"] for i in h.buffer.get_all(QueueName.USER)] == ["你好"]
 
 
 def test_claim_committed_before_reported_failure_recovers_same_step(
@@ -72,7 +77,7 @@ def test_claim_committed_before_reported_failure_recovers_same_step(
 ) -> None:
     h = Harness(tmp_path)
     h.send()
-    h.consumers[0].consume(SCOPE)
+    h.consumers[0].deliver(SCOPE)
     original = h.journal.append
 
     def fail_after(*args: Any, **kwargs: Any) -> Any:
@@ -83,7 +88,7 @@ def test_claim_committed_before_reported_failure_recovers_same_step(
 
     monkeypatch.setattr(h.journal, "append", fail_after)
     with pytest.raises(OSError):
-        h.brain._claim(SCOPE, {"user": tuple(h.state()["inputs"])})
+        h.brain.intake.claim(SCOPE)
     saved = h.state()["meta"]["active_step"]
     h.close()
     with Harness(tmp_path) as restored:
@@ -94,16 +99,17 @@ def test_claim_committed_before_reported_failure_recovers_same_step(
 
 
 def test_fixed_request_not_rebuilt_from_later_tool_or_user_state(tmp_path: Path) -> None:
-    h = Harness(tmp_path)
+    queue = InMemoryEventQueue()
+    h = Harness(tmp_path, queue=queue)
     h.send("原输入")
-    h.consumers[0].consume(SCOPE)
-    step = h.brain._claim(SCOPE, {"user": tuple(h.state()["inputs"])})
+    h.consumers[0].deliver(SCOPE)
+    step = h.brain.intake.claim(SCOPE)
     assert step is not None
     step = h.brain._prepare_request(SCOPE, step)
     frozen = copy.deepcopy(step["request"])
     h.send("后来输入", "u2")
     h.close()
-    with Harness(tmp_path) as restored:
+    with Harness(tmp_path, queue=queue) as restored:
         restored.start()
         first = restored.provider.wait(1)
         assert [m.to_dict() for m in first.messages] == frozen["messages"]
@@ -113,8 +119,8 @@ def test_fixed_request_not_rebuilt_from_later_tool_or_user_state(tmp_path: Path)
 def test_saved_response_recovers_dispatch_without_another_model_call(tmp_path: Path) -> None:
     h = Harness(tmp_path, tools=[EchoTool("a")])
     h.send()
-    h.consumers[0].consume(SCOPE)
-    step = h.brain._claim(SCOPE, {"user": tuple(h.state()["inputs"])})
+    h.consumers[0].deliver(SCOPE)
+    step = h.brain.intake.claim(SCOPE)
     assert step is not None
     response: State = {
         "content": "",
@@ -165,17 +171,15 @@ def test_restart_recovers_pending_approval_with_no_buffer(tmp_path: Path) -> Non
         assert not restored.call("a")["terminal"]
 
 
-def test_terminal_before_notification_survives_restart(tmp_path: Path) -> None:
+def test_a_terminal_is_still_a_fact_after_a_restart(tmp_path: Path) -> None:
+    """终态在 journal 里，重启后读得回来 —— 执行过这件事不会因为通知丢了就消失。"""
     h = Harness(tmp_path, tools=[EchoTool("a")])
     h.tools.execute(SCOPE, requests("a"))
     until(lambda: h.call("a")["terminal"])
     result = copy.deepcopy(h.call("a")["terminal"])
-    h.queue.drain(SCOPE, "tool")
     h.close()
     with Harness(tmp_path, tools=[EchoTool("a")]) as restored:
         restored.tools.recover_scope(SCOPE)
-        restored.consumers[1].consume(SCOPE)
-        assert restored.buffers.snapshot(SCOPE, "tool")[0].payload == result
         assert restored.call("a")["terminal"] == result
 
 

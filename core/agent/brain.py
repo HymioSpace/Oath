@@ -7,14 +7,11 @@ import itertools
 import logging
 import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
 from typing import cast
 
-from core.buffer.journal_buffer import buffered
 from core.compaction.coordinator import CompactionCoordinator
-from core.context.intake import build_messages
+from core.intake import IntakeCoordinator
 from core.journal.runtime_store import State
 from core.protocol.datatype import Message, Scope, ToolCallRequest, ToolDefinition
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
@@ -26,7 +23,6 @@ from core.protocol.datatype.trace import (
     SpanKind,
     SpanLink,
     SpanStatus,
-    new_trace_id,
 )
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
@@ -63,20 +59,11 @@ from core.trace.attributes import (
     chat_span_name,
     input_event_name,
 )
+from core.trace.links import source_links
 from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 from core.utils.tokens import estimate_text
 
 _log = logging.getLogger(__name__)
-
-
-@dataclass
-class _Worker:
-    signal: threading.Event = field(default_factory=threading.Event)
-    triggers: dict[str, tuple[str, ...]] = field(default_factory=dict)
-    thread: threading.Thread | None = None
-    failures: int = 0
-    faulted: bool = False
-    retry_seq: int = 0
 
 
 class AgentBrain(Brain):
@@ -87,60 +74,20 @@ class AgentBrain(Brain):
         self._store = ctx.store
         self._compaction = compaction
         self._lock = threading.Lock()
-        self._workers: dict[Scope, _Worker] = {}
         self._stages: dict[str, dict[str, SpanEvent]] = {}
         self._stop = threading.Event()
+        self.intake = IntakeCoordinator(ctx, self, self._stop)
 
-    def _worker(self, scope: Scope) -> _Worker:
-        with self._lock:
-            worker = self._workers.get(scope)
-            if worker is None:
-                worker = _Worker()
-                self._workers[scope] = worker
-                worker.thread = threading.Thread(
-                    target=self._run,
-                    args=(scope, worker),
-                    name=f"oath-brain-{scope.session_id}",
-                    daemon=True,
-                )
-                worker.thread.start()
-            return worker
-
-    def wake(self, scope: Scope, trigger: str, event_ids: tuple[str, ...]) -> None:
-        if self._stop.is_set() or not event_ids:
-            return
-        worker = self._worker(scope)
-        with self._lock:
-            worker.triggers[trigger] = event_ids
-        worker.signal.set()
+    def wake(self, scope: Scope) -> None:
+        self.intake.wake(scope)
 
     def resume(self, scope: Scope) -> None:
-        if self._stop.is_set():
-            return
-        worker = self._worker(scope)
-        retry_seq = self._store.read(scope)["meta"].get("retry_seq", 0)
-        with self._lock:
-            if retry_seq != worker.retry_seq:
-                worker.retry_seq = retry_seq
-                worker.failures = 0
-                worker.faulted = False
-        worker.signal.set()
+        self.intake.resume(scope)
 
     def retry(self, scope: Scope) -> None:
-        def change(state: State) -> None:
-            state["meta"]["retry_seq"] = state["meta"].get("retry_seq", 0) + 1
-            state["meta"]["intake_error"] = None
-            state["meta"].update(run_steps=0, run_started=time.time())
-            step_id = state["meta"].get("active_step")
-            if step_id:
-                step = state["steps"][step_id]
-                if step["status"] in {"failed", "paused"}:
-                    step.update(status="prepared", attempts=0, error=None)
+        self.intake.retry(scope)
 
-        self._store.transact(scope, "step.retry", change)
-        self.resume(scope)
-
-    def _system_prompt(self) -> str:
+    def system_prompt(self) -> str:
         """system prompt + 工作区 + 技能索引。模型先读规则，再知道在哪干活、有什么可选能力。
 
         两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
@@ -151,131 +98,6 @@ class AgentBrain(Brain):
             self._ctx.skills.list(self._ctx.config.skill_index_tokens),
         ]
         return "\n\n".join(part for part in parts if part)
-
-    def _claim(self, scope: Scope, triggers: dict[str, tuple[str, ...]]) -> State | None:
-        definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
-        config = self._ctx.config
-        fresh = False
-        claimed: list[tuple[str, float | None, State]] = []
-        links: list[SpanLink] = []
-
-        def claim(state: State) -> State | None:
-            nonlocal fresh
-            if state["meta"].get("intake_error"):
-                return None
-            active = state["meta"].get("active_step")
-            if active:
-                return cast(State, state["steps"][active])
-            entries = buffered(state)
-            current_ids = {key for key, _ in entries}
-            if not any(current_ids.intersection(ids) for ids in triggers.values()):
-                return None
-            step_id = uuid.uuid4().hex
-            new_user = any(e["queue"] == "user" for _, e in entries)
-            new_run = new_user or not state["meta"].get("run_id")
-            if new_run:
-                state["meta"].update(run_id=uuid.uuid4().hex, run_steps=0, run_started=time.time())
-            # 续不续上一条 trace 只看两件事：是不是新 run，上一个 step 有没有产出工具
-            # 调用。新 run 必开新 trace —— 工具还在跑时插进来的那句话属于新意图。
-            continuing = not new_run and state["meta"].get("trace_step")
-            trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
-            messages = build_messages(state, entries, step_id)
-            system = self._system_prompt()
-            request_messages = (
-                [{"role": "system", "content": system}] if system else []
-            ) + messages
-            exhausted = (
-                state["meta"].get("run_steps", 0) >= config.max_run_steps
-                or time.time() - state["meta"]["run_started"] >= config.max_run_seconds
-            )
-            step = {
-                "step_id": step_id,
-                "run_id": state["meta"]["run_id"],
-                "trace_id": trace_id,
-                "trace_started": time.time_ns(),
-                "input_ids": [key for key, _ in entries],
-                "trigger": list(triggers),
-                "status": "paused" if exhausted else "prepared",
-                "attempts": 0,
-                "error": "run 预算已用尽，请显式继续" if exhausted else None,
-                "response": None,
-                "request": None,
-                "request_draft": {
-                    "messages": request_messages,
-                    "tools": definitions,
-                    "model": config.provider.model,
-                    "max_output_tokens": config.max_output_tokens,
-                    "temperature": config.temperature,
-                    "extra_params": config.provider.extra_params,
-                },
-            }
-            state["steps"][step_id] = step
-            state["meta"]["active_step"] = step_id
-            state["meta"]["trace_id"] = trace_id
-            fresh = True
-            claimed.extend(
-                (entry["queue"], entry["buffered_at"], entry["item"]) for _, entry in entries
-            )
-            links.extend(_source_links(state, [entry for _, entry in entries]))
-            state["conversation"]["messages"] = messages
-            for _, entry in entries:
-                entry.update(phase="claimed", step_id=step_id)
-            return step
-
-        step = self._store.transact(scope, "step.input", claim)
-        if fresh and step is not None:
-            # 事务外写 span：文件 I/O 不能在 scope 锁里做。
-            self._open_step(scope, step, claimed, tuple(links))
-            self._ctx.queue.notify(scope)
-            if step["status"] == "paused":
-                self._emit(
-                    scope,
-                    "step.status",
-                    {"step_id": step["step_id"], "status": "paused", "error": step["error"]},
-                )
-        return step
-
-    def _run(self, scope: Scope, worker: _Worker) -> None:
-        while not self._stop.is_set():
-            worker.signal.wait()
-            if self._stop.is_set():
-                return
-            worker.signal.clear()
-            if worker.faulted:
-                continue
-            with self._lock:
-                triggers = worker.triggers
-                worker.triggers = {}
-            try:
-                step = self._claim(scope, triggers)
-                if step is None or step["status"] in {"failed", "paused"}:
-                    continue
-                self._execute(scope, step)
-                worker.failures = 0
-            except Exception as exc:
-                _log.exception("Brain 调度失败，保留原输入")
-                worker.failures += 1
-                if worker.failures >= self._ctx.config.llm_max_attempts:
-                    worker.faulted = True
-                    error = str(exc)[:500]
-
-                    def record(state: State, error: str = error) -> None:
-                        active = state["meta"].get("active_step")
-                        if active:
-                            state["steps"][active].update(status="failed", error=error)
-                        else:
-                            state["meta"]["intake_error"] = error
-
-                    try:
-                        self._store.transact(scope, "step.scheduler_failed", record)
-                    except Exception:
-                        _log.exception("无法保存故障状态；推理已在进程内暂停")
-                    self._emit(scope, "step.status", {"status": "failed", "error": error})
-                    continue
-                self._stop.wait(self._ctx.config.llm_retry_delay * worker.failures)
-                with self._lock:
-                    worker.triggers.update(triggers)
-                worker.signal.set()
 
     def _prepare_request(self, scope: Scope, step: State) -> State:
         if step["request"] is not None:
@@ -309,7 +131,7 @@ class AgentBrain(Brain):
         )
         return prepared
 
-    def _execute(self, scope: Scope, step: State) -> None:
+    def execute(self, scope: Scope, step: State) -> None:
         if step["response"] is None:
             step = self._prepare_request(scope, step)
         if self._stop.is_set():
@@ -352,7 +174,7 @@ class AgentBrain(Brain):
 
             self._store.transact(scope, "step.response", save)
             step["response"] = payload
-            self._emit(scope, "assistant.message", {**payload, "step_id": step_id})
+            self.emit(scope, "assistant.message", {**payload, "step_id": step_id})
         # 已保存响应后只补后处理；不重新调用模型。
         cancelled = self._store.read(scope)["meta"].get(f"cancelled:{step['run_id']}")
         calls = [] if cancelled else step["response"]["tool_calls"]
@@ -400,8 +222,6 @@ class AgentBrain(Brain):
         closed = self._store.transact(scope, "step.completed", finish)
         self._stage(scope, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
         self._close_step(scope, closed, SpanStatus.OK, int(closed["attempts"]))
-        self._ctx.queue.notify(scope)
-        # Consumer 会重查各自规则；不能仅因 buffer 非空再次调用模型。
 
     def _fail(self, scope: Scope, step_id: str, error: str) -> None:
         def change(state: State) -> State:
@@ -411,7 +231,7 @@ class AgentBrain(Brain):
             return cast(State, step)
 
         step = self._store.transact(scope, "step.error", change)
-        self._emit(
+        self.emit(
             scope,
             "step.status",
             {"step_id": step_id, "status": step["status"], "error": error[:500]},
@@ -431,7 +251,7 @@ class AgentBrain(Brain):
         except Exception:
             _log.exception("写 trace 失败，推理不受影响")
 
-    def _open_step(
+    def open_step(
         self,
         scope: Scope,
         step: State,
@@ -510,7 +330,7 @@ class AgentBrain(Brain):
                     OATH_STEP_DURATION_MS: round((end - start) / 1_000_000, 3),
                 },
                 events=_ordered(_input_events(start, claimed) + stages),
-                links=tuple(_source_links(state, inputs)),
+                links=tuple(source_links(state, inputs)),
             ),
         )
 
@@ -579,7 +399,7 @@ class AgentBrain(Brain):
         counter = itertools.count(1)
 
         def emit(channel: str, text: str) -> None:
-            self._emit(
+            self.emit(
                 scope,
                 MessageEventType.DELTA,
                 {"step_id": step_id, "seq": next(counter), "channel": channel, "text": text},
@@ -587,7 +407,7 @@ class AgentBrain(Brain):
 
         return emit
 
-    def _emit(self, scope: Scope, type_: str, payload: State) -> None:
+    def emit(self, scope: Scope, type_: str, payload: State) -> None:
         try:
             self._ctx.sink.emit(
                 MessageEvent(
@@ -602,47 +422,9 @@ class AgentBrain(Brain):
             _log.exception("Brain 通知失败，已保存状态可查询")
 
     def close(self, *, wait: bool = True) -> None:
-        self._stop.set()
+        self.intake.close(wait=wait)
         with self._lock:
-            workers = tuple(self._workers.values())
             self._stages.clear()
-        for worker in workers:
-            worker.signal.set()
-        if wait:
-            for worker in workers:
-                if worker.thread:
-                    worker.thread.join(timeout=2)
-
-
-def _source_links(state: State, entries: Sequence[State]) -> list[SpanLink]:
-    """这次认领的输入里，每条工具结果各指向产出它的那个 step 的 span。
-
-    step 之间不是父子关系（第二步发生在第一步结束之后），所以唤醒关系只能靠 link
-    表达。用户输入没有来源，不产生 link。
-
-    用户消息和工具结果被认领进同一个 step 时，那句话开的是新 trace，而工具结果指向
-    的是上一条 trace 的 span —— link 自带 `trace_id`，跨 trace 的因果因此还读得回来。
-    找不到来源 step（journal 里已经没有）就跳过，不猜。
-    """
-    links: list[SpanLink] = []
-    seen: set[str] = set()
-    for entry in entries:
-        item = entry.get("item") or {}
-        if item.get("kind") != "tool_result":
-            continue
-        batch_id = str((item.get("payload") or {}).get("batch_id") or "")
-        source = state["steps"].get(batch_id)
-        if not batch_id or source is None or batch_id in seen:
-            continue
-        seen.add(batch_id)
-        links.append(
-            SpanLink(
-                trace_id=source["trace_id"],
-                span_id=_step_span_id(batch_id),
-                attributes={OATH_STEP_ID: batch_id},
-            )
-        )
-    return links
 
 
 def _ordered(events: Sequence[SpanEvent]) -> tuple[SpanEvent, ...]:

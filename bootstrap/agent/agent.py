@@ -1,40 +1,53 @@
-"""装配三 consumer、独立 Brain 和共用持久化事务。"""
+"""一个 scope 的执行状态所有者。
+
+进程内固定三个 consumer 线程（user / tool / system）和一个 Brain 线程。consumer 从
+进程外的队列收输入、放进持久 buffer、决定唤醒；Brain 只看 buffer 有没有东西，有就
+认领一次落进 journal，然后走 context build → 模型 → 工具。
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
-from bootstrap.extension_loader import load_extensions
+from redis import Redis
+
+from bootstrap.agent.service import SessionService
+from bootstrap.common.authentication import (
+    SESSION_CREDENTIAL_ENV,
+    TokenAuthenticator,
+    read_session_credential,
+)
+from bootstrap.common.extension_loader import load_extensions
 from core.agent import AgentBrain
-from core.buffer.journal_buffer import JournalEventBuffer
+from core.buffer import DiskEventBuffer
 from core.compaction import CompactionCoordinator, LlmCompactor
 from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
 from core.context import ContextManager
+from core.context.user_context import current, table_of
 from core.detail import DETAIL_READ, DetailReadTool, ResultShrinker
 from core.detail.impl import FileDetailStore
 from core.journal.impl import FileJournal
 from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
-from core.outbound import OutboundHub, WsEventSink
-from core.protocol.datatype.cli import CliCommand
+from core.outbound import ClientChannel, OutboundHub, WsEventSink
 from core.protocol.datatype.config import OathConfig
 from core.protocol.datatype.inbound import of_command
 from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.wire import Command, CommandType
-from core.protocol.error import PermissionDeniedError, WireProtocolError
+from core.protocol.error import WireProtocolError
 from core.protocol.interface.brain import Brain
 from core.protocol.interface.event import AgentEventSink
 from core.protocol.interface.llm import ModelProvider
 from core.protocol.interface.permission import PermissionPolicy
-from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
 from core.protocol.interface.tool import Tool
 from core.protocol.interface.trace import TraceStore
-from core.queue import InMemoryEventQueue
+from core.queue.redis_queue import RedisEventQueue
 from core.runtime import AgentContext
 from core.shell import BashTool, HostEnvironment
 from core.skill import SKILL, SkillSystem, SkillTool
@@ -43,28 +56,10 @@ from core.tool.registry import ToolRegistry
 from core.trace.impl import FileTraceStore
 from core.utils.encoding import JsonObject, JsonValue
 
-#: 停机时等消费线程退出的上限。它阻塞在 `queue.wait` 上，`close` 会把它叫醒。
+#: 停机时等消费线程退出的上限。它阻塞在 `listen` 上，`close` 会把它叫醒。
 _WORKER_JOIN_TIMEOUT: Final = 2.0
 
-_log = logging.getLogger("oath.runtime")
-
-
-class TokenAuthenticator(SessionAuthenticator):
-    """查表换身份。
-
-    **v1 的演示实现**：配置里写死 credential → 身份的映射。生产由 Hymio 提供 ——
-    认不出就抛错，不回落到匿名账号。
-    """
-
-    def __init__(self, credentials: dict[str, tuple[str, str]]) -> None:
-        self._credentials = credentials
-
-    def authenticate(self, credential: str) -> SessionIdentity:
-        identity = self._credentials.get(credential)
-        if identity is None:
-            raise PermissionDeniedError(f"credential 不认: {credential!r}")
-        user_id, session_id = identity
-        return SessionIdentity(user_id=user_id, session_id=session_id)
+_log = logging.getLogger("oath.agent")
 
 
 class AllowAllPolicy(PermissionPolicy):
@@ -93,42 +88,39 @@ def _check_user_context(value: JsonValue) -> None:
 def _cli_env(config: OathConfig) -> Callable[[Scope], Mapping[str, str]]:
     """按 scope 现算 CLI 客户端要用的环境变量。
 
-    credential 从配置的映射反查。认不出这个 scope 就给空 token：命令照跑，只是 CLI
-    请求会被 server 拒掉 —— 模型从 exit code 与 stderr 上看得见这件事。生产认证需要能
-    按 scope 出 credential。
+    **应用侧怎么鉴权就怎么给。** 这里只把 biz 的地址和本 scope 的 session token 递出去；
+    换成别的认证方式，改的是这一处。
     """
-    # 监听地址不能直接给客户端用：0.0.0.0 是绑定用的通配，不是能连的地址。
     host = config.server.host
-    reachable = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
-    server = f"http://{reachable}:{config.server.http_port}"
-    tokens = {identity: token for token, identity in config.credentials.items()}
+    server = f"http://{host}:{config.server.http_port}"
+    token = read_session_credential()
 
     def env_for(scope: Scope) -> Mapping[str, str]:
-        return {
-            "OATH_CLI_SERVER": server,
-            "OATH_CLI_TOKEN": tokens.get((scope.user_id, scope.session_id), ""),
-        }
+        return {"OATH_CLI_SERVER": server, "OATH_CLI_TOKEN": token}
 
     return env_for
 
 
 @dataclass
 class SessionWorker:
-    """一个 session 的消费线程。"""
+    """一条队列的消费线程。"""
 
     scope: Scope
     thread: threading.Thread
     stop: threading.Event = field(default_factory=threading.Event)
 
 
-class Runtime:
-    """装配好的 runtime。"""
+class Agent(SessionService):
+    """**一个进程一个 scope。** 进程外只有队列与 buffer，进程内没有任何别的 scope。"""
 
     def __init__(
         self,
         config: OathConfig,
+        scope: Scope,
         *,
         loop: asyncio.AbstractEventLoop,
+        credential: str,
+        redis: Redis,
         tools: list[Tool] | None = None,
         policy: PermissionPolicy | None = None,
         provider: ModelProvider | None = None,
@@ -137,22 +129,23 @@ class Runtime:
         实例可以带着配置好的依赖，扩展目录里的工具只能零参构造。扫出来的排在注入的前面，
         撞名由注册表报出来，不用猜是谁先注册的。
         """
-        self.config = config
-        self.authenticator = TokenAuthenticator(config.credentials)
+        self.config, self.scope = config, scope
+        self._loop = loop
+        self.authenticator = TokenAuthenticator({credential: (scope.user_id, scope.session_id)})
         # 扩展在装配期就装好：装不起来要在这里炸，不用等到模型真的去调它。
-        extensions = load_extensions(config.agent.extension_dirs)
-        self.commands: tuple[CliCommand, ...] = extensions.commands
+        extensions = load_extensions(
+            config.agent.extension_dirs, kinds=frozenset({"tools", "skills"})
+        )
 
-        data_root = config.data_root
-        # 关停要调 `close`，而 `Journal` 接口上没有这个方法 —— 那是具体实现的
-        # 生命周期，装配层握着自己造出来的那个对象。
-        self.journal = FileJournal(data_root / "journal")
-        queue = InMemoryEventQueue()
+        # 落盘的三个 store 自己按 scope 分目录，这里给的都是根。
+        self.journal = FileJournal(config.data_root / "journal")
+        queue = RedisEventQueue(redis)
+        self.buffer = DiskEventBuffer(config.data_root / "buffer")
         self.hub = OutboundHub(loop, send_queue_size=config.server.send_queue_size)
         outbound: AgentEventSink = WsEventSink(self.hub)
         store = RuntimeStore(self.journal)
-        details = FileDetailStore(data_root / "details")
-        self.traces: TraceStore = FileTraceStore(data_root / "traces")
+        details = FileDetailStore(config.data_root / "details")
+        self.traces: TraceStore = FileTraceStore(config.data_root / "traces")
         skills = SkillSystem(
             (config.agent.skill_dir, *extensions.skill_dirs),
             scan_dirs=config.agent.skill_scan_dirs,
@@ -184,6 +177,7 @@ class Runtime:
             journal=self.journal,
             store=store,
             queue=queue,
+            buffer=self.buffer,
             sink=outbound,
             tools=tool_system,
             context_manager=ContextManager(self.journal, config.agent),
@@ -203,24 +197,51 @@ class Runtime:
             sink=outbound,
         )
         self.brain: Brain = AgentBrain(self.ctx, model, self.compaction)
-        self.buffers = JournalEventBuffer(
-            store, tool_buffer_timeout=config.agent.tool_round_timeout_seconds
-        )
         self.consumers = (
-            UserConsumer(self.ctx, self.brain, self.buffers),
-            ToolConsumer(self.ctx, self.brain, self.buffers),
-            SystemConsumer(self.ctx, self.brain, self.buffers),
+            UserConsumer(self.ctx, self.brain),
+            ToolConsumer(self.ctx, self.brain),
+            SystemConsumer(self.ctx, self.brain),
         )
-        self._workers: dict[tuple[Scope, str], SessionWorker] = {}
-        self._workers_lock = threading.Lock()
-        self._resume_buffered()
+        self._workers: list[SessionWorker] = []
+        self._started = False
+
+    # -- 生命周期 ----------------------------------------------------------
+
+    def start(self) -> None:
+        """起三个消费线程，并把在飞的工具收尾。
+
+        **重启时先恢复再收输入。** 上一个进程可能崩在工具执行中途 —— 那些调用一律报
+        `outcome_unknown`，不能重跑。
+        """
+        if self._started:
+            return
+        self._started = True
+        self.ctx.tools.recover_scope(self.scope)
+        for consumer in self.consumers:
+            stop = threading.Event()
+            thread = threading.Thread(
+                target=consumer.run,
+                args=(self.scope, stop),
+                name=f"oath-{consumer.queue_name}-{self.scope.session_id}",
+                daemon=True,
+            )
+            self._workers.append(SessionWorker(self.scope, thread, stop))
+            thread.start()
+        self.brain.resume(self.scope)
+
+    @property
+    def connections(self) -> int:
+        """在线连接数。manager 按它判断这个 scope 还有没有人用。"""
+        return self.hub.connections
 
     # -- 上行 --------------------------------------------------------------
 
     def open_session(self, command: Command) -> Scope:
-        """验 credential，绑定 session。认不出就抛错 —— 不回落到匿名账号。"""
+        """验 credential。认不出就抛错 —— 不回落到匿名账号。"""
         identity = self.authenticator.authenticate(str(command.payload.get("credential", "")))
-        return Scope(user_id=identity.user_id, session_id=identity.session_id)
+        if (identity.user_id, identity.session_id) != (self.scope.user_id, self.scope.session_id):
+            raise WireProtocolError("credential 不属于这个 session", code="session_mismatch")
+        return self.scope
 
     def submit(self, command: Command, scope: Scope) -> None:
         if command.session_id != scope.session_id:
@@ -243,10 +264,9 @@ class Runtime:
                 raise WireProtocolError("content 必须是文本", code="bad_payload")
             _check_user_context(command.payload.get("user_context"))
         inbound = of_command(command)
+        # 只投队列。落盘是 Brain 认领时的事，这里写 journal 就把两个答案写在一起了。
         if inbound is not None:
-            self.buffers.accept(scope, inbound)
-            self.ctx.queue.put(scope, inbound)
-            self.ensure_session(scope)
+            self.ctx.queue.add(scope, inbound)
 
     def status(self, scope: Scope) -> JsonObject:
         state = self.ctx.store.read(scope)
@@ -268,45 +288,25 @@ class Runtime:
                 }
                 for key, value in state["compactions"].items()
             },
-            "input_errors": [
-                {"input_id": key, "error": entry["error"]}
-                for key, entry in state["inputs"].items()
-                if entry["phase"] == "rejected"
-            ],
         }
 
-    def ensure_session(self, scope: Scope) -> None:
-        with self._workers_lock:
-            for consumer in self.consumers:
-                key = (scope, consumer.queue_name)
-                existing = self._workers.get(key)
-                if existing and existing.thread.is_alive():
-                    continue
-                stop = threading.Event()
-                thread = threading.Thread(
-                    target=consumer.run,
-                    args=(scope, stop),
-                    name=f"oath-{consumer.queue_name}-{scope.session_id}",
-                    daemon=True,
-                )
-                self._workers[key] = SessionWorker(scope, thread, stop)
-                thread.start()
-        self.brain.resume(scope)
+    def user_context(self, scope: Scope) -> JsonObject:
+        return current(table_of(self.ctx.store.read(scope)), now=time.time())
 
-    def _resume_buffered(self) -> None:
-        for scope in self.ctx.store.scopes():
-            self.ctx.tools.recover_scope(scope)
-            self.ensure_session(scope)
+    # -- 下行投递 ----------------------------------------------------------
+
+    def attach(self, scope: Scope, channel: ClientChannel) -> None:
+        self.hub.attach(scope, channel)
+
+    def detach(self, scope: Scope, channel: ClientChannel) -> None:
+        self.hub.detach(scope, channel)
 
     def close(self) -> None:
-        with self._workers_lock:
-            workers = list(self._workers.values())
-            self._workers.clear()
-        for worker in workers:
+        for worker in self._workers:
             worker.stop.set()
-        # 先断队列：消费线程正阻塞在 `wait` 上，不叫醒它就只能靠 join 超时。
+        # 先断队列：消费线程正阻塞在 `listen` 上，不叫醒它就只能靠 join 超时。
         self.ctx.queue.close(wait=True)
-        for worker in workers:
+        for worker in self._workers:
             worker.thread.join(timeout=_WORKER_JOIN_TIMEOUT)
             if worker.thread.is_alive():
                 # consumer 只做短事务；超时需排查存储或控制处理。
@@ -316,8 +316,12 @@ class Runtime:
         self.brain.close(wait=True)
         self.compaction.shutdown()
         self.ctx.tools.shutdown(wait=True)
-        self.hub.shutdown()
+        self.buffer.close()
+        if self._loop.is_running():
+            self._loop.call_soon_threadsafe(self.hub.shutdown)
+        else:
+            self.hub.shutdown()
         self.journal.close()
 
 
-__all__ = ["AllowAllPolicy", "Runtime", "SessionWorker", "TokenAuthenticator"]
+__all__ = ["SESSION_CREDENTIAL_ENV", "AllowAllPolicy", "Agent"]

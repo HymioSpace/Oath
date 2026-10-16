@@ -14,13 +14,16 @@ from core.protocol.datatype.cli import (
 )
 from core.protocol.datatype.config import (
     AgentConfig,
+    ManagerConfig,
+    MiddlewareConfig,
     ModelProviderConfig,
     OathConfig,
     ServerConfig,
+    SupervisorConfig,
 )
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.event import AgentEvent
-from core.protocol.datatype.inbound import Batch, Inbound, InboundKind, of_command
+from core.protocol.datatype.inbound import Inbound, of_command
 from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     PAYLOAD_SCHEMAS,
@@ -55,7 +58,7 @@ from core.protocol.datatype.permission import (
     PermissionVerdict,
     expired,
 )
-from core.protocol.datatype.queue import QUEUE_OF_KIND, QueueName, queue_of
+from core.protocol.datatype.queue import QueueName, check_queue
 from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
@@ -108,7 +111,6 @@ __all__ = [
     "COMMAND_SCHEMAS",
     "MAX_COMMAND_ID_LENGTH",
     "PAYLOAD_SCHEMAS",
-    "QUEUE_OF_KIND",
     "RESULT_KEY_PREFIX",
     "SCOPE_ID_PATTERN",
     "SPAN_ID_LENGTH",
@@ -119,7 +121,6 @@ __all__ = [
     "AgentEvent",
     "AgentState",
     "AppendResult",
-    "Batch",
     "BatchExecution",
     "CliCommand",
     "CloseReason",
@@ -132,9 +133,11 @@ __all__ = [
     "EventType",
     "of_command",
     "QueueName",
+    "check_queue",
     "FrameType",
     "Inbound",
-    "InboundKind",
+    "ManagerConfig",
+    "MiddlewareConfig",
     "LlmFinishReason",
     "LlmRequest",
     "LlmResponse",
@@ -157,6 +160,7 @@ __all__ = [
     "Recovery",
     "Scope",
     "ServerConfig",
+    "SupervisorConfig",
     "Span",
     "SpanEvent",
     "SpanKind",
@@ -180,7 +184,6 @@ __all__ = [
     "WireVersion",
     "new_span_id",
     "new_trace_id",
-    "queue_of",
     "expired",
     "is_valid_command_name",
     "is_valid_invocation_id",

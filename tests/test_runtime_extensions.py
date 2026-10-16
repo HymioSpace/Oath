@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,15 +13,18 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from bootstrap.biz_server import build_app
-from bootstrap.runtime import Runtime
+from bootstrap.agent.agent import Agent
+from bootstrap.biz.assembly import build_application
+from bootstrap.biz.server import build_app
+from bootstrap.clients.agent_client import AgentClient
+from bootstrap.manager import SessionEntry, SessionManager
 from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult
-from core.protocol.datatype.config import AgentConfig, OathConfig
+from core.protocol.datatype.config import OathConfig
 from core.protocol.error import ToolRegistrationError
 from core.protocol.interface import Tool
-from tests._support.intake_fixtures import ScriptedProvider
+from tests._support.agent_fixtures import build
 
-TOKEN = "synthetic-test-token"
+TOKEN = "service-token-for-tests"
 
 TOOL_SOURCE = """
 from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult
@@ -90,6 +92,17 @@ def _forget_loaded_modules() -> Iterator[None]:
         del sys.modules[name]
 
 
+class OfflineManager(SessionManager):
+    """登记 session 但不拉起进程。
+
+    这个测试问的是「扩展声明的命令能不能从 biz 路由调通」，不是进程模型。manager 自己的
+    不变量仍然成立：登记过的 session 能通过认证。
+    """
+
+    def _launch(self, entry: SessionEntry, *, wait: bool = True) -> None:
+        pass
+
+
 @pytest.fixture
 def local(tmp_path: Path) -> Path:
     """一个装齐三种扩展的本地目录。"""
@@ -103,79 +116,81 @@ def local(tmp_path: Path) -> Path:
     return directory
 
 
-def tool_names(runtime: Runtime) -> set[str]:
+def tool_names(agent: Agent) -> set[str]:
     """模型看得见的工具名 —— 注册表的内容就是那张表。"""
-    return {definition.name for definition in runtime.ctx.tools.definitions()}
+    return {definition.name for definition in agent.ctx.tools.definitions()}
 
 
-def runtime_of(tmp_path: Path, dirs: tuple[Path, ...]) -> Runtime:
-    return Runtime(
-        OathConfig(
-            data_root=tmp_path,
-            credentials={TOKEN: ("u1", "s1")},
-            agent=AgentConfig(
-                extension_dirs=dirs,
-                skill_dir=tmp_path / "nowhere",
-            ),
-        ),
-        loop=asyncio.new_event_loop(),
-        provider=ScriptedProvider(),
-    )
+def agent_of(tmp_path: Path, dirs: tuple[Path, ...]) -> Agent:
+    return build(tmp_path, extension_dirs=dirs, skill_dir=tmp_path / "nowhere")
 
 
 def test_a_local_tool_reaches_the_registry(tmp_path: Path, local: Path) -> None:
     """注册表就是模型看得见的工具列表 —— 扫不到就等于没有。"""
-    runtime = runtime_of(tmp_path, (local,))
+    agent = agent_of(tmp_path, (local,))
     try:
-        assert "local_tool" in tool_names(runtime)
+        assert "local_tool" in tool_names(agent)
     finally:
-        runtime.close()
+        agent.close()
 
 
 def test_the_core_tools_are_still_registered(tmp_path: Path, local: Path) -> None:
     """扩展是加法，不是替换。删掉 extensions-local 只该少东西，不该让 runtime 起不来。"""
-    runtime = runtime_of(tmp_path, (local,))
+    agent = agent_of(tmp_path, (local,))
     try:
-        assert {"detail_read", "skill", "bash"} <= tool_names(runtime)
+        assert {"detail_read", "skill", "bash"} <= tool_names(agent)
     finally:
-        runtime.close()
+        agent.close()
 
 
-def test_a_local_command_reaches_the_cli_server(tmp_path: Path, local: Path) -> None:
-    """命令在扩展里声明，但它是 HTTP 能力 —— 要能从 biz server 调通。"""
-    runtime = runtime_of(tmp_path, (local,))
+def test_a_local_command_reaches_the_cli_server(
+    tmp_path: Path, local: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """命令在扩展里声明，但它是 HTTP 能力 —— 要能从 biz server 调通。
+
+    只有取 `user_context` 的那一步要真的 agent 在跑（那是进程模型的事）；这里把它换成
+    空表，验的是路由、认证、参数校验与派发。
+    """
+    agent = agent_of(tmp_path, (local,))
     try:
-        client = TestClient(build_app(runtime))
+        config = OathConfig(
+            data_root=tmp_path, service_credentials=(TOKEN,), agent=agent.config.agent
+        )
+        manager = OfflineManager(config, "")
+        session = manager.create_session("u1")
+        monkeypatch.setattr(AgentClient, "user_context", lambda self, scope: {})
+        application = build_application(config, manager)
+        client = TestClient(build_app(application, manager, config))
+        auth = {"Authorization": f"Bearer {session['credential']}"}
 
         assert [c["name"] for c in client.get("/cli_commands").json()["commands"]] == ["shout"]
-        response = client.post(
-            "/cli/shout",
-            json={"text": "工作区"},
-            headers={"Authorization": f"Bearer {TOKEN}"},
-        )
+        response = client.post("/cli/shout", json={"text": "工作区"}, headers=auth)
 
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         assert response.json() == {"text": "工作区"}
     finally:
-        runtime.close()
+        agent.close()
 
 
 def test_a_local_skill_reaches_the_system_prompt_index(tmp_path: Path, local: Path) -> None:
     """开发者自己写的技能是项目技能，进索引，不只是被 find 搜到。"""
-    runtime = runtime_of(tmp_path, (local,))
+    agent = agent_of(tmp_path, (local,))
     try:
-        assert "local-skill" in runtime.ctx.skills.list(1000)
+        assert "local-skill" in agent.ctx.skills.list(1000)
     finally:
-        runtime.close()
+        agent.close()
 
 
-def test_the_runtime_starts_with_the_scan_turned_off(tmp_path: Path) -> None:
-    runtime = runtime_of(tmp_path, ())
+def test_the_agent_starts_with_the_scan_turned_off(tmp_path: Path) -> None:
+    agent = agent_of(tmp_path, ())
     try:
-        assert runtime.commands == ()
-        assert runtime.ctx.skills.list(1000) == ""
+        config = OathConfig(
+            data_root=tmp_path, service_credentials=(TOKEN,), agent=agent.config.agent
+        )
+        assert build_application(config, OfflineManager(config, "")).commands == ()
+        assert agent.ctx.skills.list(1000) == ""
     finally:
-        runtime.close()
+        agent.close()
 
 
 class Conflicting(Tool):
@@ -196,12 +211,9 @@ def test_an_injected_tool_that_clashes_with_a_discovered_one_is_refused(
 ) -> None:
     """撞名要在装配期炸出来。装上了、模型调不动，那是更难查的坏。"""
     with pytest.raises(ToolRegistrationError):
-        Runtime(
-            OathConfig(
-                data_root=tmp_path,
-                agent=AgentConfig(extension_dirs=(local,), skill_dir=tmp_path / "nowhere"),
-            ),
-            loop=asyncio.new_event_loop(),
-            provider=ScriptedProvider(),
+        build(
+            tmp_path,
+            extension_dirs=(local,),
+            skill_dir=tmp_path / "nowhere",
             tools=[Conflicting()],
         )

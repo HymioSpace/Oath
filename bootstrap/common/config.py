@@ -15,9 +15,12 @@ from typing import Any, Final
 
 from core.protocol.datatype.config import (
     AgentConfig,
+    ManagerConfig,
+    MiddlewareConfig,
     ModelProviderConfig,
     OathConfig,
     ServerConfig,
+    SupervisorConfig,
 )
 
 _ENV_RE: Final = re.compile(r"\$\{([^}]+)\}")
@@ -76,19 +79,8 @@ def load_config(path: str | Path) -> OathConfig:
 def from_dict(data: dict[str, Any]) -> OathConfig:
     """TOML 的 dict → 配置对象。缺省值保证最小可启动。"""
     agent_raw = data.get("agent", {})
-    server_raw = data.get("server", {})
     # provider 嵌在 `[agent.provider]` 下：它是 agent 的一个字段，不是平级的一块。
     provider_raw = agent_raw.get("provider", {})
-
-    credentials: dict[str, tuple[str, str]] = {}
-    for entry in data.get("credentials", []):
-        token = entry.get("token")
-        if not token:
-            continue
-        credentials[token] = (
-            str(entry.get("user_id", "")),
-            str(entry.get("session_id", "")),
-        )
 
     # 目录类的字段在 TOML 里是字符串，读进来就得转成 Path / tuple —— 声明的形状
     # 只有这一处保证。coding agent 的技能目录在这里展开成绝对路径：程序自己拼的
@@ -126,13 +118,20 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
 
     return OathConfig(
         data_root=Path(data.get("data_root", "./data")),
-        server=ServerConfig(**server_raw),
+        server=ServerConfig(**data.get("server", {})),
+        middleware=MiddlewareConfig(**data.get("middleware", {})),
+        manager=ManagerConfig(**data.get("manager", {})),
+        supervisor=SupervisorConfig(**data.get("supervisor", {})),
         agent=AgentConfig(
             system_prompt=agent_raw.get("system_prompt", ""),
             provider=ModelProviderConfig(**provider_raw),
             **agent_fields,
         ),
-        credentials=credentials,
+        # 空串丢掉：`${VAR}` 在变量没设时展开成空，留下来等于给了一个「空 token 通过」的
+        # 配置。认证器另外还要拒空串，这里是让它压根不出现在列表里。
+        service_credentials=tuple(
+            token for token in (str(t) for t in data.get("service_credentials", [])) if token
+        ),
     )
 
 

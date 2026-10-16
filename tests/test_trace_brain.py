@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from core.protocol.datatype.config import AgentConfig, ModelProviderConfig
-from core.protocol.datatype.inbound import Inbound, InboundKind
+from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.llm import LlmResponse, LlmToolCall
+from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.trace import Span
 from core.trace.attributes import (
     GEN_AI_REQUEST_MODEL,
@@ -213,19 +214,19 @@ def test_a_user_message_claiming_a_tool_result_keeps_the_causal_link(tmp_path: P
         source_step = next(iter(harness.state()["steps"]))
 
         # 工具结果与用户新消息一起进 buffer 再叫醒：两条输入被认领进同一个 step。
-        harness.buffers.receive(
-            harness.scope,
+        harness.buffer.add(
+            QueueName.TOOL,
             Inbound(
-                InboundKind.TOOL_RESULT,
+                QueueName.TOOL,
                 "tool.terminal",
                 {"batch_id": source_step, "invocation_id": f"{source_step}-0", "outcome": "ok"},
                 "r1",
             ),
         )
-        harness.buffers.receive(
-            harness.scope, Inbound(InboundKind.USER, "user.message", {"content": "顺便看看"}, "u2")
+        harness.buffer.add(
+            QueueName.USER, Inbound(QueueName.USER, "user.message", {"content": "顺便看看"}, "u2")
         )
-        harness.brain.wake(harness.scope, "tool", ("tool_result:r1",))
+        harness.brain.wake(harness.scope)
         harness.provider.wait(2)
         until(lambda: harness.state()["meta"].get("active_step") is None)
 

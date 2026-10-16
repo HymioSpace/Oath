@@ -1,6 +1,12 @@
-"""三条内存通知队列，分别订阅和消费。
+"""三条输入队列：投递、取出、等待新事件。
 
-producer 必须先可靠接纳输入。queue 丢失可从 journal 重建；取出通知不删除持久化输入。
+队列是中间件，不在这个接口里。ack、pending、消费组都是中间件自己的可用性保障 ——
+用 Kafka 就是 offset 提交，用 redis streams 就是消费组。换中间件就是换一个实现，
+`core/` 不动。
+
+**队列不是可靠性的来源。** 一条输入被 consumer 取走之后住在 consumer 的 buffer 里，
+那个 buffer 才要求持久；队列这边丢了一条，等价于这条输入还没到达。journal 里只保存
+Brain 认领过的事实。
 """
 
 from __future__ import annotations
@@ -12,56 +18,33 @@ from core.protocol.datatype.scope import Scope
 
 
 class EventQueue(ABC):
-    """三条按 kind 分开的输入队列。"""
+    """三条按队列名分开的输入队列。"""
 
     @abstractmethod
-    def put(self, scope: Scope, item: Inbound) -> None:
-        """入队。队列由 `item.kind` 决定。
+    def add(self, scope: Scope, item: Inbound) -> None:
+        """投递一件输入，进 `item.kind` 那条队列。
 
-        返回只代表通知已排队；可靠接纳由调用方在 put 之前完成。
+        不做去重、不做幂等：同一件事可以被投多次，消费方自己按 `source_id` 处理。
         """
         ...
 
     @abstractmethod
-    def drain(self, scope: Scope, queue: str, *, limit: int = 64) -> tuple[Inbound, ...]:
-        """从这条队列一次取光，最多 `limit` 条。空队列立刻返回空元组。
+    def get_all(self, scope: Scope, queue: str) -> tuple[Inbound, ...]:
+        """取出这条队列当前的全部待取输入。空队列返回空元组。"""
+        ...
 
-        **不分页。** 一轮里同时到的 20 条工具结果分 20 次取，就是 20 次可能被插队的
-        机会。`limit` 只在防止无界批次时起作用，不是页大小。
+    @abstractmethod
+    def listen(self, scope: Scope, queue: str, timeout: float) -> bool:
+        """等到这条队列有新输入或超时，返回有没有等到。
+
+        这是唯一的等待手段。返回 `False` 不代表出错，只是这段时间没有新东西 ——
+        调用方本来就该周期性重新判定。
         """
         ...
-
-    @abstractmethod
-    def pending(self, scope: Scope, queue: str) -> int:
-        """这条队列现在有多少条待取。"""
-        ...
-
-    @abstractmethod
-    def revision(self, scope: Scope, queue: str) -> int:
-        """消费前读 revision，随后 wait 不会漏掉在判定期间到来的通知。"""
-        ...
-
-    @abstractmethod
-    def notify(self, scope: Scope) -> None:
-        """只通知重新判定，不加入消息。"""
-        ...
-
-    @abstractmethod
-    def wait(
-        self,
-        scope: Scope,
-        *,
-        queue: str | None = None,
-        timeout: float | None = None,
-        after: int | None = None,
-    ) -> bool: ...
 
     @abstractmethod
     def close(self, *, wait: bool = True) -> None:
-        """停机。`wait` 之后立刻返回，不再等待。
-
-        通知随队列消失；可靠接纳但尚未处理的输入保留在 journal。
-        """
+        """停机。`listen` 之后立刻返回。"""
         ...
 
 
