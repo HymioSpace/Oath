@@ -1,8 +1,12 @@
-"""每个 scope 的 supervisor：看住自己的 agent，定时投一次强制唤醒。
+"""每个 scope 的 supervisor：站在 agent 外面观察它，判断现在需不需要干预。
 
-**它和 agent 的推理没有任何关系。** 它只做两件事：往 system 队列投 `system.invoke`
-（强制唤醒，Brain 被叫起来看一眼现有输入，这条事件本身不进 buffer），以及探测自己的
-agent 是不是还在 —— 不在了就请 manager 重启。它不发输入、不读 journal、不看连接数。
+干预只有一种形式：往 system 队列投事件。**目前落地的两项能力**是周期投一次
+`system.invoke`（强制唤醒，Brain 被叫起来看一眼现有输入，这条事件本身不进 buffer），
+以及探测自己的 agent 是不是还在 —— 不在了就往控制道写一条 `restart_agent` 请
+manager 拉起来。它不发输入、不读 journal、不看连接数。
+
+它与 manager 之间只有一条单向控制道，写进去的只有重启请求。管道写不出去说明 manager
+那边已经没人管这个 scope 了：这条 supervisor 现在是孤儿。
 """
 
 from __future__ import annotations

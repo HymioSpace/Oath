@@ -12,6 +12,7 @@
 | 进程 | 线程级的存活检测 | 只测了 consumer 对异常免疫。Brain 线程与工具线程退出没有同样的保护，进程仍然会回心跳 |
 | 进程 | 崩溃后的重连语义 | agent 重启期间端口没人听，客户端要自己重连。重连之后没有代次号，客户端无从判断中间发生过什么 |
 | 进程 | 孤儿进程组 | biz 被 `kill -9` 之后，上一轮的 agent 与 supervisor 只能靠 pidfile 里的 pgid 收回；pidfile 被覆盖就再也认不出那一组 |
+| 进程 | supervisor 发现自己是孤儿 | 控制道写不出去只记一行日志，supervisor 继续跑自己的周期任务。没人管还继续强制唤醒，比没有 supervisor 更难查 |
 | 工具 | 外部 operation 对账 | running 恢复暂为 outcome_unknown；查询或幂等续执行需明确工具契约 |
 | 工具 | 可终止 worker | 线程 timeout 不终止外部动作，挂起线程持续占用物理槽位；bash 命令由执行环境自己连进程组一起杀，与线程执行是两回事 |
 | 上下文 | 压缩产物复用与精确计量 | 压缩按 scope 独立备产物；token 数是估算，未接 provider 计数器 |
