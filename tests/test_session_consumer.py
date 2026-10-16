@@ -1,5 +1,6 @@
 """三个独立 consumer 的唤醒规则；不调用模型来验证队列决策。"""
 
+import threading
 import time
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from core.protocol.datatype import Scope
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.queue import QueueName
 from core.protocol.interface.brain import Brain
+from core.protocol.interface.queue import EventQueue
+from core.queue import InMemoryEventQueue
 from tests._support.intake_fixtures import Harness, requests, until
 from tests._support.tool_fixtures import EchoTool, GatedTool, VerdictPolicy
 
@@ -290,3 +293,45 @@ def test_a_deadline_bounds_the_next_listen(tmp_path: Path) -> None:
         finally:
             a.gate.set()
             b.gate.set()
+
+
+class FlakyQueue(EventQueue):
+    """中间件挂掉又回来：`listen` 先抛几次，之后照常转发。"""
+
+    def __init__(self, inner: EventQueue, failures: int) -> None:
+        self.inner, self.failures = inner, failures
+
+    def add(self, scope: Scope, item: Inbound) -> None:
+        self.inner.add(scope, item)
+
+    def get_all(self, scope: Scope, queue: str) -> tuple[Inbound, ...]:
+        return self.inner.get_all(scope, queue)
+
+    def listen(self, scope: Scope, queue: str, timeout: float) -> bool:
+        if self.failures > 0:
+            self.failures -= 1
+            raise RuntimeError("中间件不可用")
+        return self.inner.listen(scope, queue, timeout)
+
+    def close(self, *, wait: bool = True) -> None:
+        self.inner.close(wait=wait)
+
+
+def test_a_broken_middleware_does_not_end_the_consumer(tmp_path: Path) -> None:
+    """**消费线程退出是不可见的故障。** 进程还在、还在回心跳、WS 上还在 ACK，只是不再
+    消费任何输入；supervisor 看的是进程，看不见这件事。所以中间件抛的异常必须留在循环里。
+    """
+    inner = InMemoryEventQueue()
+    with Harness(tmp_path, queue=FlakyQueue(inner, failures=3)) as h:
+        consumer = h.consumers[0]
+        stop = threading.Event()
+        worker = threading.Thread(target=consumer.run, args=(h.scope, stop), daemon=True)
+        worker.start()
+        try:
+            # 故障期间进来的输入，中间件回来之后仍要被消费掉 —— 认领之后落在 journal 的
+            # inputs 里，所以看 journal 而不是看 buffer（buffer 会被 Brain 取空）。
+            h.send()
+            until(lambda: h.state()["inputs"], timeout=5)
+        finally:
+            stop.set()
+            worker.join(timeout=5)

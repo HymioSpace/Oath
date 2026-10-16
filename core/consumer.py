@@ -49,11 +49,13 @@ class QueueConsumer:
             try:
                 arrived = self.deliver(scope)
                 timeout = self.evaluate(scope, arrived)
+                # **listen 也在这个 try 里。** 中间件挂掉时它抛的异常同样是异常，放到
+                # try 外面就是让线程直接退出：这个进程还在、还在回心跳、还在 ACK，
+                # 但再也不会消费任何输入 —— supervisor 看的是进程，看不见这件事。
+                self.ctx.queue.listen(scope, self.queue_name, timeout)
             except Exception:
                 _log.exception("%s consumer 故障；已缓冲的输入保留", self.queue_name)
                 stop.wait(0.2)
-                continue
-            self.ctx.queue.listen(scope, self.queue_name, timeout)
 
     def deliver(self, scope: Scope) -> bool:
         """把新到的输入收进 buffer。返回收到了没有。"""
