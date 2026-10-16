@@ -215,6 +215,7 @@ def test_a_user_message_claiming_a_tool_result_keeps_the_causal_link(tmp_path: P
 
         # 工具结果与用户新消息一起进 buffer 再叫醒：两条输入被认领进同一个 step。
         harness.buffer.add(
+            harness.scope,
             QueueName.TOOL,
             Inbound(
                 QueueName.TOOL,
@@ -224,7 +225,9 @@ def test_a_user_message_claiming_a_tool_result_keeps_the_causal_link(tmp_path: P
             ),
         )
         harness.buffer.add(
-            QueueName.USER, Inbound(QueueName.USER, "user.message", {"content": "顺便看看"}, "u2")
+            harness.scope,
+            QueueName.USER,
+            Inbound(QueueName.USER, "user.message", {"content": "顺便看看"}, "u2"),
         )
         harness.brain.wake(harness.scope)
         harness.provider.wait(2)

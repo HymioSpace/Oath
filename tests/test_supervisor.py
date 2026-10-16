@@ -31,6 +31,9 @@ class RecordingQueue(EventQueue):
     def get_all(self, scope: Scope, queue: str) -> tuple[Inbound, ...]:
         return ()
 
+    def confirm(self, scope: Scope, queue: str, item: Inbound) -> None:
+        pass
+
     def listen(self, scope: Scope, queue: str, timeout: float) -> bool:
         return False
 

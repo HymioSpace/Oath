@@ -97,28 +97,38 @@ class IntakeCoordinator:
         self._store.transact(scope, "step.retry", change)
         self.resume(scope)
 
-    def _drain(self) -> list[tuple[str, Inbound]]:
-        """取走 buffer 里现在有的全部输入。**取走就是取走** —— 认领失败要放回去。"""
-        drained: list[tuple[str, Inbound]] = []
+    def _peek(self, scope: Scope) -> list[tuple[str, Inbound]]:
+        """读出 buffer 里现在有的全部输入，**不移出**。
+
+        认领是两步：读出来、写进 journal、然后才从 buffer 删掉那几条。先删后写的话，
+        崩在中间两头都没有 —— 输入没了，journal 里也没有。
+        """
+        found: list[tuple[str, Inbound]] = []
         for queue in (QueueName.USER, QueueName.TOOL, QueueName.SYSTEM):
-            drained.extend((queue, item) for item in self._ctx.buffer.get_all(queue))
-        return drained
+            found.extend((queue, item) for item in self._ctx.buffer.peek(scope, queue))
+        return found
 
-    def _restore(self, scope: Scope, items: list[tuple[str, Inbound]]) -> None:
-        """把取走的输入放回去。journal 里已经有同一件事的不放 —— 放回去它就永远卡在那儿。
+    def _discard_claimed(self, scope: Scope, items: list[tuple[str, Inbound]]) -> None:
+        """从 buffer 里删掉已经进了 journal 的那几条。
 
-        认领失败不是罕见路径：重复投递（崩在写 buffer 之后）就会走到这里。
+        按身份删，不是按位置 —— journal 是唯一事实来源，它说这条认过了就是认过了。
+        崩在提交之后、删除之前的那几条会在下一轮认领时撞上 `input_key` 已经在
+        `state["inputs"]` 里，于是这一句把它们收走，不会卡在那儿反复重试。
         """
         claimed = self._store.read(scope)["inputs"]
         for queue, item in items:
-            if input_key(item) not in claimed:
-                self._ctx.buffer.add(queue, item)
+            if input_key(item) in claimed:
+                self._ctx.buffer.remove(scope, queue, item)
 
     def claim(self, scope: Scope) -> State | None:
-        """认领一次输入：取走 buffer 里的全部，落进 journal，开一个 step。
+        """认领一次输入：读出 buffer 里的全部，落进 journal，开一个 step。
 
         **落盘发生在这一步，不是到达的时候。** 认领之前输入住在 buffer 里（持久化）；
         认领之后它才成为 journal 里的事实。
+
+        三步的顺序是刻意排的：读 → 写 journal → 从 buffer 删。每一步崩了都还在：
+        崩在写之前输入还在 buffer 里等下一轮，崩在删之前 journal 里有、buffer 里有同一件
+        事，下一轮认领时按身份去重并把 buffer 里那份收掉。
         """
         if self._store.read(scope)["meta"].get("intake_error"):
             return None
@@ -129,7 +139,7 @@ class IntakeCoordinator:
             # 返回它等于让这一轮再跑一遍已经结束的事。
             step = cast(State, state["steps"][active])
             return step if step["status"] == "prepared" else None
-        items = self._drain()
+        items = self._peek(scope)
         if not items:
             return None
         definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
@@ -216,11 +226,12 @@ class IntakeCoordinator:
             # `transact` 的返回值约束，于是这里推成永不返回 None。
             opened: State | None = self._store.transact(scope, "step.input", claim)
         except Exception:
-            self._restore(scope, items)
+            # 输入还在 buffer 里，没删过任何东西 —— 不用放回去，让它重试。
             raise
+        # 事务提交了就把它从 buffer 收走。提交失败时 journal 里没有，这里查到的就只有
+        # 之前就认过的那些 —— 认过的收走，没认过的留在 buffer 里等下一轮。
+        self._discard_claimed(scope, items)
         if opened is None:
-            # 事务里发现 intake_error 或全部已认领：没认领的那些放回去，等下一轮。
-            self._restore(scope, items)
             return None
         if fresh:
             # 事务外写 span：文件 I/O 不能在 scope 锁里做。

@@ -43,6 +43,14 @@ class InMemoryEventQueue(EventQueue):
             bucket.clear()
             return taken
 
+    def confirm(self, scope: Scope, queue: str, item: Inbound) -> None:
+        """这里什么都不用做。`get_all` 当场就把消息从 deque 里取走了。
+
+        持久队列要多这一步，是因为它取出来之后消息还留在 pending 里，等确认才 ack。
+        内存队列没有 pending 可言 —— 它整个都不持久，崩了就是全没了，不存在「确认之后
+        才丢」这个中间态。调用方照常调它，语义是一样的：这条已经不再归队列管了。
+        """
+
     def listen(self, scope: Scope, queue: str, timeout: float) -> bool:
         """等到这条队列有东西或者超时。返回 false 表示白等了一轮。"""
         check_queue(queue)

@@ -25,7 +25,7 @@ _LISTEN_SECONDS = 5.0
 
 def input_key(item: Inbound) -> str:
     """输入的身份。同一个身份只认领一次。"""
-    return f"{item.kind}:{item.source_id}"
+    return item.identity
 
 
 class QueueConsumer:
@@ -58,15 +58,20 @@ class QueueConsumer:
                 stop.wait(0.2)
 
     def deliver(self, scope: Scope) -> bool:
-        """把新到的输入收进 buffer。返回收到了没有。"""
+        """把新到的输入收进 buffer。返回收到了没有。
+
+        **写进 buffer 一条就确认队列那一条。** 整批取完再整批确认等于承认没落盘的那几条
+        也已经收下了 —— 中途失败的话，它们从此谁都不再管。
+        """
         arrived = self.ctx.queue.get_all(scope, self.queue_name)
         for item in arrived:
             self.receive(scope, item)
+            self.ctx.queue.confirm(scope, self.queue_name, item)
         return bool(arrived)
 
     def receive(self, scope: Scope, item: Inbound) -> None:
         """一条新输入的去处。默认进 buffer 等 brain 认领。"""
-        self.ctx.buffer.add(self.queue_name, item)
+        self.ctx.buffer.add(scope, self.queue_name, item)
         self._buffered = True
 
     def evaluate(self, scope: Scope, delivered: bool) -> float:

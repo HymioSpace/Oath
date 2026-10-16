@@ -8,8 +8,8 @@
 
 ## 1 总览
 
-**三条队列、三个 consumer、三个持久 buffer。consumer 分别判断唤醒；任意一个请求唤醒，
-Brain 就在可执行时一次取走三条 buffer 当前全部输入。一个 scope 同时最多一个 step。**
+**三条队列、三个 consumer、一个按 `(scope, 队列名)` 分桶的持久 buffer。consumer 分别判断
+唤醒；任意一个请求唤醒，Brain 就在可执行时一次读出三条队列当前全部输入。一个 scope 同时最多一个 step。**
 
 ```mermaid
 flowchart LR
@@ -23,7 +23,7 @@ flowchart LR
     UC -->|自身规则 wake| B[Brain.wake]
     TC -->|自身规则 wake| B
     SC -->|自身规则 wake| B
-    B -->|claim 一次 get_all| D[写进 journal]
+    B -->|claim: 读 → 落盘| D[写进 journal]
     D --> Step[固定输入 → context → LLM → 持久化决定]
     Step -->|新 batch| TS
 ```
@@ -32,11 +32,12 @@ flowchart LR
 
 1. **唤醒判断属于各 consumer。** `Brain.wake` 不带内容，只负责串行执行与合并唤醒。
 2. **输入到达不写 journal。** 它在队列里、再在 buffer 里，被认领的那次事务才落盘。ACK 只
-   表示投进了队列。
+   表示已经进了 buffer —— 落进 buffer 之后才确认，中间崩了队列会重投。
 3. **等待批准不是执行终态。** 不向 tool 队列发 `awaiting_approval` 终态；context 按状态补 reminder。
 4. **批准直接提交原调用。** 保留 invocation / batch / 参数；真实终态标 `source=system`。
 5. **首次工具唤醒等待初次提交的工具，或等待固定窗口到期。** system 来源不加入初次等待集合。
-6. **`get_all` 是所有权转移。** 取走即移出 buffer；认领失败要原样放回去，新消息留在下一步。
+6. **转移一律先在下一处持久接纳，再从这一处删掉。** 队列 → buffer → journal 三步都是这样，
+   buffer 读出来不删，写进 journal 提交后才按身份删。崩在中间时东西两边都还有，重启读得回来。
 7. **给模型的 tool response 只交付一次。** 填过的槽位不再改写；后到的真实结果继续落盘，通过
    user-role reminder 呈现。槽位里是提醒而非真结果时，这一条还不算交付。
 
@@ -85,8 +86,7 @@ step；这些槽位**全是真结果**时再记 `delivered`。
 ### 3.1 接收与唤醒分开
 
 每个 consumer 只监听自己的队列，把事件放进自己的持久 buffer，再按自身规则请求 wake。
-**ack 不进 Oath 的接口** —— 那是中间件自己的可用性保障（Redis 用消费组 + pending，
-Kafka 用自己的 offset），换实现不改这里。
+**ack 不进 Oath 的接口** —— 那是中间件自己的可用性保障（Redis 用消费组 + pending）。
 consumer 在 Brain 调模型期间继续工作；不持锁调用 Brain 或执行工具。
 
 | consumer | 接收动作 | 默认唤醒规则 |
@@ -95,18 +95,24 @@ consumer 在 Brain 调模型期间继续工作；不持锁调用 Brain 或执行
 | ToolConsumer | buffer 真实终态，查询本批状态 | 按第 4 节 |
 | SystemConsumer | 应用控制决定后再 buffer 已应用事件；`system.invoke` **不进 buffer** | 批准本身不 wake |
 
-三个 consumer 是三条队列各一个线程。`system.invoke` 只置强制唤醒标记并叫醒 Brain ——
-它是一次「看一眼」的信号，不是一个模型输入。
+三个 consumer 是三条队列各一个线程。`system.invoke` 只置强制唤醒标记，不是模型输入。
+
 SystemConsumer 先应用控制动作再让该消息进入 buffer，防止 Brain 收到尚未生效的批准。
 批准：原子记录裁定与执行意图，异步提交原调用。拒绝 / 过期：记录未执行终态，投递 tool 队列。
 批准校验认证主体、scope、原工具与参数摘要；只改变执行资格，不接受客户端替换调用内容。
 这些授权事件不自行 wake，避免绕过 A/B 的首次等待。终态由 ToolConsumer 决定何时通知模型。
 cancel 先改变执行资格；是否让模型解释由该 system 事件类型决定，不靠 LLM 才能停止派发。
 
-### 3.2 取走即移出
+### 3.2 读与删分开
 
-`EventBuffer.get_all` 是所有权转移，取走之后 buffer 里就没有它了。完成事务只确认本 step 那批
-输入；不提供「把三个 buffer 清零」的调用 —— 那会删掉模型运行期间新来的消息。
+`EventBuffer` 只有四个动作：`add` / `peek` / `remove` / `close`。`peek` **不移出**，`remove`
+按 `(scope, 队列名)` 移出那一条。认领是三步：读、写 journal、删；先删后写的话崩在中间两头都没有，
+所以删只能跟着写成功的认领走（第 5 节）。
+
+键里带整个 scope：所有 agent 进程共用一个 `data_root`，只有队列名的话一个 scope 的认领会取走
+另一个 scope 的输入。
+
+不提供「把三个 buffer 清零」的调用 —— 那会删掉模型运行期间新来的消息。
 ToolSystem 的提交意图由执行器完成；崩溃恢复依第 7 节处理，不由 LLM 重新生成调用。
 
 ## 4 ToolConsumer 唤醒规则
@@ -131,8 +137,7 @@ I(b) 为空并不会凭空 wake：必须先有 N(b)。因此全部 ask 时直接
 初次立即拒绝 / schema 错误也有真实终态；没有初次执行项时同样能推进。
 
 `delivered` 之前：system 来源结果可加入 N(b)，可随认领取走，但不能独立绕过 I(b)。
-`delivered` 之后：任何来源的新终态都可 wake；不重新等待已经送过的初次工具。
-多批次分别计算；任意批满足条件可请求 wake，按约定那次认领会顺带取走其他批已入 buffer 的结果。
+`delivered` 之后：任何来源的新终态都可 wake。多批次分别计算，任意批满足条件即可请求 wake。
 
 ### 4.2 Buffer timeout
 
@@ -144,7 +149,6 @@ timeout 分开。timer 丢失可据此重建，不取重放时刻。
 timer 到期即使没有新消息也主动重新判定；N(b) 已被其他 wake 认领则旧 timer 无效。
 这次认领呈现了本批后取消首次攒批 timer；后续结果直接 wake。
 进程内用 monotonic 等待，重启由保存的绝对 deadline 恢复；过期立即处理，不重新给完整窗口。
-跨重启依赖可信墙钟；剩余等待限制为已保存的窗口，回拨不能无限延长，过期按零处理。
 
 **一条结果都没有时 buffer timer 不启动。** 工具执行 / 排队 deadline、审批 TTL、初次接纳 deadline
 各自产生终态。终态已落盘但尚未入队时由重投恢复，不能依赖用户再次发消息。
@@ -175,25 +179,25 @@ Brain 忙时只登记 pending wake，consumer 继续往 buffer 里收；不阻�
 限制模型持续发起新调用的循环；预算耗尽暂停推理并显示状态，不丢弃审批或工具结果。
 
 **唤醒不会丢。** `wake` 只置信号；consumer 先 `add` 再决定唤醒，所以「决定唤醒」这一刻数据
-一定已经在 buffer 里。Brain 是 `wait → clear → claim → execute → 重新置信号`：执行期间到达的
-输入，它的唤醒已经被这一轮用掉了，执行完必须补一次，否则要一直等到下一次外部唤醒才有人认领。
+一定已经在 buffer 里。Brain 是 `wait → claim → execute → 重新置信号`：执行期间到达的输入，
+它的唤醒已经被这一轮用掉了，执行完必须补一次。
 
-### 5.2 取走与落盘是一个事务的两半
+### 5.2 落盘成功才删 buffer
 
-认领分两步：
+认领分三步：
 
-1. `get_all` 把三条 buffer 一次取空（取走即移出）。
+1. `peek` 把三条 buffer 当前的输入一次读出来（不删）。
 2. 一个短的 scope 事务，`runtime.commit(reason=step.input)` 写入 `inputs`（状态 `claimed`）、
    step_id、trigger、请求草稿和固定槽位。
+3. 事务提交成功后，按 `(scope, 队列名, 身份)` 从三条 buffer 删掉刚才这批。
 
-事务成功，这批输入归本 step，结束时标 `done`。事务失败或抛异常，**这批输入原样放回三条
-buffer** —— 否则它们既不在 buffer 里也不在 journal 里，就永远没了。
+事务成功，这批输入归本 step，结束时标 `done`。事务失败就抛出去，**buffer 里原样不动** ——
+东西还在那里，下一轮重试；没有「放回」这一步，因为根本没拿走过。
 
 锁外压缩后通过 `step.request` 保存最终请求。重试只读取已固定请求。
 prepared step 崩溃后继续同一份输入，不重新取。完成时提交 `step.completed`，可重复执行；
 当前不物理删除历史。
 
-禁止「模型结束时 clear 当前整个 buffer」：那会删除模型运行期间新来的消息。
 所有锁均不跨模型请求或工具 I/O。
 
 ## 6 Context build：槽位一次固定，后续结果追加
@@ -204,8 +208,8 @@ prepared step 崩溃后继续同一份输入，不重新取。完成时提交 `s
 才能追加 user / assistant 消息。按原调用顺序拼接。配对内部键是 batch_id + invocation_id，
 不能假设模型生成的 tool_call_id 在整个 session 唯一；provider 要求的 ID 原样透传。
 同一 assistant 响应内 ID 缺失 / 重复属于无效模型输出；派发前拒绝并进入有限纠错，不能执行半批。
-
 检查不能只依赖当前列表最后一条的 role：即将追加的用户消息前仍可能存在未闭合 toolcall。
+
 对尚未呈现的 batch，在 step.input 提交时为每个成员固定一个槽位：
 
 | 本步能看到的状态 / 输入 | 原 tool 槽位内容 |
@@ -251,16 +255,15 @@ user: <tool_result batch_id="b1" invocation_id="B" outcome="succeeded">真实结
 3. **认领与完成**：step.input 固定消费所有权与消息投影；模型完整返回及后续 batch 意图先持久化，
    再派发；step.completed 保存进度。重放 reducer / 修复派发不重新问已经有完整响应的模型。
 
-这些是存储契约。**只有 Brain 写输入与 step / 模型消息**（supervisor 投事件不改 journal，
-它改不了 —— 它连 journal 的接口都没有）。工具与控制事实的保存不等待 Brain 唤醒。
+这些是存储契约。**只有 Brain 写输入与 step / 模型消息** —— supervisor 只投事件，改不了 journal。
+工具与控制事实的保存不等待 Brain 唤醒。
 
 ### 7.2 重启顺序与边界
 
 一个 scope 一个进程，重启就是新进程打开同一个目录：先从 journal 恢复批次、审批、派发状态、
 step.input / completed，再从持久 buffer 读回还没认领的输入，最后开放接入。buffer 读得回来是
-这里的核心断言 —— **已 ACK 的输入不能因为进程没了就不存在**。
-已有完整响应的 step 补齐后处理；无响应的准备态恢复原请求，有限重试，不能并发启动第二个 step。
-结果已持久化而未认领的，按同 event_id 重投；认领但未完成的，继续原 step；完成但未回收的只回收。
+这里的核心断言 —— **已 ACK 的输入不能因为进程没了就不存在**。一个 scope 最多一个 step，
+恢复期间不并发开第二个。
 
 | 崩溃 / 故障位置 | 恢复动作 |
 | --- | --- |
@@ -268,7 +271,8 @@ step.input / completed，再从持久 buffer 读回还没认领的输入，最�
 | 批准已提交、尚未取到派发资格 | 恢复唯一原调用提交，source=system |
 | worker 可能已执行、没有可靠终态 | 当前无外部对账 adapter，报告 outcome_unknown，不盲目重跑 |
 | 已保存终态、尚未发布到队列 | 重投同一终态，重建固定窗口和唤醒判断 |
-| 取走 buffer 之后、认领事务提交之前 | 事务没提交就是没认领；但那批输入已经不在 buffer 里 —— **放回去是这一步的唯一出路** |
+| 已从 buffer 读出、认领事务提交之前 | 事务没提交就是没认领；输入还在 buffer 里，重启后重认一次 |
+| 认领事务已提交、还没从 buffer 删掉 | 按身份认得出是同一条事实，不重复落盘，下一轮收走 buffer 里那条 |
 | request 已发、响应未保存 | 模型结果未知；有限重试同一请求，可能重复计费，但不派发未记录的工具 |
 | 模型响应已保存、工具尚未派发 | 使用已记录 batch / invocation 补齐派发，不能生成新调用身份 |
 | LLM 永久失败 / 重试耗尽 | 记录 failed，结束本次执行；active step 和原输入保留，暂停该 session 推理 |
@@ -291,7 +295,6 @@ Hymio / 客户端：审批绑定 scope + invocation_id；批准表示提交原�
 模型 tool_call_id 不变；Nostalgia 消费结构化事实时不能把 reminder 当成真实执行结果。
 用户 / system 的其它唤醒策略分别定义，不能通过新增统一 Intake scheduler 接管三个 consumer。
 RuntimeStore 通过一条 runtime.commit 保存跨表变化：inputs、batches、calls、steps、meta、conversation、controls、compactions。
-工具终态、裁定和 queued、claim 和槽位均各自原子提交，不另写权限文件。
-**buffer 不写进 journal** —— 它是输入还没被认领期间的事实载体，取走即移出。
+**buffer 不写进 journal** —— 它是输入还没被认领期间的事实载体，落盘之后才删掉它。
 执行器暂不支持外部 operation 对账；日志裁剪、事务快照和多进程 fencing 另行实现。
 压缩见 [Compaction](feature-compaction.md)：按 scope 判断，不改已固定的槽位。

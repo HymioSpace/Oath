@@ -307,6 +307,9 @@ class FlakyQueue(EventQueue):
     def get_all(self, scope: Scope, queue: str) -> tuple[Inbound, ...]:
         return self.inner.get_all(scope, queue)
 
+    def confirm(self, scope: Scope, queue: str, item: Inbound) -> None:
+        self.inner.confirm(scope, queue, item)
+
     def listen(self, scope: Scope, queue: str, timeout: float) -> bool:
         if self.failures > 0:
             self.failures -= 1

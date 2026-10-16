@@ -39,7 +39,7 @@ def test_claim_all_is_one_commit_and_new_input_survives_completion(tmp_path: Pat
         h.consumers[0].deliver(SCOPE)
         h.brain.execute(SCOPE, step)
         # 这一轮跑的是 first，second 还在 buffer 里等下一轮。
-        assert [i.payload["content"] for i in h.buffer.get_all(QueueName.USER)] == ["second"]
+        assert [i.payload["content"] for i in h.buffer.peek(SCOPE, QueueName.USER)] == ["second"]
         records = list(h.journal.read_range(SCOPE, Cursor(CursorKind.LINE, 0)))
         claim = next(
             r
@@ -69,7 +69,7 @@ def test_failed_claim_has_no_partial_buffer_ownership(
         # 认领是一次提交：要么整条成立，要么 journal 里什么都没有，输入退回 buffer。
         assert not h.state()["steps"]
         assert h.state()["inputs"] == {}
-        assert [i.payload["content"] for i in h.buffer.get_all(QueueName.USER)] == ["你好"]
+        assert [i.payload["content"] for i in h.buffer.peek(SCOPE, QueueName.USER)] == ["你好"]
 
 
 def test_claim_committed_before_reported_failure_recovers_same_step(

@@ -35,10 +35,14 @@ flowchart LR
 
 `Inbound.kind` 恒等于队列名 —— 没有第二个来源给同一条输入分类。
 
-每个 consumer 就是三步：收到事件 → `buffer.add` → 判断要不要 wake。要 wake 就把 buffer
-一次 `get_all` 全取走（取走即移出），交给 Brain 的 intake。另一条队列非空不会让当前 consumer
-忙循环。**ack 不进 Oath 的接口** —— 那是中间件自己的可用性保障，换成 Kafka 就是 Kafka 的
-消费组，不重新定义。
+每个 consumer 就是三步：收到事件 → `buffer.add` → 判断要不要 wake。**确认是逐条的，而且发生在
+写进 buffer 之后** —— 一批里中间一条写失败就抛走，没写进去的那些还在中间件的 pending 里，
+下一轮还会被投递；按批确认的话它们会被 ack 掉，从此既不在 buffer 里也不在队列里。
+要 wake 就把 buffer 一次 `peek` 全读出来，交给 Brain 的 intake；落盘成功后 consumer 才按身份
+逐条确认。另一条队列非空不会让当前 consumer 忙循环。
+
+**ack 不进 Oath 的接口** —— 那是中间件自己的可用性保障，换成 Kafka 就是 Kafka 的消费组，
+不重新定义。
 
 SystemConsumer 应用控制动作后才认领输入；重复控制命令不会重复审批、取消新 run 或重置重试计数。
 ToolConsumer 校验终态与工具系统保存的事实一致，无效消息单独 rejected 并报告，其他结果继续处理。

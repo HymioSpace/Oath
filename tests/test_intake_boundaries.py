@@ -189,7 +189,7 @@ def test_a_forged_tool_result_never_reaches_the_buffer(tmp_path: Path) -> None:
         h.consumers[1].deliver(h.scope)
 
         # a 的真结果照常进 buffer，伪造的那条不到场。
-        assert [item.source_id for item in h.buffer.get_all(QueueName.TOOL)] == ["result:a"]
+        assert [item.source_id for item in h.buffer.peek(h.scope, QueueName.TOOL)] == ["result:a"]
         assert h.state()["inputs"] == {}
         assert any(event.type == "intake.rejected" for event in h.sink.events)
 
@@ -208,5 +208,5 @@ def test_a_valid_result_still_gets_through_alongside_a_forged_one(tmp_path: Path
         )
         h.consumers[1].deliver(h.scope)
 
-        buffered = h.buffer.get_all(QueueName.TOOL)
+        buffered = h.buffer.peek(h.scope, QueueName.TOOL)
         assert [item.source_id for item in buffered] == ["result:a"]

@@ -35,6 +35,14 @@ class Inbound:
     source_id: str = ""
     occur_dt: str = ""
 
+    @property
+    def identity(self) -> str:
+        """这条输入的身份。**同一个身份只认领一次。**
+
+        三处按它去重：journal 认领、buffer 里删掉指定那一条、队列确认时找到对应消息。
+        """
+        return f"{self.kind}:{self.source_id}"
+
     def to_dict(self) -> JsonObject:
         return {
             "kind": self.kind,

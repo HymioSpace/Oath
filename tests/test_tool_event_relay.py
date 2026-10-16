@@ -32,7 +32,7 @@ def test_the_terminal_reaches_the_buffer_as_one_input(tmp_path: Path) -> None:
         h.consumers[1].deliver(h.scope)
         h.consumers[1].deliver(h.scope)  # 重投：crash 重启或 ACK 后才崩都可能发生
 
-        buffered = h.buffer.get_all(QueueName.TOOL)
+        buffered = h.buffer.peek(h.scope, QueueName.TOOL)
         assert [item.source_id for item in buffered] == ["result:a"]
         # 通知本身不进 journal —— 只有 Brain 认领之后才是事实。
         assert h.state()["inputs"] == {}
@@ -47,4 +47,4 @@ def test_a_terminal_for_an_unknown_call_is_quarantined(tmp_path: Path) -> None:
         h.submit(Inbound(QueueName.TOOL, "tool.terminal", {"invocation_id": "ghost"}, "ghost"))
         h.consumers[1].deliver(h.scope)
 
-        assert [item.source_id for item in h.buffer.get_all(QueueName.TOOL)] == ["result:a"]
+        assert [item.source_id for item in h.buffer.peek(h.scope, QueueName.TOOL)] == ["result:a"]

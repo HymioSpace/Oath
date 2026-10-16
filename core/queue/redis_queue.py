@@ -4,10 +4,12 @@ key 按 `(user_id, session_id, 队列名)` 分开，每个 key 一个消费组�
 进程**，所以每个组里只有一个 consumer；进程重启换 consumer 名字，靠 `XAUTOCLAIM` 把上一
 个进程没取完的 pending 收回来。
 
-消费组的语义落在实现里，不在 `EventQueue` 接口里。取出来的消息先不 ack，等下一次取之前
-再 ack：调用方把这一批写进 buffer 是同步的，到下一次 `get_all` 那一刻它一定写完了。崩在
-写 buffer 之前，消息还在 pending 里，下次启动被 `XAUTOCLAIM` 收回；崩在写完之后，重投也
-只会重复一次 —— 认领时按 `(kind, source_id)` 去重。
+消费组的语义落在实现里，不在 `EventQueue` 接口里。取出来的消息进 pending，**调用方逐条
+`confirm` 之后才 ack 并删掉**。没确认的一直留在 pending 里，下次启动被 `XAUTOCLAIM` 收回 ——
+崩在写 buffer 之前就等于没取走，重投一次；崩在写完之后重投也只会重复一次，认领时按
+`(kind, source_id)` 去重。
+
+确认是逐条的不是整批的：一批里确认过的那几条和没确认的那几条，命运本来就不同。
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ from core.protocol.datatype.scope import Scope
 from core.protocol.interface.queue import EventQueue
 from core.utils.encoding import canonical_json
 
-#: 一轮最多取多少条。取完立即 ack 并删除，所以 stream 不会长。
+#: 一轮最多取多少条。
 _BATCH = 128
 #: `BLOCK` 的上限。**必须短于消费线程的 join 上限** —— 停机时 `close()` 叫不醒一个
 #: 阻塞在 `XREADGROUP` 上的线程，只能等它自己超时回来。
@@ -39,8 +41,9 @@ class RedisEventQueue(EventQueue):
         self._redis = client
         self._consumer = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._joined: set[str] = set()
-        #: 已经交给调用方、还没 ack 的消息 id。取到的下一批不重复它们。
-        self._unacked: dict[str, list[Any]] = {}
+        #: 已经交给调用方、还没确认的消息。按 `(身份, 消息 id)` 记 —— 同一批里可能有两条
+        #: 身份相同的输入，确认其中一条要把两条都放掉。
+        self._unacked: dict[str, dict[str, list[Any]]] = {}
         self._closed = False
 
     @staticmethod
@@ -66,8 +69,6 @@ class RedisEventQueue(EventQueue):
         check_queue(queue)
         key = self._key(scope, queue)
         self._join(key)
-        self._confirm(key)
-        claimed = set(self._unacked.pop(key, ()))
         # 上一个进程没取完的先收回来，再取本 consumer 名下的 pending。
         reclaimed = self._redis.xautoclaim(key, _GROUP, self._consumer, 0, 0, count=_BATCH)
         pending = self._redis.xreadgroup(_GROUP, self._consumer, count=_BATCH, streams={key: "0"})
@@ -75,17 +76,23 @@ class RedisEventQueue(EventQueue):
         # 可能有重叠 —— 按消息 id 去重，重复进 buffer 就成了两条一样的输入。
         entries: dict[Any, dict[bytes, bytes]] = {}
         for entry in (*_entries(reclaimed), *_entries(pending)):
-            if entry[0] not in claimed:
-                entries.setdefault(entry[0], entry[1])
+            entries.setdefault(entry[0], entry[1])
         if not entries:
             return ()
-        # 不在这里 ack：调用方还没把它们写进 buffer。下一轮取之前再确认。
-        self._unacked[key] = list(entries)
-        return tuple(Inbound.from_dict(json.loads(fields[b"item"])) for fields in entries.values())
+        # 不在这里 ack：调用方还没把它们写进 buffer。写完一条确认一条。
+        unacked = self._unacked.setdefault(key, {})
+        items = []
+        for message_id, fields in entries.items():
+            item = Inbound.from_dict(json.loads(fields[b"item"]))
+            items.append(item)
+            pending_ids = unacked.setdefault(item.identity, [])
+            if message_id not in pending_ids:
+                pending_ids.append(message_id)
+        return tuple(items)
 
-    def _confirm(self, key: str) -> None:
-        """确认上一批已交给调用方的消息，并从 stream 里删掉。"""
-        ids = self._unacked.get(key)
+    def confirm(self, scope: Scope, queue: str, item: Inbound) -> None:
+        key = self._key(scope, queue)
+        ids = self._unacked.get(key, {}).pop(item.identity, None)
         if not ids:
             return
         self._redis.xack(key, _GROUP, *ids)
