@@ -15,7 +15,7 @@ Oath 是持久化、事件驱动的 agent runtime。core 负责执行语义、�
 ```
   biz（单例，进程内带 manager）
     ├── agent 进程 × N     每个 scope 一个：3 个 consumer 线程 + 1 个 Brain 线程 + WS server
-    └── supervisor 进程 × N 每个 scope 一个：强制唤醒 + 看住自己的 agent
+    └── supervisor 进程 × N 每个 scope 一个：周期投 system.invoke
               queue（Redis Streams，独立于任何进程）
 ```
 
@@ -37,7 +37,6 @@ flowchart TD
     T -->|终态 Inbound| Q
     S[supervisor] -->|system.invoke 强制唤醒| Q
     M[manager] -.->|拉起 / 回收| A[agent 进程]
-    S -.->|重启请求| M
     Br -.->|span| TR[trace → biz 只读]
 ```
 
@@ -86,8 +85,9 @@ Journal 顺序。排序不依赖时间戳。
    投递本身不进 buffer。
 2. **Durable**：输入先在持久 buffer 里，再由一次原子认领固定成 step；执行意图先保存再
    派发；已保存的响应不重新生成。队列的 ack 是中间件自己的可用性保障，不进 Oath 接口。
-3. **Supervisor**：每个 scope 一个独立进程，定时投 `system.invoke` 并看住自己的 agent，
-   不在了请 manager 重启。**回收只看 WS 连接数**：连续为 0 且过了冷却期就停掉那两个进程。
+3. **Supervisor**：每个 scope 一个独立进程，只做一件事 —— 定时投 `system.invoke`。
+   **回收只看 WS 连接数**：连续为 0 且过了冷却期就停掉那两个进程。agent 中途崩了没有人
+   拉起它，那个 scope 会一直空着。
 
 详见 [Intake](feature-intake.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)、[Compaction](feature-compaction.md)、
 [Skill](feature-skill.md)、[Journal](feature-journal.md)、[Trace](feature-trace.md)、[Supervisor](feature-supervisor.md)、[扩展目录](feature-extensions.md)、

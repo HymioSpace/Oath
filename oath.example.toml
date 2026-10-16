@@ -27,8 +27,9 @@ max_sessions = 64
 # 分配给 agent 进程的端口区间。闭区间，撞上就换一个。
 port_range_start = 8800
 port_range_end = 8899
-# 多久探一次每个 agent 的连接数。
+# 多久探一次每个 agent 的连接数，以及单次探测的上限。**timeout 必须短于 interval**。
 reap_interval_seconds = 5.0
+probe_timeout_seconds = 3.0
 # 连接数连续为 0 多久之后回收这个 scope。给重连留一段冷却。
 idle_grace_seconds = 60.0
 
@@ -82,17 +83,12 @@ api_base = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
 timeout_seconds = 60
 
-# 每个 scope 的 supervisor：看住自己的 agent，定时往 system 队列投一次强制唤醒。
+# 每个 scope 的 supervisor：定时往 system 队列投一次强制唤醒。
 [supervisor]
-# 存活探测的间隔与单次上限。**timeout 必须短于 interval** —— 慢检查不能连着慢两轮。
-heartbeat_interval_seconds = 5.0
-heartbeat_timeout_seconds = 3.0
-heartbeat_failures_before_restart = 3
-# 多久投一次 system.invoke。强制唤醒：让 idle 的模型再看一眼攒着的输入与工具结果，
+# 多久投一次 system.invoke，以及单次投递的上限。**timeout 必须短于 interval** ——
+# 慢投递不能连着慢两轮。强制唤醒：让 idle 的模型再看一眼攒着的输入与工具结果，
 # 投递本身不进 buffer。
 invoke_interval_seconds = 30.0
-# 连续启动失败后的重启退避，按失败次数翻倍，到 cap 封顶。
-restart_backoff_seconds = 1.0
-restart_backoff_cap_seconds = 60.0
+invoke_timeout_seconds = 5.0
 # 请求一个进程退出后等多久，超过了就终止它。
 shutdown_timeout_seconds = 5.0

@@ -142,6 +142,7 @@ redis_url = "{REDIS}"
 port_range_start = {free_port()}
 port_range_end = {free_port() + 20}
 reap_interval_seconds = 0.3
+probe_timeout_seconds = 0.2
 idle_grace_seconds = 1.0
 [agent]
 extension_dirs = ["{extension.parent}"]
@@ -152,12 +153,8 @@ model = "synthetic"
 api_base = "http://127.0.0.1:{model.server_port}/v1"
 api_key_env = "OATH_SYNTHETIC_KEY"
 [supervisor]
-heartbeat_interval_seconds = 0.4
-heartbeat_timeout_seconds = 0.2
-heartbeat_failures_before_restart = 2
 invoke_interval_seconds = 0.3
-restart_backoff_seconds = 0.1
-restart_backoff_cap_seconds = 0.5
+invoke_timeout_seconds = 0.2
 '''
     )
     monkeypatch.setenv("OATH_SYNTHETIC_KEY", "synthetic-local-key")
@@ -203,24 +200,6 @@ def receive(ws: Any, matches: Callable[[dict[str, Any]], bool]) -> dict[str, Any
             return cast(dict[str, Any], frame)
 
 
-def reconnect(url: str, timeout: float = 20) -> Any:
-    """连上就返回，连不上就重试到超时。
-
-    **agent 崩过之后，端口有一小段没人听。** manager 只负责把 agent 拉起来，不等它开始
-    监听 —— 等的那个位置在客户端：重连本来就是它的事。一次 refused 就判失败，等于把一次
-    崩溃当成永久下线。
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        try:
-            return connect(url, open_timeout=max(0.1, min(2.0, remaining)))
-        except OSError:
-            if remaining <= 0:
-                raise
-            time.sleep(0.05)
-
-
 def agent_pid(biz: subprocess.Popen[bytes]) -> int | None:
     """biz 拉起来的 agent 子进程。"""
     rows = subprocess.check_output(["ps", "-axo", "pid=,ppid=,command="], text=True)
@@ -261,9 +240,16 @@ def session_auth(issued: dict[str, Any]) -> dict[str, str]:
     return {"Authorization": f"Bearer {issued['credential']}"}
 
 
-def test_a_session_answers_and_comes_back_after_the_agent_is_killed(
+def test_a_killed_agent_is_neither_restarted_nor_reaped(
     biz: subprocess.Popen[bytes], services: Path
 ) -> None:
+    """agent 崩了之后没人拉起它，这个 scope 也不会被回收。
+
+    **这两件都不是 bug，是当前机制的边界**，所以钉在这里：supervisor 现在只管周期唤醒，
+    而回收只看连接数 —— 探不到的 agent 不是「0 条连接」，不该按空闲回收掉。
+
+    journal 还在磁盘上，但没有人会拿它重建这个 scope：manager 的 session 表只在内存里。
+    """
     issued = create_session(services)
     session_id = cast(str, issued["session_id"])
     url = cast(str, issued["ws_url"])
@@ -281,23 +267,21 @@ def test_a_session_answers_and_comes_back_after_the_agent_is_killed(
         # ACK 只说明队列收到了，回答要等 Brain 走完一轮。
         receive(ws, lambda f: f.get("event_type") == "assistant.message")
 
-    first = eventually(lambda: agent_pid(biz))
-    os.kill(first, signal.SIGKILL)
-    # supervisor 发现 agent 不在了请 manager 重来，端口不变 —— 客户端那把凭证也不变。
-    second = eventually(lambda: (pid := agent_pid(biz)) is not None and pid != first and pid)
+    os.kill(eventually(lambda: agent_pid(biz)), signal.SIGKILL)
 
-    with reconnect(url) as ws:
-        open_session(ws, "open2", issued)
-        receive(ws, lambda f: f.get("id") == "open2")
-        command(ws, "session.status", "status", session_id, None)
-        state = receive(ws, lambda f: f.get("event_type") == "session.status")["payload"]
+    # 端口接下来一直没人听 —— 没有人会把它拉回来。
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        with pytest.raises(Exception):  # noqa: B017
+            connect(url, open_timeout=1).close()
+        time.sleep(0.1)
 
-    # 换了一个进程，那一轮对话仍从 journal 里读得回来。
-    assert second != first
-    assert any(
-        m.get("role") == "assistant" and m.get("content") == "hello" for m in state["messages"]
-    )
-    assert len(SyntheticModel.requests) == 1
+    # 过了冷却期也还在表里 —— 回收判断读的是连接数，探不到的那一轮不算 0。
+    response = httpx.get(base(services) + "/list_sessions", headers=SERVICE, timeout=2)
+    assert response.status_code == 200, response.text
+    sessions = response.json()["sessions"]
+    assert [s["session_id"] for s in sessions] == [session_id]
+    assert sessions[0]["connections"] == -1
 
 
 def test_biz_proxies_a_command_to_the_agent_that_owns_the_session(

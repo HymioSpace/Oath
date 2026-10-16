@@ -8,11 +8,11 @@
 | 存储 | data_root 的清理策略 | journal、buffer、traces、details 只增不减，没有裁剪或保留期 |
 | 部署 | 单机容量 | 上限是 `max_sessions` 个 scope，每个 scope 两个进程；跨机共享一个 scope 的机制后续建设 |
 | 中间件 | 队列不可用时的行为 | consumer 对异常免疫，线程不会退出；但没有降级路径：`user.message` 提交时直接回 `internal_error`，输入进不了队列。错误码也还是通用的，没区分「队列不可用」 |
-| 中间件 | supervisor 不看中间件 | 心跳只证明 agent 进程活着。队列与 buffer 长期不可用时进程看起来健康，实际不再消费 |
+| 进程 | agent 崩了没人拉起 | supervisor 只投周期唤醒，manager 只拉起和回收，都不重启。回收读连接数，而探不到的 agent 不算「0 条」，那个 scope 会一直空着直到 biz 退出 |
+| 进程 | 崩过的 scope 没法接着用 | journal 还在磁盘上，但 session 表只在内存里，没有拿它重建 agent 的路径。同一 session 重连只能等进程活着 |
+| 中间件 | 队列长期不可用时看不出来 | 队列挂了 supervisor 退避重投、consumer 退避重试，进程都还在，但没有任何地方显示「这个 scope 已经聋了一段时间」 |
 | 进程 | 线程级的存活检测 | 只测了 consumer 对异常免疫。Brain 线程与工具线程退出没有同样的保护，进程仍然会回心跳 |
-| 进程 | 崩溃后的重连语义 | agent 重启期间端口没人听，客户端要自己重连。重连之后没有代次号，客户端无从判断中间发生过什么 |
 | 进程 | 孤儿进程组 | biz 被 `kill -9` 之后，上一轮的 agent 与 supervisor 只能靠 pidfile 里的 pgid 收回；pidfile 被覆盖就再也认不出那一组 |
-| 进程 | supervisor 发现自己是孤儿 | 控制道写不出去只记一行日志，supervisor 继续跑自己的周期任务。没人管还继续强制唤醒，比没有 supervisor 更难查 |
 | 工具 | 外部 operation 对账 | running 恢复暂为 outcome_unknown；查询或幂等续执行需明确工具契约 |
 | 工具 | 可终止 worker | 线程 timeout 不终止外部动作，挂起线程持续占用物理槽位；bash 命令由执行环境自己连进程组一起杀，与线程执行是两回事 |
 | 上下文 | 压缩产物复用与精确计量 | 压缩按 scope 独立备产物；token 数是估算，未接 provider 计数器 |
@@ -25,4 +25,4 @@
 | 执行 | 沙箱执行环境 | `ExecutionEnvironment` 只有宿主机实现；换成沙箱只需换这一个类，bash 与 CLI 都不感知。宿主机实现只做了「不把服务端凭证传进命令」这一条，靠固定白名单，没有按 session 收敛文件与网络的权限 |
 | 执行 | 工具权限与命令任意性 | AllowAllPolicy 放行任意 bash 命令，等于给了 agent 宿主机 shell；越权要靠策略层与执行环境共同约束 |
 | Trace | OTLP 导出与语义化检索 | span 形状已按 OpenTelemetry 定；当前只落文件，无 exporter，按属性检索未做 |
-| Supervisor | 基于 journal 的观察策略 | 强制唤醒与心跳重启已实现；按记录内容生成 system event 的策略还没做 |
+| Supervisor | 基于 journal 的观察策略 | 目前只有周期唤醒；按记录内容生成 system event 的策略还没做 |

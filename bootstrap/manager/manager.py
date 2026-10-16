@@ -6,11 +6,13 @@ manager 维护一张 session 表，每个 scope 一对进程：一个 agent、�
 **回收只看连接数。** agent 的心跳帧带当前在线连接数；连续为 0 且过了冷却期，就优雅停掉
 这两个进程，把目录留在原地 —— journal 与 buffer 都是重启能读的东西，下次有人来
 `create_session` 同一个 session_id 就接着跑。
+
+**manager 只管拉起和回收，不重启。** agent 中途死了没有人重新拉它，那个 scope 会一直空着
+直到被按连接数回收；要接着用只能重新 `create_session`。
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import multiprocessing
@@ -23,7 +25,6 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
-from multiprocessing.connection import Connection
 from pathlib import Path
 
 from bootstrap.common.authentication import SESSION_CREDENTIAL_ENV
@@ -50,8 +51,6 @@ class SessionEntry:
     #: `BaseProcess` 而不是 `Process` —— 具体是哪个子类由 start method 决定，注解只
     #: 承诺「一个子进程」。
     supervisor: multiprocessing.process.BaseProcess | None = None
-    #: manager → supervisor 的单向控制道。supervisor 发现 agent 不在了就往这里写。
-    control: Connection | None = None
     idle_since: float | None = None
     connections: int = 0
 
@@ -177,18 +176,14 @@ class SessionManager(SessionAuthenticator):
         raise RuntimeError(f"{start}-{end} 里找不到可用端口")
 
     def _launch(self, entry: SessionEntry, *, wait: bool = True) -> None:
-        """新建一个 scope 的两个进程。只在 `create_session` 上用。
-
-        之后每一条重启都只动一个进程 —— 见 `_start_agent` 与 `_start_supervisor`。
-        """
+        """新建一个 scope 的两个进程。只在 `create_session` 上用。"""
         self._start_agent(entry, wait=wait)
         self._start_supervisor(entry)
 
     def _start_agent(self, entry: SessionEntry, *, wait: bool = False) -> None:
-        """拉起 agent。**它归 supervisor 管**，manager 只是替 supervisor 执行。
+        """拉起 agent。
 
-        **`wait` 只在 `create_session` 那条路上开。** 重启请求是后台的，manager 不能
-        停在那儿等一个端口 —— 这时候重连的活在客户端。
+        **`wait` 只在 `create_session` 那条路上开** —— 返回的 ws_url 必须当场连得上。
         """
         entry.agent = subprocess.Popen(
             [
@@ -211,29 +206,24 @@ class SessionManager(SessionAuthenticator):
             self._await_listening(entry)
 
     def _start_supervisor(self, entry: SessionEntry) -> None:
-        """拉起 supervisor。**它归 manager 管**，agent 不参与这件事。
+        """拉起 supervisor。agent 不参与这件事。
 
-        换之前先停掉旧的：**不换出一个没人管的 supervisor**，它会一直跑自己的周期任务，
-        拿着一条读者端已经关掉的控制道，把每次心跳失败都记成「重启请求发不出去」。
+        换之前先停掉旧的：**不换出一个没人管的 supervisor**，它会一直往 system 队列里投
+        强制唤醒，把这个已经没人用的 scope 叫醒。
         """
         self._stop_supervisor(entry)
-        parent, child = self._context.Pipe(duplex=False)
-        entry.control = parent
         supervisor = self._context.Process(
             target=_supervise,
             args=(
                 self._config_path,
                 entry.scope.user_id,
                 entry.scope.session_id,
-                entry.port,
-                child,
             ),
             name=f"oath-supervisor-{entry.scope.session_id}",
             daemon=True,
         )
         supervisor.start()
         entry.supervisor = supervisor
-        child.close()
 
     def _await_listening(self, entry: SessionEntry) -> None:
         """等 agent 真的接受连接。
@@ -259,9 +249,7 @@ class SessionManager(SessionAuthenticator):
         )
 
     def _stop_supervisor(self, entry: SessionEntry) -> None:
-        """停掉 supervisor 并关掉它的控制道。**先停进程，再关管道。** 反过来的话它会撞上
-        一个已经关掉的读者端，把一次正常停机报成「重启请求发不出去」。
-        """
+        """停掉 supervisor。"""
         if entry.supervisor is not None:
             entry.supervisor.terminate()
             entry.supervisor.join(timeout=self._config.supervisor.shutdown_timeout_seconds)
@@ -269,10 +257,6 @@ class SessionManager(SessionAuthenticator):
                 entry.supervisor.kill()
                 entry.supervisor.join(timeout=2)
             entry.supervisor = None
-        if entry.control is not None:
-            with contextlib.suppress(OSError):
-                entry.control.close()
-            entry.control = None
 
     def _stop_entry(self, entry: SessionEntry) -> None:
         self._stop_supervisor(entry)
@@ -289,30 +273,12 @@ class SessionManager(SessionAuthenticator):
     # -- 回收 --------------------------------------------------------------
 
     def _reap(self) -> None:
-        """一轮：收 supervisor 的重启请求、看每个 agent 的连接数、必要时回收。"""
+        """一轮：换掉死掉的 supervisor、看每个 agent 的连接数、必要时回收。"""
         while not self._stop.wait(self._config.manager.reap_interval_seconds):
             try:
                 self._reap_round()
             except Exception:
                 _log.exception("manager 一轮失败")
-
-    def _restart_requested(self, entry: SessionEntry) -> None:
-        """收 supervisor 的重启请求。agent 还活着就不理 —— 它自己比谁都清楚。"""
-        control = entry.control
-        if control is None:
-            return
-        while control.poll():
-            message = control.recv()
-            if not isinstance(message, dict) or message.get("action") != "restart_agent":
-                continue
-            _log.warning("supervisor 请求重启 %s 的 agent", entry.scope.session_id)
-            if entry.agent is not None and entry.agent.poll() is None:
-                continue
-            try:
-                self._start_agent(entry)
-            except Exception:
-                _log.exception("重启 agent 失败")
-            return
 
     def _reap_round(self) -> None:
         now = time.monotonic()
@@ -320,20 +286,18 @@ class SessionManager(SessionAuthenticator):
         with self._lock:
             entries = tuple(self._sessions.values())
         for entry in entries:
-            self._restart_requested(entry)
             if entry.supervisor is not None and not entry.supervisor.is_alive():
-                # supervisor 自己没了。agent 还活着，但它该有人看 —— 换一个。
-                # **只换 supervisor。** agent 有 supervisor 这一个主人，由 supervisor
-                # 通过重启请求来管；manager 越过它去动 agent 就是两个主人。
+                # supervisor 自己没了，换一个。agent 不动 —— 它是 agent 唯一的主人。
                 _log.warning("supervisor 退出，重换一个 %s", entry.scope.session_id)
                 try:
                     self._start_supervisor(entry)
                 except Exception:
                     _log.exception("重启 supervisor 失败")
-            timeout = self._config.supervisor.heartbeat_timeout_seconds
+            timeout = self._config.manager.probe_timeout_seconds
             connections = _probe_connections(entry, timeout)
             if connections is None:
-                # 探不到就是 agent 不在。supervisor 负责重启，这里不抢它的活。
+                # 探不到就是 agent 不在了。**没人重启它** —— supervisor 现在只管周期
+                # 唤醒。这个 scope 会一直空着，直到有人重新 `create_session`。
                 entry.connections = -1
                 entry.idle_since = None
                 continue
@@ -352,13 +316,11 @@ class SessionManager(SessionAuthenticator):
             self._stop_entry(entry)
 
 
-def _supervise(
-    config_path: str, user_id: str, session_id: str, port: int, control: Connection
-) -> None:
+def _supervise(config_path: str, user_id: str, session_id: str) -> None:
     """supervisor 子进程的入口。真正干活的是 `bootstrap.supervisor.watchdog`。"""
     from bootstrap.supervisor.watchdog import supervise
 
-    supervise(config_path, user_id, session_id, port, control)
+    supervise(config_path, user_id, session_id)
 
 
 def _probe_connections(entry: SessionEntry, timeout: float) -> int | None:

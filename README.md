@@ -31,7 +31,7 @@ Incoming events land in a persistent buffer, not the journal: an append-only jou
 
 ### Supervisor — keep execution moving
 
-Every session has its own supervisor process. It periodically publishes a `system.invoke` event — an event, not a call — that wakes the agent to re-examine buffered input, and it watches its agent's heartbeat and asks the manager to restart it with bounded backoff. Sessions are reclaimed on connection count alone. Empty buffers require no LLM call. See the [Supervisor design](spec/feature-supervisor.md).
+Every session has its own supervisor process. It periodically publishes a `system.invoke` event — an event, not a call — that wakes the agent to re-examine buffered input. Sessions are reclaimed on connection count alone. Empty buffers require no LLM call. See the [Supervisor design](spec/feature-supervisor.md).
 
 Together, these principles define how Oath reacts to new work, preserves what happened, and identifies when execution needs intervention.
 
@@ -74,9 +74,9 @@ One process starts everything:
 | --- | --- | --- |
 | biz (with the session manager) | `http://127.0.0.1:8766` | `create_session`, trace queries, CLI commands |
 | agent, one per session | `ws://127.0.0.1:<allocated>` | Messages, approvals, streamed events |
-| supervisor, one per session | No listener | Forced wake-ups and agent health |
+| supervisor, one per session | No listener | Forced wake-ups |
 
-The manager allocates a port, signs a session credential, and launches the agent and supervisor pair. Queues and buffers live outside every process, so an agent can be killed and restarted without losing accepted input. The manager reclaims a session when its connection count stays at zero past the grace period.
+The manager allocates a port, signs a session credential, and launches the agent and supervisor pair. Queues and buffers live outside every process, so accepted input outlives any single process. The manager reclaims a session when its connection count stays at zero past the grace period.
 
 The example is for local use: the default tool policy allows all calls. Bash executes on the host; `workspace_root` is its default working directory, **not a sandbox boundary**. See the [tool permissions](spec/feature-tool-system.md) and [execution environment](spec/feature-bash-cli.md) designs before exposing it to other users.
 
@@ -154,7 +154,7 @@ Start with the [extension guide](spec/feature-extensions.md) and the included [C
 | [Client integration](spec/manual.md) | WebSocket protocol, HTTP APIs, and examples |
 | [Events and approvals](spec/feature-intake.md) | Scheduling, tool batches, and approval handling |
 | [Durability](spec/feature-journal.md) | Journal, state persistence, and restart recovery |
-| [Supervisor](spec/feature-supervisor.md) | Independent process, heartbeats, wake-up signals, and restarts |
+| [Supervisor](spec/feature-supervisor.md) | Independent process, periodic wake-up events |
 | [Context compaction](spec/feature-compaction.md) | Tool output limits and history compression |
 | [Tracing](spec/feature-trace.md) | Step relationships, model calls, and metrics |
 | [Extensions](spec/feature-extensions.md) | Tools, CLI commands, and skills |

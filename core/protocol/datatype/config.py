@@ -166,6 +166,8 @@ class ManagerConfig:
     port_range_end: int = 8899
     #: 轮询连接数的间隔。
     reap_interval_seconds: float = 5.0
+    #: 单次连接数探测最多等多久。**短于间隔** —— 慢探测不能连着慢两轮。
+    probe_timeout_seconds: float = 3.0
     #: 连接数连续为 0 多久之后回收这个 scope。给重连留一段冷却。
     idle_grace_seconds: float = 60.0
     #: 拉起 agent 之后等它接受连接等多久。**`create_session` 要等这个过了才返回** ——
@@ -177,10 +179,17 @@ class ManagerConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} 必须是正整数")
-        for name in ("reap_interval_seconds", "idle_grace_seconds", "launch_timeout_seconds"):
+        for name in (
+            "reap_interval_seconds",
+            "idle_grace_seconds",
+            "launch_timeout_seconds",
+            "probe_timeout_seconds",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须是有限正数")
+        if self.probe_timeout_seconds >= self.reap_interval_seconds:
+            raise ValueError("probe_timeout_seconds 必须小于 reap_interval_seconds")
         for value, name in (
             (self.port_range_start, "port_range_start"),
             (self.port_range_end, "port_range_end"),
@@ -193,47 +202,27 @@ class ManagerConfig:
 
 @dataclass(frozen=True, slots=True)
 class SupervisorConfig:
-    """每个 scope 的 supervisor：看住自己的 agent，定时投一次强制唤醒。
+    """每个 scope 的 supervisor：定时投一次强制唤醒。"""
 
-    全部有缺省值：这些数字描述的是「多久看一眼」，配错的后果是发现故障晚一点或重启
-    勤一点，没有配错就不工作的可能。所有时间量都校验为有限正数。
-    """
-
-    #: 存活探测的间隔。
-    heartbeat_interval_seconds: float = 5.0
-    #: 单次探测最多等多久。**短于间隔** —— 慢检查不能连着慢两轮。
-    heartbeat_timeout_seconds: float = 3.0
-    #: 连续失败多少次才请 manager 重启那个 agent。
-    heartbeat_failures_before_restart: int = 3
     #: 往 system 队列投 `system.invoke` 的间隔。**强制唤醒**：让 idle 的模型再看一眼
     #: 攒着的输入与工具结果，投递本身不进 buffer。
     invoke_interval_seconds: float = 30.0
-    #: 连续启动失败后的重启退避，按失败次数翻倍，到这个值封顶。
-    restart_backoff_seconds: float = 1.0
-    restart_backoff_cap_seconds: float = 60.0
-    #: 连续启动失败到这个次数就冷却一轮（退到上限再试），免得永久锁死在重启循环里。
-    restart_failure_limit: int = 5
+    #: 单次投递最多等多久。**短于间隔** —— 慢投递不能连着慢两轮。
+    invoke_timeout_seconds: float = 5.0
     #: 请求一个进程退出后等多久，超过了就终止它。
     shutdown_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         for name in (
-            "heartbeat_interval_seconds",
-            "heartbeat_timeout_seconds",
             "invoke_interval_seconds",
-            "restart_backoff_seconds",
-            "restart_backoff_cap_seconds",
+            "invoke_timeout_seconds",
             "shutdown_timeout_seconds",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} 必须是有限正数")
-        for name in ("heartbeat_failures_before_restart", "restart_failure_limit"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} 必须是正整数")
-        if self.heartbeat_timeout_seconds >= self.heartbeat_interval_seconds:
-            raise ValueError("heartbeat_timeout_seconds 必须小于 heartbeat_interval_seconds")
+        if self.invoke_timeout_seconds >= self.invoke_interval_seconds:
+            raise ValueError("invoke_timeout_seconds 必须小于 invoke_interval_seconds")
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +255,7 @@ class OathConfig:
                 "port_range_start": self.manager.port_range_start,
                 "port_range_end": self.manager.port_range_end,
                 "reap_interval_seconds": self.manager.reap_interval_seconds,
+                "probe_timeout_seconds": self.manager.probe_timeout_seconds,
                 "idle_grace_seconds": self.manager.idle_grace_seconds,
                 "launch_timeout_seconds": self.manager.launch_timeout_seconds,
             },
@@ -307,15 +297,8 @@ class OathConfig:
                 "llm_retry_delay": self.agent.llm_retry_delay,
             },
             "supervisor": {
-                "heartbeat_interval_seconds": self.supervisor.heartbeat_interval_seconds,
-                "heartbeat_timeout_seconds": self.supervisor.heartbeat_timeout_seconds,
-                "heartbeat_failures_before_restart": (
-                    self.supervisor.heartbeat_failures_before_restart
-                ),
                 "invoke_interval_seconds": self.supervisor.invoke_interval_seconds,
-                "restart_backoff_seconds": self.supervisor.restart_backoff_seconds,
-                "restart_backoff_cap_seconds": self.supervisor.restart_backoff_cap_seconds,
-                "restart_failure_limit": self.supervisor.restart_failure_limit,
+                "invoke_timeout_seconds": self.supervisor.invoke_timeout_seconds,
                 "shutdown_timeout_seconds": self.supervisor.shutdown_timeout_seconds,
             },
         }

@@ -4,9 +4,9 @@
 在线事件经 runtime 的 `OutboundHub` 投递，断线后用 session.status 查询当前持久化
 状态。session 绑定后不允许客户端重新声明身份。
 
-`/heartbeat` 是给 supervisor 与 manager 的**专用**连接：连上就收到一帧 alive 与当前
-在线连接数，不发 command、不绑 session，也不占连接配额，所以它不会顶掉任何业务连接。
-manager 靠这个连接数判断 scope 还有没有人用。
+`/heartbeat` 是给 manager 的**专用**连接：连上就收到一帧 alive 与当前在线连接数，不发
+command、不绑 session，也不占连接配额，所以它不会顶掉任何业务连接。manager 靠这个连接数
+判断 scope 还有没有人用。
 
 它探的是**进程**，不是健康。答得出「accept 与写帧这条路还通」，答不出消费线程与 Brain
 是否还活着 —— 那几样坏了，这个进程一样回心跳。

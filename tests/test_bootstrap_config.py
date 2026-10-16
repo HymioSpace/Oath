@@ -68,36 +68,27 @@ def test_the_supervisor_block_is_read(tmp_path: Path) -> None:
     config = load_config(
         _write(
             tmp_path,
-            "[supervisor]\n"
-            "heartbeat_interval_seconds = 2.0\n"
-            "heartbeat_timeout_seconds = 1.0\n"
-            "invoke_interval_seconds = 12.5\n",
+            "[supervisor]\ninvoke_interval_seconds = 12.5\ninvoke_timeout_seconds = 2.5\n",
         )
     )
 
-    assert config.supervisor.heartbeat_interval_seconds == 2.0
     assert config.supervisor.invoke_interval_seconds == 12.5
+    assert config.supervisor.invoke_timeout_seconds == 2.5
     # 没写的那些各自有自己的默认值。
-    assert config.supervisor.restart_backoff_cap_seconds == 60.0
+    assert config.supervisor.shutdown_timeout_seconds == 5.0
 
 
 def test_the_supervisor_keeps_its_defaults_when_absent(tmp_path: Path) -> None:
     config = load_config(_write(tmp_path, MINIMAL))
 
-    assert config.supervisor.heartbeat_interval_seconds == 5.0
     assert config.supervisor.invoke_interval_seconds == 30.0
+    assert config.supervisor.invoke_timeout_seconds == 5.0
 
 
-def test_an_infinite_heartbeat_interval_is_refused() -> None:
-    """这些值是要拿来当定时与超时的。`inf` 会让一个服务永远等不到重启。"""
-    with pytest.raises(ValueError, match="heartbeat_interval_seconds"):
-        SupervisorConfig(heartbeat_interval_seconds=float("inf"))
-
-
-def test_a_timeout_longer_than_its_interval_is_refused() -> None:
-    """探测比间隔还久：每一轮都在等上一轮。"""
-    with pytest.raises(ValueError, match="heartbeat_timeout_seconds"):
-        SupervisorConfig(heartbeat_interval_seconds=1.0, heartbeat_timeout_seconds=2.0)
+def test_an_infinite_invoke_interval_is_refused() -> None:
+    """这些值是要拿来当定时与超时的。`inf` 会让这个周期任务永远等不到下一轮。"""
+    with pytest.raises(ValueError, match="invoke_interval_seconds"):
+        SupervisorConfig(invoke_interval_seconds=float("inf"))
 
 
 def test_the_agent_block_is_read(tmp_path: Path) -> None:
