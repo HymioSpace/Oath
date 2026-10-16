@@ -4,9 +4,12 @@
 
 ## 1 总览
 
-**每个 scope 一个 supervisor 进程。** 它和那个 scope 的 agent 推理没有任何关系，只做两件
-事：定时往 system 队列投一条 `system.invoke`，以及看住自己的 agent —— 不在了就请 manager
-重启。
+**每个 scope 一个 supervisor 进程。** 它站在那个 scope 的 agent 之外：观察它，判断现在
+需不需要干预，需要就往队列里投事件。**干预的形式只有投事件这一种** —— 它不碰 agent 的
+执行本身，也不替它做决定。
+
+心跳探测与周期唤醒是**目前落地的两项能力，不是这个定位的全部**。这个定位说的是「谁站在
+agent 外面判断」，不是「现在这两个定时器」。
 
 ```mermaid
 flowchart LR
@@ -19,13 +22,17 @@ flowchart LR
 
 规则：
 
-1. **它不读 journal、不发输入、不看连接数。** 语义干预只有投事件这一种形式。
+1. **目前它不读 journal、不发输入、不看连接数。** 这是当前实现的边界，不是这个角色的
+   边界。语义干预只有投事件这一种形式。
 2. **`system.invoke` 是一个事件，不是一次调用。** 没有 invoke 接口，也没有进程需要
    保持在线才能被 invoke —— 队列本来就是异步的。
 3. **这条事件不进 buffer，也不进模型上下文。** 它只是把 Brain 叫醒一趟。空 buffer
    不产生 step、不调用模型。
 4. **它不重启自己。** supervisor 自己没了由 manager 换一个新的；agent 没了由 supervisor
-   请 manager 重启 —— 两条路分开，谁都只有一个负责人。
+   请 manager 重启 —— 两条路分开，谁都只有一个负责人。manager 换 supervisor 时只换
+   supervisor：agent 那一个主人是 supervisor，manager 越过它去动就是两个主人。
+5. **心跳证明的是进程，不是健康。** `/heartbeat` 走完真实的 accept 循环，回一帧连接数
+   就断；它答得出「agent 还在接受连接」，答不出消费线程与 Brain 是否还活着。
 
 ## 2 两级干预的分工
 

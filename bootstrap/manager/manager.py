@@ -177,10 +177,18 @@ class SessionManager(SessionAuthenticator):
         raise RuntimeError(f"{start}-{end} 里找不到可用端口")
 
     def _launch(self, entry: SessionEntry, *, wait: bool = True) -> None:
-        """拉起这个 scope 的两个进程。agent 挂了由 supervisor 请 manager 重来。
+        """新建一个 scope 的两个进程。只在 `create_session` 上用。
+
+        之后每一条重启都只动一个进程 —— 见 `_start_agent` 与 `_start_supervisor`。
+        """
+        self._start_agent(entry, wait=wait)
+        self._start_supervisor(entry)
+
+    def _start_agent(self, entry: SessionEntry, *, wait: bool = False) -> None:
+        """拉起 agent。**它归 supervisor 管**，manager 只是替 supervisor 执行。
 
         **`wait` 只在 `create_session` 那条路上开。** 重启请求是后台的，manager 不能
-        停在那儿等一个端口。
+        停在那儿等一个端口 —— 这时候重连的活在客户端。
         """
         entry.agent = subprocess.Popen(
             [
@@ -199,6 +207,16 @@ class SessionManager(SessionAuthenticator):
             stdin=subprocess.DEVNULL,
             env={**os.environ, SESSION_CREDENTIAL_ENV: entry.credential},
         )
+        if wait:
+            self._await_listening(entry)
+
+    def _start_supervisor(self, entry: SessionEntry) -> None:
+        """拉起 supervisor。**它归 manager 管**，agent 不参与这件事。
+
+        换之前先停掉旧的：**不换出一个没人管的 supervisor**，它会一直跑自己的周期任务，
+        拿着一条读者端已经关掉的控制道，把每次心跳失败都记成「重启请求发不出去」。
+        """
+        self._stop_supervisor(entry)
         parent, child = self._context.Pipe(duplex=False)
         entry.control = parent
         supervisor = self._context.Process(
@@ -216,8 +234,6 @@ class SessionManager(SessionAuthenticator):
         supervisor.start()
         entry.supervisor = supervisor
         child.close()
-        if wait:
-            self._await_listening(entry)
 
     def _await_listening(self, entry: SessionEntry) -> None:
         """等 agent 真的接受连接。
@@ -242,9 +258,10 @@ class SessionManager(SessionAuthenticator):
             f"agent 在 {self._config.manager.launch_timeout_seconds}s 内没有接受连接"
         )
 
-    def _stop_entry(self, entry: SessionEntry) -> None:
-        # **先停 supervisor，再关控制道。** 反过来的话 supervisor 会撞上一个已经关掉的
-        # 管道，把一次正常停机报成「重启请求发不出去」。
+    def _stop_supervisor(self, entry: SessionEntry) -> None:
+        """停掉 supervisor 并关掉它的控制道。**先停进程，再关管道。** 反过来的话它会撞上
+        一个已经关掉的读者端，把一次正常停机报成「重启请求发不出去」。
+        """
         if entry.supervisor is not None:
             entry.supervisor.terminate()
             entry.supervisor.join(timeout=self._config.supervisor.shutdown_timeout_seconds)
@@ -256,6 +273,9 @@ class SessionManager(SessionAuthenticator):
             with contextlib.suppress(OSError):
                 entry.control.close()
             entry.control = None
+
+    def _stop_entry(self, entry: SessionEntry) -> None:
+        self._stop_supervisor(entry)
         if entry.agent is not None:
             if entry.agent.poll() is None:
                 entry.agent.terminate()
@@ -289,7 +309,7 @@ class SessionManager(SessionAuthenticator):
             if entry.agent is not None and entry.agent.poll() is None:
                 continue
             try:
-                self._launch(entry, wait=False)
+                self._start_agent(entry)
             except Exception:
                 _log.exception("重启 agent 失败")
             return
@@ -302,10 +322,12 @@ class SessionManager(SessionAuthenticator):
         for entry in entries:
             self._restart_requested(entry)
             if entry.supervisor is not None and not entry.supervisor.is_alive():
-                # supervisor 自己没了。agent 还活着，但它该有人看 —— 换一个新的。
+                # supervisor 自己没了。agent 还活着，但它该有人看 —— 换一个。
+                # **只换 supervisor。** agent 有 supervisor 这一个主人，由 supervisor
+                # 通过重启请求来管；manager 越过它去动 agent 就是两个主人。
                 _log.warning("supervisor 退出，重换一个 %s", entry.scope.session_id)
                 try:
-                    self._launch(entry, wait=False)
+                    self._start_supervisor(entry)
                 except Exception:
                     _log.exception("重启 supervisor 失败")
             timeout = self._config.supervisor.heartbeat_timeout_seconds

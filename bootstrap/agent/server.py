@@ -5,8 +5,11 @@
 状态。session 绑定后不允许客户端重新声明身份。
 
 `/heartbeat` 是给 supervisor 与 manager 的**专用**连接：连上就收到一帧 alive 与当前
-在线连接数，不发 command、不绑 session，所以它探的是「这个进程的 server 循环还在处理
-连接」，不会顶掉任何业务连接。manager 靠这个连接数判断 scope 还有没有人用。
+在线连接数，不发 command、不绑 session，也不占连接配额，所以它不会顶掉任何业务连接。
+manager 靠这个连接数判断 scope 还有没有人用。
+
+它探的是**进程**，不是健康。答得出「accept 与写帧这条路还通」，答不出消费线程与 Brain
+是否还活着 —— 那几样坏了，这个进程一样回心跳。
 
 只读查询不在这里 —— 走 biz 的 HTTP server。查询不是 command。
 """
@@ -51,8 +54,10 @@ _HEARTBEAT_PATH: Final = "/heartbeat"
 async def _serve_heartbeat(connection: ServerConnection, service: SessionService) -> None:
     """专用探测连接：回一帧 alive 与连接数就断。
 
-    **不绑 session、不改任何状态。** 它必须走完 server 的连接处理循环 —— 一个旁路
-    线程报 alive，证明不了 accept 与写帧这条路还通。
+    **不绑 session、不改任何状态、不占连接配额。** 它必须走完 server 的连接处理循环
+    —— 一个旁路线程报 alive，证明不了 accept 与写帧这条路还通。
+
+    **它只探到进程这一层。** 消费线程与 Brain 是不是还活着，这一帧答不了。
     """
     try:
         await connection.send(
