@@ -5,25 +5,42 @@
 ## 1 启动与连接
 
 ```bash
-export MINIMAX_API_KEY=...  # 按配置的 api_key_env 设置
-uv run python scripts/run_runtime.py --config oath.toml
+export OPENAI_API_KEY=...      # 按配置的 api_key_env 设置
+export OATH_SERVICE_TOKEN=...  # 配在 oath.toml 的 service_credentials 里
+uv run python -m bootstrap.biz.process --config oath.toml
 ```
 
-默认监听 `ws://127.0.0.1:8765`；biz server 在 `http://127.0.0.1:8766`，整个 biz
-一个端口，每条查询是其中一个 path。配置中的
-credential 映射仅用于演示；部署由 Hymio 提供身份与权限策略。
+**biz 一个进程就够。** 它自己带 manager，agent 与 supervisor 进程由 manager 在
+`create_session` 时拉起，每条连接落在各自那个 agent 的 WebSocket 上。
 
-先发送：
+先向 biz 要一个 session：
+
+```bash
+curl -X POST -H "Authorization: Bearer $OATH_SERVICE_TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"user_id":"demo"}' http://127.0.0.1:8766/create_session
+```
 
 ```json
-{"v":1,"type":"session.open","id":"open-1","payload":{"credential":"synthetic-demo-token"}}
+{"user_id":"demo","session_id":"6f1c9b2d3e4a5f60","ws_url":"ws://127.0.0.1:8837",
+ "credential":"<该 session 专属的 token>"}
+```
+
+**`session_id` 由服务端生成，`credential` 由 manager 签发** —— 客户端不起 session 的名
+字，也不自己造凭证。scope 满了（`max_sessions`）直接回 `503 {"error":"session_limit"}`，
+不排队。
+
+再连上那个 `ws_url`，先发送：
+
+```json
+{"v":1,"type":"session.open","id":"open-1","payload":{"credential":"<上一步返回的 credential>"}}
 ```
 
 收到绑定回执后，所有 command 都带返回的 session_id：
 
 ```json
-{"v":1,"type":"ack","id":"open-1","session_id":"default"}
-{"v":1,"type":"user.message","id":"user-1","session_id":"default","payload":{"content":"帮我查天气","user_context":{"project":"hymio"}}}
+{"v":1,"type":"ack","id":"open-1","session_id":"6f1c9b2d3e4a5f60"}
+{"v":1,"type":"user.message","id":"user-1","session_id":"6f1c9b2d3e4a5f60","payload":{"content":"帮我查天气","user_context":{"project":"hymio"}}}
 ```
 
 user_id 由服务端认证决定。credential 不认则 close unauthorized，不回落为匿名用户。
@@ -56,7 +73,7 @@ session.status 不产生输入、不改任何状态，可以随时重发。trace
 permission.requested 带 invocation_id、batch_id、tool、arguments、expires_at。展示原动作并提交裁定：
 
 ```json
-{"v":1,"type":"permission.decide","id":"decision-1","session_id":"default","payload":{"invocation_id":"step-example-0","status":"approved"}}
+{"v":1,"type":"permission.decide","id":"decision-1","session_id":"<create_session 返回的 session_id>","payload":{"invocation_id":"step-example-0","status":"approved"}}
 ```
 
 批准后直接执行该原调用；UI 等 tool.terminal 或查询状态，不需要发送新的 user.message。
@@ -78,12 +95,13 @@ step failed / paused 时提供显式“重试 / 继续”，发送 step.retry；
 直到某个 step 不再要工具为止。
 
 查询走 biz server 的 HTTP 接口，不在 WebSocket 上：它不产生 ACK、不改任何状态，
-塞进 command/event 协议里是拧的。两个 server 共用一套 credential。
+塞进 command/event 协议里是拧的。带的是那个 session 的 credential。
 
 path 就是动作名，参数走 query string：`GET /list_traces`、`GET /query_trace`。
 
 ```bash
-TOKEN=synthetic-demo-token
+# TOKEN 是 create_session 返回的那个 session 专属凭证，不是服务级凭证。
+TOKEN=<create_session 返回的 credential>
 BASE=http://127.0.0.1:8766
 ```
 
@@ -92,8 +110,8 @@ BASE=http://127.0.0.1:8766
 `trace_id` 在 step 被认领时就定了，之后不变。当前运行的那个从 session.status 拿：
 
 ```json
-{"v":1,"type":"session.status","id":"s1","session_id":"default","payload":{}}
-{"v":1,"type":"event","session_id":"default","event_type":"session.status","payload":{"run_id":"...","step_id":"...","trace_id":"6f1c9b2d...","step_status":"prepared"}}
+{"v":1,"type":"session.status","id":"s1","session_id":"<create_session 返回的 session_id>","payload":{}}
+{"v":1,"type":"event","session_id":"<create_session 返回的 session_id>","event_type":"session.status","payload":{"run_id":"...","step_id":"...","trace_id":"6f1c9b2d...","step_status":"prepared"}}
 ```
 
 运行结束后 `step_id` 变 `null`，`trace_id` 留着最后开的那条 —— 刚跑完的这一轮
@@ -186,8 +204,8 @@ uv run pytest -q tests/test_biz_server.py tests/test_biz_trace.py tests/test_tra
 
 ## 5 CLI 代理
 
-业务命令挂在 biz server 上，与 trace 查询同一个端口、同一套 credential。模型在 bash 里
-执行 `oath-cli <命令名> [参数...] [--key=value]` 调它们。
+业务命令挂在 biz server 上，与 trace 查询同一个端口、同一个 session 的 credential。
+模型在 bash 里执行 `oath-cli <命令名> [参数...] [--key=value]` 调它们。
 
 列出可用命令（`oath-cli` 不带参数时打的就是这条）：
 
@@ -222,7 +240,7 @@ credential 不认 401。同一个 path 用 GET 打会回 405。命令自己抛�
 事件信封：
 
 ```json
-{"v":1,"type":"event","session_id":"default","event_type":"assistant.message","occur_dt":"2026-10-14T00:00:00Z","payload":{"step_id":"step-example","content":"好的","reasoning":null,"tool_calls":[],"usage":null}}
+{"v":1,"type":"event","session_id":"<create_session 返回的 session_id>","event_type":"assistant.message","occur_dt":"2026-10-14T00:00:00Z","payload":{"step_id":"step-example","content":"好的","reasoning":null,"tool_calls":[],"usage":null}}
 ```
 
 | event_type | 关键字段 |
@@ -290,11 +308,12 @@ tool_result_detail_chars = 200
 在仓库目录启动服务，另开终端连接：
 
 ```bash
-uv run python scripts/run_runtime.py --config oath.toml
-PYTHONPATH=. uv run python scripts/terminal_client.py --url ws://127.0.0.1:8765 --token demo-token
+uv run python -m bootstrap.biz.process --config oath.toml
+uv run python scripts/terminal_client.py --user-id compaction-check
 ```
 
-token 使用本地配置里对应的凭据。终端客户端会打印 context.compaction 事件。
+终端客户端自己调 `create_session` 换凭证，再连上那个 scope 的 WebSocket，并打印
+context.compaction 事件。
 
 1. 连续发送几段各约 500 汉字的合成资料，带不同编号，要求助手只回复“已记录”。
    逐条等回复；消息数量需超过保留的 4 条，且可压前缀大于摘要预算。
@@ -305,12 +324,13 @@ token 使用本地配置里对应的凭据。终端客户端会打印 context.co
    不能按“压缩成功”验收；LLM 摘要质量需要实际模型验证。
 5. 要求调用 echo 返回超过 200 字符的合成文本，查看 tool.terminal 的截断提示与 detail_key；
    再要求调用 detail_read 读取该 key，确认取回完整正文且未再次截断。
-6. 重启服务并用同一凭据连接；通过 session.status 查询产物，再发送一句短消息，验证恢复后继续使用摘要。
+6. 退出客户端（连接断开、连接数归零），等 manager 过冷却期回收这个 scope；重新运行终端
+   客户端会拿到一个新的 session —— 要验证的是旧 session 的目录还在、journal 读得回来。
 
 session.status 是 WebSocket command；当前终端客户端仅发送聊天消息。可使用支持原始帧的客户端发送：
 
 ```json
-{"v":1,"type":"session.status","id":"status-unique-id","session_id":"default","payload":{}}
+{"v":1,"type":"session.status","id":"status-unique-id","session_id":"<create_session 返回的 session_id>","payload":{}}
 ```
 
 自动化链路检查使用替身模型和客户端通道，不调用真实模型：

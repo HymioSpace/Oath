@@ -1,6 +1,6 @@
 # Feature — Agent Runtime
 
-状态：Implemented（单进程执行）；输入与审批规则见 [Intake](feature-intake.md)。
+状态：Implemented（每 scope 一个进程）；输入与审批规则见 [Intake](feature-intake.md)。
 
 ## 总览
 
@@ -8,12 +8,12 @@
 
 ```mermaid
 flowchart LR
-    C[Consumer 请求 wake] --> Claim[原子认领三个 buffer]
+    C[Consumer 请求 wake] --> Claim[原子认领输入]
     Claim --> Request[保存请求与 tool 槽位]
     Request --> LLM[模型调用]
     LLM --> Save[保存完整响应]
     Save --> Batch[幂等登记工具 batch]
-    Batch --> Done[完成本步，通知 consumer 重查]
+    Batch --> Done[完成本步]
     Save -->|无工具| Done
 ```
 
@@ -34,20 +34,20 @@ Brain 共用 RuntimeStore、ToolSystem、EventQueue、AgentEventSink 与 AgentCo
 
 ## 2 唤醒与认领
 
-`wake(scope, trigger, event_ids)` 只登记唤醒并返回。每个 session 一个 Brain worker；
-忙时合并触发，consumer 继续接收事件。执行空闲后，触发 IDs 至少有一个仍在 buffer 才认领。
-已经被别的 wake 收走的触发不产生空模型请求。
+`wake(scope)` 只叫醒 Brain。每个 scope 一个 Brain worker；忙时合并触发，consumer 继续接收
+事件。**wake 不带内容** —— Brain 被叫醒之后自己去看 buffer 有没有东西。
 
 认领在一个 scope 事务内完成：
 
-1. 如果已有 active step，恢复它；失败或暂停态不越过。
-2. 选取三个 buffer 全部 `buffered` 输入，按持久化 receipt 序列排列。
+1. 如果已有 active step，直接返回它，失败或暂停态不越过。
+2. 从三条队列的 buffer 里取出全部输入（`get_all` 是原子的，取走即移出）。
 3. 关闭未呈现 batch 的全部 tool response 槽位，保存真实结果或 reminder。
-4. 保存 provider-neutral 请求草稿、step/run/trace 身份、输入 IDs 和状态。
-5. 输入变为 claimed，batch 的 presented_by_step 固定。
+4. 保存 provider-neutral 请求草稿、step/run/trace 身份、输入 ID 与 `trigger`，输入标为
+   `claimed`。
+5. 事务提交后这批输入标为 `done`。认领失败则把这批输入原样放回 buffer。
 
-context 草稿与认领同事务完成；锁外压缩后，step.request 保存最终请求。锁内不执行网络或工具。
-认领提交后通知各 consumer 重查，避免 presented 变化后遗漏后到结果。
+**取走与写进 journal 是一个事务的两半**：取不到输入就什么都不做，一样也不写。写失败就把
+输入放回去 —— 否则那批输入既不在 buffer 里也不在 journal 里，就永远没了。
 
 ## 3 Context 与请求
 
@@ -74,8 +74,8 @@ system message 是 `system_prompt` 加上 [Skill](feature-skill.md) 的技能索
 每个工具的 batch 与 invocation 身份从已保存 step 推导；重复派发登记只返回原调用。
 模型响应已经保存时，恢复只补后处理，不再调用模型。
 
-step.completed 把 assistant 消息追加到 conversation，只把该 step 的 input IDs 标为 done，
-释放 active_step 并通知 consumer。模型不再声明工具、没有新输入时停驻。
+step.completed 把 assistant 消息追加到 conversation，只把该 step 的输入标为 done，释放
+active_step。模型不再声明工具、buffer 也空了，就停驻。
 
 assistant.delta 为在线展示，带 step_id、channel、seq；不参与恢复。完整 assistant.message 已保存
 才推送。网络重试可能重新流式输出；客户端应以最终消息 / session.status 替换草稿。
@@ -100,7 +100,8 @@ provider 自身必须有有限 I/O timeout；Brain 不能安全强杀任意第�
 
 ## 6 边界与跨仓库影响
 
-- JSONL + RuntimeStore 只支持单进程 writer，不提供多机 owner lease / fencing。
+- 一个 scope 一个进程。JSONL + RuntimeStore 只支持单进程 writer，不提供多机 owner lease /
+  fencing —— 同一个 scope 没法在两台机器上各跑一个进程。
 - 未保存的模型响应可能重试并重复计费；未保存响应中的工具不会执行。
 - 输入、conversation 与工具结果在日志里保留全文；压缩与截断只改发给模型的那一份。
 - 日志全量保留，长会话的存储与恢复成本尚未做裁剪和分页。

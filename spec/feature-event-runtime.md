@@ -1,60 +1,69 @@
 # Feature — 事件通路与客户端接入
 
-状态：Implemented（WebSocket + 三条内部通知队列）。
+状态：Implemented（WebSocket + 三条进程外队列）。
 
 ## 总览
 
-**输入先保存，队列只通知；三个 consumer 各自判断唤醒；在线推送失败可通过状态查询恢复视图。**
+**输入到达不落 journal：先进队列，再进 buffer，被 Brain 认领时才写进去。
+三个 consumer 各自判断唤醒；在线推送失败可通过状态查询恢复视图。**
 
 ```mermaid
 flowchart LR
     WS[客户端 command] --> Auth[绑定身份 / 校验]
-    Auth --> Store[可靠接纳输入]
-    Store --> ACK[ACK]
-    Store --> Queue[user / tool / system]
-    Queue --> Consumer[各自 consumer + buffer]
-    Consumer --> Brain[Brain.wake]
+    Auth --> ACK[ACK]
+    Auth --> Queue[user / tool / system 队列]
+    Queue --> Consumer[各自 consumer]
+    Consumer -->|add| Buffer[持久 buffer]
+    Consumer -->|判断唤醒，一次 get_all 取走| Intake[Intake 原子认领 → Journal]
+    Intake --> Brain[Brain]
     Brain --> UI[在线 event]
-    Query[session.status] --> Store
+    Query[session.status] --> Journal
 ```
 
-输入的可靠性属于 RuntimeStore；EventQueue 无持久化承诺。工具终态在工具系统同事务创建可靠输入，
-不经过客户端 sink 再绕回 runtime。各模块共享 Journal，不等 Brain 决定是否落盘。
+**ACK 表示「已经投进队列」，不表示「已经记下来了」。** journal 里没有「收到但没处理」这一档：
+没有记录的输入就是还没轮它处理，那份事实活在持久 buffer 里，进程重启也还在。
+工具终态写在工具系统的同一个事务里，投递到队列发生在事务提交之后。
 
 ## 1 内部通路
 
 | queue | 输入 | consumer |
 | --- | --- | --- |
-| user | user.message | 有 buffered 用户输入即 wake |
-| tool | tool.terminal | 按 initial_submitted / presented / 固定 deadline 判断 |
-| system | permission.decide、permission.expire、run.cancel、step.retry、system.invoke | 先执行控制动作；仅 invoke 直接 wake |
+| user | user.message | 进 buffer 即 wake；附带同步 user_context |
+| tool | tool.terminal | 进 buffer；按 initial_submitted / presented / 固定 deadline 决定是否 wake |
+| system | permission.decide、permission.expire、run.cancel、step.retry | 进 buffer，先执行控制动作 |
+| system | system.invoke | **不进 buffer**，只强制 wake |
 
-每条 queue 有独立 wait 和 revision；consumer 先读 revision，再 consume / evaluate / wait，
-防止消息恰好在检查与睡眠之间到来。另一条 queue 非空不会使当前 consumer 忙循环。
-Brain 认领和完成时 notify，要求 consumer 重查自身条件，notify 本身不是模型输入。
+`Inbound.kind` 恒等于队列名 —— 没有第二个来源给同一条输入分类。
 
-消费者同时扫描可靠 accepted 输入，queue 漏通知或重启丢失不丢事实。
-SystemConsumer 应用控制动作后才保存 receipt；重复控制命令不会重复审批、取消新 run 或重置重试计数。
-ToolConsumer 校验终态与 ToolSystem 保存的事实一致，无效消息单独 rejected 并报告，其他结果继续处理。
+每个 consumer 就是三步：收到事件 → `buffer.add` → 判断要不要 wake。要 wake 就把 buffer
+一次 `get_all` 全取走（取走即移出），交给 Brain 的 intake。另一条队列非空不会让当前 consumer
+忙循环。**ack 不进 Oath 的接口** —— 那是中间件自己的可用性保障，换成 Kafka 就是 Kafka 的
+消费组，不重新定义。
 
-三个 consumer 各自维护 buffer；一次 Brain claim 收走当时三者全部 buffered 输入，详情见 [Intake](feature-intake.md)。
+SystemConsumer 应用控制动作后才认领输入；重复控制命令不会重复审批、取消新 run 或重置重试计数。
+ToolConsumer 校验终态与工具系统保存的事实一致，无效消息单独 rejected 并报告，其他结果继续处理。
+
+一次 Brain claim 收走当时三条队列的全部输入，详情见 [Intake](feature-intake.md)。
 
 ## 2 WebSocket 与身份
 
-一条连接双向复用，首条 command 必须 session.open。服务端 SessionAuthenticator 将 credential 映射
-为 user_id 和 session_id，客户端不能自称 user_id，后续 session_id 必须与连接绑定一致。
-默认 TokenAuthenticator 是配置映射演示；生产认证由 Hymio 注入或另行装配。
+一条连接双向复用，首条 command 必须 session.open。**credential 恒等于 `(user_id, session_id)`**：
+客户端不能自称 user_id，后续 session_id 必须与连接绑定一致。
 
-core 不 import websockets。bootstrap 将上行解析成 Command，逐条 await 线程中的 Runtime.submit，
+每个 scope 一个 agent 进程，进程内只有一个 scope，所以 `SessionAuthenticator` 认的就是那一个
+凭证 —— 它没有别的可认。session 凭证由 manager 签发，走 `OATH_SESSION_CREDENTIAL` 环境变量
+注入子进程，不进配置文件、不进命令行。
+
+core 不 import websockets。bootstrap 将上行解析成 Command，逐条 await 线程里的 `Agent.submit`，
 让 fsync 不占 event loop，并保持连接内 command 顺序。
 
 ## 3 接纳和回执
 
 - session.open ACK 表示身份验证与 session 绑定成功。
-- user.message、permission.decide、run.cancel、step.retry 先保存稳定命令身份和 payload，再回 ACK。
+- user.message、permission.decide、run.cancel、step.retry 校验通过就投进对应队列，再回 ACK。
 - ACK 不表示审批生效、工具完成或模型已经回复；实际状态由事件 / 查询表达。
 - 同 kind + command ID + 内容重发只接纳一次；同 ID 不同内容报错。客户端所有命令仍应使用唯一 ID。
-- 落盘失败不 ACK；写入成功但回执丢失时，客户端用原 ID 重发。
+- 投队列失败不 ACK；投成功但回执丢失时，客户端用原 ID 重发。
 
 客户端只能提交 approved / denied。decided_by 从认证身份设置，不信任 payload 自称值。
 调用必须属于绑定 scope，客户端不能通过审批替换工具和参数。
@@ -79,8 +88,9 @@ session.status 不触发推理。重连后先绑定，再查询，从原 invocat
 
 ## 5 失败与恢复
 
-进程启动先从所有 journal scope 恢复工具与输入，重建三个 consumer，再恢复原 Brain step。
-网络断开只影响展示；已经 ACK 的输入仍会处理。客户端恢复查询不等同于重新提交执行。
+进程启动先恢复这个 scope 的工具终态与未认领输入（buffer 读得回来），重建三个 consumer，
+再恢复原 Brain step。网络断开只影响展示；已经 ACK 的输入仍会处理。客户端恢复查询不等同于
+重新提交执行。
 
 消费者异常保留输入并退避；工具和 Brain 各自有恢复策略。模型 / 调度永久失败暂停推理，
 审批、执行状态和新消息仍可接纳，客户端显式 step.retry 重试原 step。

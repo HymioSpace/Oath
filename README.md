@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/oath-banner.png" alt="Oath — A durable, event-driven agent runtime." width="880" />
+  <img src="assets/oath-banner.png" alt="Oath — Event-driven, Durable, Supervisor." width="880" />
 </p>
 
 <p align="center">
@@ -10,19 +10,33 @@
 
 <p align="center">
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a><br />
-  <a href="#quick-start">Quick start</a> · <a href="#how-it-works">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
+  <a href="#three-principles">Three principles</a> · <a href="#quick-start">Quick start</a> · <a href="#how-it-works">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
 </p>
 
-Oath is a Python runtime for agents that need to handle incoming messages, run tools, wait for approvals, and recover after interruptions. It brings execution state, context management, and tracing into one extensible foundation for your application.
+Oath is a Python agent runtime built around three principles: **event-driven execution, durable state, and independent supervision**. It provides the foundation for agents that handle incoming messages, run tools, wait for approvals, and continue work across interruptions.
 
-Connect your client over WebSocket, add your tools and skills, and use HTTP APIs to inspect runs. Oath is part of [HymioSpace](https://github.com/HymioSpace) and can also run independently.
+Ask your service for a session, connect over WebSocket, add your tools and skills, and use HTTP APIs to inspect runs. Oath is part of [HymioSpace](https://github.com/HymioSpace) and can also run independently.
 
-> **Early development.** Oath currently runs in a single process with local JSONL persistence. APIs may change; distributed execution and automatic supervision are not yet available.
+> **Early development.** APIs may change. Each session runs in its own process and the queue is external middleware, so an agent process can die and be restarted without losing accepted work; sharing one session across machines is outside its guarantees.
 
-## Why Oath?
+## Three principles
 
-- **Events drive execution.** User messages, tool results, and system decisions have separate queues. Each consumer decides when to wake the agent, so a pending approval does not have to hold up unrelated tool results.
-- **State survives restarts.** An append-only journal records accepted inputs and execution state. Recovery preserves call identities and pending approvals; uncertain tool outcomes are reported explicitly rather than automatically repeated.
+### Event-driven — respond as work arrives
+
+User messages, tool results, and system decisions enter separate queues — external middleware that outlives any process. Each session runs its own agent process with one consumer per queue; each consumer decides when to wake the agent, so a pending approval does not have to hold up unrelated results.
+
+### Durable — keep progress through interruptions
+
+Incoming events land in a persistent buffer, not the journal: an append-only journal records only what the agent actually claimed, together with execution intent and state transitions. Recovery preserves step and tool-call identities, pending approvals, and recorded results. External actions with uncertain outcomes are reported explicitly, never blindly repeated.
+
+### Supervisor — keep execution moving
+
+Every session has its own supervisor process. It periodically publishes a `system.invoke` event — an event, not a call — that wakes the agent to re-examine buffered input, and it watches its agent's heartbeat and asks the manager to restart it with bounded backoff. Sessions are reclaimed on connection count alone. Empty buffers require no LLM call. See the [Supervisor design](spec/feature-supervisor.md).
+
+Together, these principles define how Oath reacts to new work, preserves what happened, and identifies when execution needs intervention.
+
+## Built in
+
 - **Tools have a lifecycle.** Schema validation, permissions, deadlines, cancellation, and terminal results are managed by the runtime. Built-in Bash runs through a replaceable execution environment.
 - **Context stays manageable.** Large tool outputs are shortened with on-demand access to the original. Background and synchronous compaction preserve complete tool-call/result groups.
 - **Runs are inspectable.** Follow input events, model requests and responses, causal links between steps, and timing metrics through traces modeled on OpenTelemetry spans.
@@ -44,38 +58,42 @@ mkdir -p workspace
 
 ### 2. Configure and start
 
-In `oath.toml`, set `model`, `api_base`, and `api_key_env` under `[agent.provider]` for your provider. The example uses `OPENAI_API_KEY`:
+In `oath.toml`, set `model`, `api_base`, and `api_key_env` under `[agent.provider]` for your provider, and put your service token in `service_credentials`. The example reads both from the environment:
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
-uv run python scripts/run_runtime.py --config oath.toml
+export OATH_SERVICE_TOKEN="$(uuidgen)"
+uv run python -m bootstrap.biz.process --config oath.toml
 ```
 
-Run commands from the repository root. This starts both services:
+Run commands from the repository root. You need a Redis reachable at `middleware.redis_url`.
 
-| Service | Default address | Purpose |
+One process starts everything:
+
+| Process | Default address | Purpose |
 | --- | --- | --- |
-| WebSocket | `ws://127.0.0.1:8765` | Messages, approvals, and streamed events |
-| HTTP | `http://127.0.0.1:8766` | Trace queries and CLI commands |
+| biz (with the session manager) | `http://127.0.0.1:8766` | `create_session`, trace queries, CLI commands |
+| agent, one per session | `ws://127.0.0.1:<allocated>` | Messages, approvals, streamed events |
+| supervisor, one per session | No listener | Forced wake-ups and agent health |
 
-The example is for local use: it includes a demo credential and the default tool policy allows all calls. Bash executes on the host; `workspace_root` is its default working directory, **not a sandbox boundary**. See the [tool permissions](spec/feature-tool-system.md) and [execution environment](spec/feature-bash-cli.md) designs before exposing it to other users.
+The manager allocates a port, signs a session credential, and launches the agent and supervisor pair. Queues and buffers live outside every process, so an agent can be killed and restarted without losing accepted input. The manager reclaims a session when its connection count stays at zero past the grace period.
+
+The example is for local use: the default tool policy allows all calls. Bash executes on the host; `workspace_root` is its default working directory, **not a sandbox boundary**. See the [tool permissions](spec/feature-tool-system.md) and [execution environment](spec/feature-bash-cli.md) designs before exposing it to other users.
 
 ### 3. Talk to the agent
 
 In another terminal, from the same repository:
 
 ```bash
-PYTHONPATH=. uv run python scripts/terminal_client.py \
-  --url ws://127.0.0.1:8765 \
-  --token demo-token
+uv run python scripts/terminal_client.py
 ```
 
-Try: `Use bash to list the files in the workspace.` The client prints replies and runtime events. Enter `:quit` to exit.
+The client asks the manager for a session and connects with the credential it gets back. Try: `Use bash to list the files in the workspace.` The client prints replies and runtime events. Enter `:quit` to exit.
 
-To inspect recent traces:
+To inspect recent traces, use that session's credential:
 
 ```bash
-curl -H "Authorization: Bearer demo-token" \
+curl -H "Authorization: Bearer $SESSION_CREDENTIAL" \
   "http://127.0.0.1:8766/list_traces?limit=10"
 ```
 
@@ -85,20 +103,29 @@ Building your own client? The [integration guide](spec/manual.md) covers session
 
 ```mermaid
 flowchart LR
-    Client[Your application] -->|WebSocket commands| Journal[Durable journal]
-    Journal --> Intake[User / tool / system consumers]
+    Client[Your application] -->|create_session| Manager[Manager]
+    Manager -->|launches| Agent[Agent process]
+    Client -->|WebSocket commands| Agent
+    Agent --> Queue[Queue: user / tool / system]
+    Queue --> Consumers[One consumer per queue]
+    Consumers --> Buffers[Persistent buffers]
+    Consumers -->|wake| Intake[Atomic claim]
+    Intake --> Journal[Durable journal]
     Intake --> Brain[Context → model → tool calls]
     Brain --> Tools[Tool system]
-    Tools -->|Results and decisions| Journal
+    Tools -->|Terminal results| Queue
     Brain -->|Replies and events| Client
     Brain -.-> Traces[Trace storage]
-    Client -->|HTTP queries| API[HTTP API]
+    Client -->|HTTP queries| API[Biz]
     API --> Traces
+    Supervisor[Supervisor] -.->|system.invoke| Queue
+    Supervisor -.->|Heartbeat| Agent
+    Supervisor -.->|Restart request| Manager
 ```
 
-Each consumer buffers events and applies its own wake-up rule. When the agent wakes, it claims the available inputs from all three buffers in one durable operation. Model steps are serialized within a session; tools execute through their own lifecycle.
+Events do not reach the journal when they arrive — they sit in a persistent buffer until the agent claims them, and that claim is the only thing that writes them down. Each consumer applies its own wake-up rule; the claim takes all three buffers in one durable operation. Model steps are serialized within a session; tools execute through their own lifecycle.
 
-State is scoped by `user_id` and `session_id`, with run, step, and trace IDs for inspection. The journal drives recovery; traces provide an observable view of execution. Storage and execution environments are defined through interfaces, with local file storage and host execution supplied today.
+State is scoped by `user_id` and `session_id`, with run, step, and trace IDs for inspection. The journal drives recovery; traces provide an observable view of execution. Queue and buffer sit behind interfaces, with Redis Streams and local disk cache supplied today.
 
 ## Extend Oath
 
@@ -127,6 +154,7 @@ Start with the [extension guide](spec/feature-extensions.md) and the included [C
 | [Client integration](spec/manual.md) | WebSocket protocol, HTTP APIs, and examples |
 | [Events and approvals](spec/feature-intake.md) | Scheduling, tool batches, and approval handling |
 | [Durability](spec/feature-journal.md) | Journal, state persistence, and restart recovery |
+| [Supervisor](spec/feature-supervisor.md) | Independent process, heartbeats, wake-up signals, and restarts |
 | [Context compaction](spec/feature-compaction.md) | Tool output limits and history compression |
 | [Tracing](spec/feature-trace.md) | Step relationships, model calls, and metrics |
 | [Extensions](spec/feature-extensions.md) | Tools, CLI commands, and skills |
