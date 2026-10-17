@@ -21,7 +21,7 @@
   <img src="assets/oath-offline-demo.gif" alt="交互示意：用户交代工作区任务后离线，Oath 继续执行工具并保存结果，用户回来后收到离线期间的进展。" width="880" />
 </p>
 
-<p align="center"><sub>合成内容的交互示意，非项目自带聊天 UI。离线执行与有序补发已有<a href="docs/verification-distributed-agent.md">真实服务端到端验证</a>。</sub></p>
+<p align="center"><sub>合成内容的交互示意，非项目自带聊天 UI。</sub></p>
 
 ## 为什么做 Oath
 
@@ -123,7 +123,6 @@ Oath 仍在早期演进。默认是单机 Compose，使用一个 SQLite owner、
 - [客户端协议与运维](spec/manual.md)
 - [命令与扩展契约](spec/feature-oath-command.md)
 - [Vault 密钥流转](spec/feature-vault.md)
-- [端到端验证与边界](docs/verification-distributed-agent.md)
 
 设计文档以中文为主。先看 overview 与分布式 Agent spec；较早的 feature 可能描述已被替代的方案。
 

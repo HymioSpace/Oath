@@ -21,7 +21,7 @@ Give your agent a task, close the client, and come back to its progress. Oath se
   <img src="assets/oath-offline-demo.gif" alt="Illustrated workflow: a user starts a workspace task, disconnects while Oath continues executing tools, then reconnects and receives the saved results." width="880" />
 </p>
 
-<p align="center"><sub>Illustrated workflow with synthetic content, not a bundled chat UI. Offline execution and ordered replay are covered by the <a href="docs/verification-distributed-agent.md">service end-to-end checks</a>.</sub></p>
+<p align="center"><sub>Illustrated workflow with synthetic content, not a bundled chat UI.</sub></p>
 
 ## Why Oath
 
@@ -123,7 +123,6 @@ The current Bash environment and default allow-all tool policy are for trusted d
 - [Client protocol and operations](spec/manual.md)
 - [Command and extension contracts](spec/feature-oath-command.md)
 - [Vault credential flow](spec/feature-vault.md)
-- [End-to-end verification and limits](docs/verification-distributed-agent.md)
 
 Design documents are currently in Chinese. Start with the overview and distributed-agent spec; older feature specs can describe superseded designs.
 
