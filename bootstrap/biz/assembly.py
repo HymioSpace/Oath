@@ -19,7 +19,11 @@ class StoredAgentAccess:
 
 
 def build_application(config, storage, *, cli=False):
-    commands = load_extensions(config.agent.extension_dirs, kinds=frozenset({"cli"})).commands
+    commands = load_extensions(
+        config.agent.extension_dirs,
+        kinds=frozenset({"cli"}),
+        cli_dirs=config.agent.cli_dirs,
+    ).commands
     return BizApplication(
         StoredAgentAccess(storage),
         UserAuthenticator(config, cli=cli),

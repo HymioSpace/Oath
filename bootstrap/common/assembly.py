@@ -16,7 +16,11 @@ from core.storage.adapters import (
 
 
 def build_context(config, storage, queue, tools, fence=None):
-    extensions = load_extensions(config.agent.extension_dirs, kinds=frozenset({"skills"}))
+    extensions = load_extensions(
+        config.agent.extension_dirs,
+        kinds=frozenset({"skills"}),
+        skill_dirs=config.agent.skill_dirs,
+    )
     journal = StoredJournal(storage)
     return AgentContext(
         journal=journal,

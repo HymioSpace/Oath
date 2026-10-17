@@ -57,10 +57,12 @@ class AgentConfig:
     #: 压缩结果的规模上限，也是压缩调用的输出上限。
     compress_summary_tokens: int = 1024
 
-    #: 扩展目录。每个目录下按同一套规则扫 `tools/`、`cli/`、`skills/`。
-    #: 第二个是开发者本地的扩展，不进 git；没有它不是错误。工具或命令撞名会拒绝启动，
-    #: 顺序只决定报错时谁是先到的那一个。
-    extension_dirs: tuple[Path, ...] = (Path("./extensions"), Path("./extensions-local"))
+    #: 内置扩展根目录。每个目录下扫描 `tools/`、`cli/`、`skills/`。
+    #: 外部扩展由 `tool_dirs`、`cli_dirs`、`skill_dirs` 分别指定。
+    extension_dirs: tuple[Path, ...] = (Path("./extensions"),)
+    tool_dirs: tuple[Path, ...] = ()
+    cli_dirs: tuple[Path, ...] = ()
+    skill_dirs: tuple[Path, ...] = ()
     #: 项目自己的技能目录。进 system prompt 末尾的技能索引。
     skill_dir: Path = Path("./extensions/skills")
     #: 技能索引进 system prompt 的 token 预算。装不下就按优先级丢。

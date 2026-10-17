@@ -90,7 +90,7 @@ def root(tmp_path: Path, name: str = "extensions") -> Path:
 
 
 def test_a_directory_that_does_not_exist_is_not_an_error(tmp_path: Path) -> None:
-    """刚 clone 的仓库没有 extensions-local/，仓库里也还没有 extensions/skills/。"""
+    """可选的扩展子目录不存在时跳过。"""
     found = load_extensions([tmp_path / "nowhere"])
 
     assert found.tools == ()
@@ -296,8 +296,8 @@ def test_a_failed_module_is_not_left_behind_in_sys_modules(tmp_path: Path) -> No
 
 
 def test_a_directory_name_with_a_dash_still_loads(tmp_path: Path) -> None:
-    """`extensions-local` 里有 `-`，不是合法标识符 —— 目录名不能直接当包名。"""
-    directory = root(tmp_path, "extensions-local")
+    """带 `-` 的目录名不能直接当包名。"""
+    directory = root(tmp_path, "my-tools")
     write(directory / "tools" / "echo.py", TOOL_SOURCE)
 
     assert [tool.definition.name for tool in load_extensions([directory]).tools] == ["echo"]

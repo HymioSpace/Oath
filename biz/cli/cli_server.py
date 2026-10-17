@@ -7,7 +7,7 @@
 **鉴权只有一处**：请求头里的 credential 换成 user，之后 `user_context` 整份交给命令 ——
 框架不解释它、不拿它判权限，要不要用、怎么判是业务自己的事。
 
-命令本身在扩展目录里声明（`COMMANDS`，见 `spec/feature-extensions.md`），启动时扫出来
+命令本身在扩展目录里声明（`COMMANDS`，见 `spec/feature-oath-command.md`），启动时扫出来
 由 biz 持有。handler 的签名统一：参数按 `parameters` 声明的名字接，另有两个
 keyword-only 参数由框架给：
 

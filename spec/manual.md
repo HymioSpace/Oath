@@ -4,34 +4,32 @@
 
 ```bash
 scripts/oath-install
-# 编辑 oath.toml：[agent.provider] 的 model、api_base、credential、import_env。
-scripts/oath-docker up
+# 编辑 ~/.oath/oath.toml：[agent.provider] 的 model、api_base、credential、import_env。
+oath start
 .venv/bin/python scripts/terminal_client.py
 ```
 
-`oath.toml` 是配置入口，本地文件不进 Git。`credential` 是 Vault 中的别名；
+默认配置入口是 `~/.oath/oath.toml`，已有文件会被复用；首次安装会从旧仓库配置迁移，
+否则复制 `oath.example.toml`。`--config PATH` 可显式覆盖。`credential` 是 Vault 中的别名；
 首次启动从宿主机的 `import_env` 读取 API Key，未提供时终端安全输入。
 启动器先启动并解封持久化 Vault，设置只读 Worker 身份、注入缺失的模型 Key，再启动 Oath。
 模型 Key 不写入 TOML，也不进入 Agent 服务环境。旧 `.env` 若存在，安装器会归档为 `data/private/legacy-environment.backup`。
 
 ```bash
-scripts/oath-docker status
-scripts/oath-docker logs --follow
-scripts/oath-docker set-secret   # 显式轮换当前模型 Key
-scripts/oath-docker down         # 保留数据和 Vault volume
+oath status
+oath restart
+oath stop                      # 保留数据和 Vault volume
 ```
 
+外部扩展可在 `oath start` 时追加：`--skill DIR` 包含多个技能子目录，`--tool DIR` 与
+`--cli DIR` 直接包含 `.py` 模块。相同选项可重复传入。命令保存有效配置，后续
+`restart` 不需要重复输入目录。目录在容器中只读挂载；详见 [命令与扩展设计](feature-oath-command.md)。
+
 默认只在本机发布 WS `8765`、Biz `8766` 与 Vault 管理端点 `8200`。
-Compose 服务读取同一份 `oath.toml`；Docker profile 只映射地址和目录。
+Compose 服务读取选中的 `oath.toml`；Docker profile 只映射地址和目录。
 容器内 RabbitMQ、Storage 等不发布到宿主机。再次启动会解封 Vault；
-`data/private/vault-bootstrap.json` 是恢复所必需的本机文件，应与 Vault volume 一起备份。
+`~/.oath/data/private/vault-bootstrap.json` 是恢复所必需的本机文件，应与 Vault volume 一起备份。
 首版的运维边界见 [Vault 设计](feature-vault.md)。
-
-## 非 Docker
-
-`scripts/oath-up` 使用 `oath.toml`，需要另行提供 RabbitMQ 和可访问的 Vault，
-并用同一套 Worker AppRole 身份文件。`scripts/oath-down` 停止服务。
-单独进程：`.venv/bin/python -m bootstrap worker --config oath.toml`。
 
 ## WS v2
 
@@ -76,7 +74,7 @@ Compose 服务读取同一份 `oath.toml`；Docker profile 只映射地址和目
 
 ## HTTP
 
-用户 bearer token 与 WS 相同；调试时从本地 `oath.toml` 的 `services.users` 读取对应 token。CLI capability 只能访问 CLI，不可查询 trace。
+用户 bearer token 与 WS 相同；调试时从 `~/.oath/oath.toml` 的 `services.users` 读取对应 token。CLI capability 只能访问 CLI，不可查询 trace。
 
 ```bash
 curl -H "Authorization: Bearer $OATH_USER_TOKEN" 'http://127.0.0.1:8766/list_traces?limit=10'

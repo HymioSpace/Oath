@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import tomllib
 from pathlib import Path
 from typing import Any, Final
@@ -86,6 +88,15 @@ def docker_profile(data: dict[str, Any]) -> dict[str, Any]:
         biz_port=8766,
     )
     data["agent"].update(workspace_root="/workspace", cli_bin_dir="/app/scripts")
+    for kind in ("tool", "cli", "skill"):
+        raw = os.environ.get(f"OATH_{kind.upper()}_DIRS")
+        if raw is not None:
+            paths = json.loads(raw)
+            if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+                raise ValueError(f"OATH_{kind.upper()}_DIRS must be a JSON string array")
+            data["agent"][f"{kind}_dirs"] = paths
+    data["agent"]["extension_dirs"] = ["/app/extensions"]
+    data["agent"]["skill_dir"] = "/app/extensions/skills"
     data["services"].update(
         broker_url="amqp://"
         + quote(data["services"].get("rabbitmq_user", "oath"), safe="")
@@ -125,6 +136,9 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
             "system_prompt",
             "provider",
             "extension_dirs",
+            "tool_dirs",
+            "cli_dirs",
+            "skill_dirs",
             "skill_dir",
             "skill_scan_dirs",
             "workspace_root",
@@ -135,6 +149,9 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
     agent_fields["extension_dirs"] = _absolute_dirs(
         agent_raw.get("extension_dirs"), defaults.extension_dirs, base
     )
+    for kind in ("tool", "cli", "skill"):
+        field = f"{kind}_dirs"
+        agent_fields[field] = _absolute_dirs(agent_raw.get(field), getattr(defaults, field), base)
     # `skill_dir` 默认就是 `extension_dirs[0]/skills`，所以它也走绝对化 —— 同一个目录
     # 被两条不同写法的路径指到，只因 `SkillSystem` 按 resolve 去重才没出事。
     agent_fields["skill_dir"] = _absolute(agent_raw.get("skill_dir"), defaults.skill_dir, base)

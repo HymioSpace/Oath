@@ -7,3 +7,5 @@ if ! command -v uv >/dev/null; then
 fi
 uv sync --locked
 .venv/bin/python -m bootstrap.setup
+uv tool install --editable --force .
+echo "Installed oath command. If it is not on PATH, run: uv tool update-shell"

@@ -1,4 +1,4 @@
-"""每次启动一个服务；进程编排由 scripts/oath-up 或部署平台负责。"""
+"""启动一个服务；进程编排由 Docker Compose 或部署平台负责。"""
 
 import argparse
 import importlib

@@ -23,12 +23,13 @@ RabbitMQ 提供三条独立队列；有界 Worker 池按用户租约执行；SQL
 
 ```bash
 scripts/oath-install
-# 在 oath.toml 配置模型、端点与 Vault 别名；首次启动会提示输入 API Key
-scripts/oath-docker up
+# 在 ~/.oath/oath.toml 配置模型、端点与 Vault 别名；首次启动会提示输入 API Key
+oath start
 .venv/bin/python scripts/terminal_client.py
 ```
 
 默认 WS 端口 8765，业务 HTTP 端口 8766，Vault 本机端口 8200，只绑定本机。数据保存在独立 Docker volumes。
+安装器默认创建并复用 `~/.oath/oath.toml`；首次安装时若仓库有旧版 `oath.toml`，会迁移它。`oath start --config PATH` 可指定其他配置；`--skill DIR`、`--tool DIR`、`--cli DIR` 可重复传入以加载外部扩展。之后用 `oath status`、`oath restart`、`oath stop` 管理服务。安装后的命令仍从本仓库构建 Docker 镜像，请保留源码目录。
 本机 SQLite 和单节点 RabbitMQ 不提供多机高可用，默认 Bash 也不是多租户沙箱。
 
 - [English README](README.md)
