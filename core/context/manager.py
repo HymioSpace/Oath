@@ -14,11 +14,11 @@ from core.protocol.datatype.agent_state import AgentState
 from core.protocol.datatype.config import AgentConfig
 from core.protocol.datatype.cursor import Cursor, CursorKind
 from core.protocol.datatype.message import Message
-from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.tool import ToolDefinition
+from core.protocol.datatype.user import User
 from core.protocol.interface.journal import Journal
 
-_BEGINNING = Cursor(CursorKind.LINE, 0)
+_BEGINNING = Cursor(CursorKind.ID, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ class ContextManager:
         self._journal = journal
         self._config = config
 
-    def build(self, scope: Scope, tools: tuple[ToolDefinition, ...]) -> Context:
+    def build(self, user: User, tools: tuple[ToolDefinition, ...]) -> Context:
         """拼出截至此刻的完整对话。
 
         **一次投影。** `Recovery.messages` 已经是快照水位线之前那一段的投影了，再把
@@ -52,8 +52,8 @@ class ContextManager:
         代价是整份日志读两遍（`recover` 一遍，这里一遍）。省下的那遍要用正确性换，
         不值。
         """
-        recovery = self._journal.recover(scope)
-        messages = project(list(self._journal.read_range(scope, _BEGINNING)))
+        recovery = self._journal.recover(user)
+        messages = project(list(self._journal.read_range(user, _BEGINNING)))
         state = recovery.state
 
         return Context(

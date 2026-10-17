@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject
 
 
@@ -18,7 +18,7 @@ class PermissionPolicy(ABC):
     """每次工具执行前的权限判定。应用侧实现（Hymio 的策略）。"""
 
     @abstractmethod
-    def check(self, scope: Scope, tool: str, arguments: JsonObject) -> str:
+    def check(self, user: User, tool: str, arguments: JsonObject) -> str:
         """返回 `PermissionVerdict` 的三值之一。
 
         **不抛异常表示拒绝。** 「拒绝」是 `PermissionVerdict.DENY` 这个返回值，

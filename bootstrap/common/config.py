@@ -15,11 +15,9 @@ from typing import Any, Final
 
 from core.protocol.datatype.config import (
     AgentConfig,
-    ManagerConfig,
-    MiddlewareConfig,
     ModelProviderConfig,
     OathConfig,
-    ServerConfig,
+    ServicesConfig,
     SupervisorConfig,
 )
 
@@ -45,7 +43,7 @@ def _expand(value: Any) -> Any:
     return value
 
 
-def _absolute(value: Any, default: Path) -> Path:
+def _absolute(value: Any, default: Path, base: Path) -> Path:
     """目录字段在装配期变成绝对路径。
 
     **相对路径按 runtime 进程的工作目录算，不是按命令的工作目录。** 这两个 cwd 不是
@@ -53,10 +51,10 @@ def _absolute(value: Any, default: Path) -> Path:
     去找 `workspace/scripts/oath-cli`。
     """
     path = Path(str(value)).expanduser() if value else default
-    return path if path.is_absolute() else Path.cwd() / path
+    return path if path.is_absolute() else base / path
 
 
-def _absolute_dirs(values: Any, default: tuple[Path, ...]) -> tuple[Path, ...]:
+def _absolute_dirs(values: Any, default: tuple[Path, ...], base: Path) -> tuple[Path, ...]:
     """一串目录字段，同样在装配期变成绝对路径。
 
     配置写空数组就是关掉扫描 —— 那是一个有意义的取值，不是「没配」，所以这里靠
@@ -64,7 +62,7 @@ def _absolute_dirs(values: Any, default: tuple[Path, ...]) -> tuple[Path, ...]:
     因写法不同而指向两条路径。
     """
     paths = (Path(str(value)).expanduser() for value in (default if values is None else values))
-    return tuple(path if path.is_absolute() else Path.cwd() / path for path in paths)
+    return tuple(path if path.is_absolute() else base / path for path in paths)
 
 
 def load_config(path: str | Path) -> OathConfig:
@@ -73,11 +71,17 @@ def load_config(path: str | Path) -> OathConfig:
     if not file.exists():
         raise FileNotFoundError(f"配置文件不存在: {file}")
     with file.open("rb") as handle:
-        return from_dict(_expand(tomllib.load(handle)))
+        return from_dict(_expand(tomllib.load(handle)), base=file.resolve().parent)
 
 
-def from_dict(data: dict[str, Any]) -> OathConfig:
+def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
     """TOML 的 dict → 配置对象。缺省值保证最小可启动。"""
+    base = base or Path.cwd()
+    unknown = set(data) - {"data_root", "agent", "services", "supervisor"}
+    if unknown:
+        raise ValueError(
+            f"Unsupported configuration sections: {sorted(unknown)}; use oath.example.toml"
+        )
     agent_raw = data.get("agent", {})
     # provider 嵌在 `[agent.provider]` 下：它是 agent 的一个字段，不是平级的一块。
     provider_raw = agent_raw.get("provider", {})
@@ -101,15 +105,17 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
     }
     defaults = AgentConfig()
     agent_fields["extension_dirs"] = _absolute_dirs(
-        agent_raw.get("extension_dirs"), defaults.extension_dirs
+        agent_raw.get("extension_dirs"), defaults.extension_dirs, base
     )
     # `skill_dir` 默认就是 `extension_dirs[0]/skills`，所以它也走绝对化 —— 同一个目录
     # 被两条不同写法的路径指到，只因 `SkillSystem` 按 resolve 去重才没出事。
-    agent_fields["skill_dir"] = _absolute(agent_raw.get("skill_dir"), defaults.skill_dir)
+    agent_fields["skill_dir"] = _absolute(agent_raw.get("skill_dir"), defaults.skill_dir, base)
     agent_fields["workspace_root"] = _absolute(
-        agent_raw.get("workspace_root"), defaults.workspace_root
+        agent_raw.get("workspace_root"), defaults.workspace_root, base
     )
-    agent_fields["cli_bin_dir"] = _absolute(agent_raw.get("cli_bin_dir"), defaults.cli_bin_dir)
+    agent_fields["cli_bin_dir"] = _absolute(
+        agent_raw.get("cli_bin_dir"), defaults.cli_bin_dir, base
+    )
     agent_fields["skill_scan_dirs"] = (
         Path.cwd() / ".claude" / "skills",
         *(Path.home() / name for name in _AGENT_SKILL_DIRS),
@@ -117,20 +123,13 @@ def from_dict(data: dict[str, Any]) -> OathConfig:
     )
 
     return OathConfig(
-        data_root=Path(data.get("data_root", "./data")),
-        server=ServerConfig(**data.get("server", {})),
-        middleware=MiddlewareConfig(**data.get("middleware", {})),
-        manager=ManagerConfig(**data.get("manager", {})),
+        data_root=_absolute(data.get("data_root"), Path("./data"), base),
+        services=ServicesConfig(**data.get("services", {})),
         supervisor=SupervisorConfig(**data.get("supervisor", {})),
         agent=AgentConfig(
             system_prompt=agent_raw.get("system_prompt", ""),
             provider=ModelProviderConfig(**provider_raw),
             **agent_fields,
-        ),
-        # 空串丢掉：`${VAR}` 在变量没设时展开成空，留下来等于给了一个「空 token 通过」的
-        # 配置。认证器另外还要拒空串，这里是让它压根不出现在列表里。
-        service_credentials=tuple(
-            token for token in (str(t) for t in data.get("service_credentials", [])) if token
         ),
     )
 

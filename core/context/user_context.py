@@ -1,4 +1,4 @@
-"""客户端带来的会话上下文：按 scope 增量覆盖维护，读的时候裁掉过期项。
+"""客户端带来的会话上下文：按 user 增量覆盖维护，读的时候裁掉过期项。
 
 这份 kv 不是模型上下文，也不参与鉴权。它只有一个消费者 —— 通过 CLI server 调用的业务
 命令，拿到后自己决定怎么用。
@@ -15,16 +15,16 @@ from core.utils.encoding import JsonObject, JsonValue
 #: 每个客户端都按同一个值算。
 TTL_SECONDS: Final = 24 * 60 * 60
 
-#: scope 状态里那张表的形状：每个 key 记值与最后一次被写入的时刻。
+#: user 状态里那张表的形状：每个 key 记值与最后一次被写入的时刻。
 Table = dict[str, JsonObject]
 
-#: 表在 scope 状态里的位置。整张表装在一个 meta key 下 —— 事务不允许删 key，
+#: 表在 user 状态里的位置。整张表装在一个 meta key 下 —— 事务不允许删 key，
 #: 覆盖写同一个 key 才裁得掉过期项。
 _KEY: Final = "user_context"
 
 
 def table_of(state: State) -> Table:
-    """scope 状态里那张表。
+    """user 状态里那张表。
 
     形状不对就当空的：读不出东西不该挡住输入落盘，也不该挡住 CLI 调用。
     """

@@ -1,5 +1,7 @@
 # Feature — Agent Runtime
 
+> 部署、身份、持久化和传输以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准；下文保留原模块设计背景。
+
 状态：Implemented（每 scope 一个进程）；输入与审批规则见 [Intake](feature-intake.md)。
 
 ## 总览

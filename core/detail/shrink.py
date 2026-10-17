@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from core.protocol.datatype import Scope
+from core.protocol.datatype import User
 from core.protocol.interface.detail import DetailStore
 from core.utils.encoding import JsonValue, canonical_json
 
@@ -38,7 +38,7 @@ class ResultShrinker:
         self._store, self._limit, self._whole = store, limit, whole
 
     def shrink(
-        self, tool: str, scope: Scope, invocation_id: str, content: JsonValue
+        self, tool: str, user: User, invocation_id: str, content: JsonValue
     ) -> tuple[JsonValue, Detail | None]:
         """返回 `(content, detail)`。
 
@@ -52,7 +52,7 @@ class ResultShrinker:
             return content, None
         detail = Detail(key=invocation_id, original_chars=len(text))
         try:
-            self._store.put(scope, detail.key, text)
+            self._store.put(user, detail.key, text)
         except Exception:
             _log.exception("detail 写入失败，保留完整结果 %s", invocation_id)
             return content, None

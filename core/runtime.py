@@ -28,11 +28,11 @@ class AgentContext:
     #: 各模块共用的追加日志。
     journal: Journal
     store: RuntimeStore
-    #: 三条输入队列。中间件，不是可靠性的来源。
+    #: 三条可靠输入队列的生产端。
     queue: EventQueue
     #: 待认领输入。consumer 收下就进这里，brain 从这里认领并落 journal。
     buffer: EventBuffer
-    #: 客户端在线投递口；推送失败不影响已保存的结果，重连查询状态。
+    #: 持久 Outbox 写入口；Gateway 负责在线发送和离线重放。
     sink: AgentEventSink
     tools: ToolSystem
     #: 把 journal 投影成一次模型请求。

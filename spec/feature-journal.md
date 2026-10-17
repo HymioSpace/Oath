@@ -1,5 +1,7 @@
 # Feature — Journal（追加日志、状态存储与恢复）
 
+> 部署、身份、持久化和传输以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准；下文保留原模块设计背景。
+
 状态：Implemented。运行事务与固定消息视图遵循 [Intake](feature-intake.md)。
 
 ## 背景与目标

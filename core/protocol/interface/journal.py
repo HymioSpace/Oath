@@ -15,8 +15,8 @@ from core.protocol.datatype import (
     Cursor,
     Record,
     Recovery,
-    Scope,
     StateRef,
+    User,
 )
 from core.utils.encoding import JsonObject
 
@@ -29,14 +29,14 @@ class Journal(ABC):
     """
 
     @abstractmethod
-    def scopes(self) -> tuple[Scope, ...]:
-        """列举已持久化的 scope，恢复不能只扫描非空 buffer。"""
+    def users(self) -> tuple[User, ...]:
+        """列举已持久化的 user，恢复不能只扫描非空 buffer。"""
         ...
 
     @abstractmethod
     def append(
         self,
-        scope: Scope,
+        user: User,
         type: str,
         payload: JsonObject,
         *,
@@ -61,9 +61,9 @@ class Journal(ABC):
     def commit_state(self, state: AgentState) -> StateRef:
         """提交一份 agent state 全量快照。
 
-        `scope`、覆盖区间、`payload` 和 `payload_schema_version` 全都是 `state`
+        `user`、覆盖区间、`payload` 和 `payload_schema_version` 全都是 `state`
         自己的成员，不是入参：交回去的状态和拿回来的状态说的是同一份内容、
-        同一个版本、同一个区间、同一个 scope，调用方没法把它们写岔。
+        同一个版本、同一个区间、同一个 user，调用方没法把它们写岔。
 
         不要求幂等键：快照是自描述的（自带 cursor 区间），重复提交只是多写
         一份快照，不破坏任何东西。调用方在崩溃后想知道上次提交成没成功，
@@ -72,7 +72,7 @@ class Journal(ABC):
         ...
 
     @abstractmethod
-    def recover(self, scope: Scope) -> Recovery:
+    def recover(self, user: User) -> Recovery:
         """读回自洽的 `(state, messages)` 与待处理尾部。
 
         快照是优化不是正确性来源：即使从未提交过快照，本方法也能靠全量
@@ -82,7 +82,7 @@ class Journal(ABC):
 
     @abstractmethod
     def read_range(
-        self, scope: Scope, cursor: Cursor, *, limit: int | None = None
+        self, user: User, cursor: Cursor, *, limit: int | None = None
     ) -> Iterator[Record]:
         """从 `cursor` **之后**（不含该位置）向后顺序读原始记录。
 

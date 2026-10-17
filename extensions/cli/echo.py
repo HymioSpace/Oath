@@ -4,7 +4,7 @@
 `COMMANDS` 声明它叫什么要什么参数、`oath-cli` 能在执行环境里调到它」；这条命令把每一环
 都走一遍，够验证链路是不是通的。
 
-**签名的后两个参数是框架统一给的**：`scope` 是这次调用的身份，`user_context` 是客户端
+**签名的后两个参数是框架统一给的**：`user` 是这次调用的身份，`user_context` 是客户端
 随消息带来的那份 kv（已裁掉过期项）。用不上的命令也照收 —— 签名一致，要鉴权的命令才
 能自己写在那儿，不必改框架。
 """
@@ -14,11 +14,11 @@ from __future__ import annotations
 from typing import Final
 
 from core.protocol.datatype import CliCommand
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject, JsonValue
 
 
-def echo(text: str, *, scope: Scope, user_context: JsonObject) -> JsonValue:
+def echo(text: str, *, user: User, user_context: JsonObject) -> JsonValue:
     """原样交回文本。"""
     return {"text": text}
 

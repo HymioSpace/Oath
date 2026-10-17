@@ -1,12 +1,12 @@
 """core 往外送的事件的共同形状。
 
 不是一个枚举，也不是一个「什么都能装」的袋子：它是 `ToolEvent`、`PermissionEvent` 与
-`MessageEvent` 的基类，只承载**所有事件都要**的那几个字段 —— 谁发生的（`scope`）、
+`MessageEvent` 的基类，只承载**所有事件都要**的那几个字段 —— 谁发生的（`user`）、
 什么时候、幂等键、以及已经成形的 `payload`。
 
 分工：`payload` 是各子类自己的落盘形态（`tool.result` 的 payload、审批记录的
 payload），形状不同，**不能**上提到基类。基类只保证投递方（`AgentEventSink`）
-拿到事件时不必先判断它是什么类型就能做通用的事：按 `scope` 分流、按
+拿到事件时不必先判断它是什么类型就能做通用的事：按 `user` 分流、按
 `idempotency_key` 去重、按 `occur_dt` 排序。
 
 **三个工具字段是可选的。** 只有工具与审批事件带 `tool` / `tool_call_id` /
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject
 
 
@@ -35,7 +35,7 @@ class AgentEvent:
     #: `PermissionEventType` / `MessageEventType`）。基类不校验它 —— 不同领域的
     #: type 命名空间不同。
     type: str
-    scope: Scope
+    user: User
     #: 模型 API 给的调用标识，原样透传。Oath 不生成也不解释它。消息事件没有。
     tool_call_id: str | None = None
     #: Oath 自己的调用标识：状态查询的键，也是事件之间配对的键。消息事件没有。

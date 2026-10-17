@@ -1,6 +1,6 @@
 """core 的数据类型。
 
-顶层是跨模块通用的类型（`Scope` / `Message` / `AgentState`），`journal.py` 是
+顶层是跨模块通用的类型（`User` / `Message` / `AgentState`），`journal.py` 是
 journal 专属的那些。
 """
 
@@ -14,11 +14,9 @@ from core.protocol.datatype.cli import (
 )
 from core.protocol.datatype.config import (
     AgentConfig,
-    ManagerConfig,
-    MiddlewareConfig,
     ModelProviderConfig,
     OathConfig,
-    ServerConfig,
+    ServicesConfig,
     SupervisorConfig,
 )
 from core.protocol.datatype.cursor import Cursor, CursorKind
@@ -59,7 +57,6 @@ from core.protocol.datatype.permission import (
     expired,
 )
 from core.protocol.datatype.queue import QueueName, check_queue
-from core.protocol.datatype.scope import SCOPE_ID_PATTERN, Scope, is_valid_scope_id
 from core.protocol.datatype.tool import (
     MAX_INVOCATION_ID_LENGTH,
     RESULT_KEY_PREFIX,
@@ -91,14 +88,10 @@ from core.protocol.datatype.trace import (
     new_span_id,
     new_trace_id,
 )
+from core.protocol.datatype.user import USER_ID_PATTERN, User, is_valid_user_id
 from core.protocol.datatype.wire import (
-    COMMAND_SCHEMAS,
-    MAX_COMMAND_ID_LENGTH,
-    CloseReason,
     Command,
     CommandType,
-    EventFrame,
-    FrameType,
     WireVersion,
 )
 
@@ -108,11 +101,9 @@ __all__ = [
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "MAX_INVOCATION_ID_LENGTH",
     "COMMAND_NAME_PATTERN",
-    "COMMAND_SCHEMAS",
-    "MAX_COMMAND_ID_LENGTH",
     "PAYLOAD_SCHEMAS",
     "RESULT_KEY_PREFIX",
-    "SCOPE_ID_PATTERN",
+    "USER_ID_PATTERN",
     "SPAN_ID_LENGTH",
     "STATE_PAYLOAD_SCHEMAS",
     "TOOL_NAME_PATTERN",
@@ -123,21 +114,16 @@ __all__ = [
     "AppendResult",
     "BatchExecution",
     "CliCommand",
-    "CloseReason",
     "Cursor",
     "Command",
     "CommandType",
     "CursorKind",
-    "EventFrame",
     "EventRecord",
     "EventType",
     "of_command",
     "QueueName",
     "check_queue",
-    "FrameType",
     "Inbound",
-    "ManagerConfig",
-    "MiddlewareConfig",
     "LlmFinishReason",
     "LlmRequest",
     "LlmResponse",
@@ -147,6 +133,7 @@ __all__ = [
     "MessageEventType",
     "ModelProviderConfig",
     "OathConfig",
+    "ServicesConfig",
     "PayloadSchema",
     "PermissionEvent",
     "PermissionEventType",
@@ -158,8 +145,7 @@ __all__ = [
     "Record",
     "RecordFormat",
     "Recovery",
-    "Scope",
-    "ServerConfig",
+    "User",
     "SupervisorConfig",
     "Span",
     "SpanEvent",
@@ -187,6 +173,6 @@ __all__ = [
     "expired",
     "is_valid_command_name",
     "is_valid_invocation_id",
-    "is_valid_scope_id",
+    "is_valid_user_id",
     "is_valid_tool_name",
 ]

@@ -8,8 +8,8 @@ buffer 是可靠性的来源。队列那边丢一条只等于「这条输入还�
 还在：没提交就还在 buffer 里等下一轮，提交了没删就靠 journal 去重认掉。取走即删除的
 写法没有这个性质 —— 那是先删后写，崩在中间就两头都没有。
 
-**键里带 scope。** 一个 data_root 下有多个 agent 进程，键只有队列名的话，一个 scope 的
-认领会取走另一个 scope 的输入。
+**键里带 user。** 一个 data_root 下有多个 agent 进程，键只有队列名的话，一个 user 的
+认领会取走另一个 user 的输入。
 """
 
 from __future__ import annotations
@@ -17,19 +17,19 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from core.protocol.datatype.inbound import Inbound
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 
 
 class EventBuffer(ABC):
-    """按 `(scope, 队列名)` 分开的待处理输入。"""
+    """按 `(user, 队列名)` 分开的待处理输入。"""
 
     @abstractmethod
-    def add(self, scope: Scope, queue: str, item: Inbound) -> None:
+    def add(self, user: User, queue: str, item: Inbound) -> None:
         """追加一条。顺序即到达顺序，重复不合并。"""
         ...
 
     @abstractmethod
-    def peek(self, scope: Scope, queue: str) -> tuple[Inbound, ...]:
+    def peek(self, user: User, queue: str) -> tuple[Inbound, ...]:
         """读出这条队列当前的全部，**不移出**。
 
         读出来是为了拿到它去别处落下，落下成功之后才 `remove`。读不动的是 `remove`
@@ -38,7 +38,7 @@ class EventBuffer(ABC):
         ...
 
     @abstractmethod
-    def remove(self, scope: Scope, queue: str, item: Inbound) -> None:
+    def remove(self, user: User, queue: str, item: Inbound) -> None:
         """移出指定的那一条。
 
         按 `(kind, source_id)` 认人，不是按位置。认不在的直接返回：这条可能已经被别的

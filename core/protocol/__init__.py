@@ -7,7 +7,7 @@
 本层不重导出任何符号 —— 多一条 import 路径就多一种拿法。消费方从三个包入口
 import，不碰子模块：
 
-    from core.protocol.datatype import Scope, AgentState
+    from core.protocol.datatype import User, AgentState
     from core.protocol.error import JournalError
     from core.protocol.interface import Journal
 """

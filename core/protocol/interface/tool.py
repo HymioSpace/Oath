@@ -12,12 +12,12 @@ from typing import Any
 
 from core.protocol.datatype import (
     BatchExecution,
-    Scope,
     ToolCallRequest,
     ToolDefinition,
     ToolExecution,
     ToolInvocation,
     ToolResult,
+    User,
 )
 
 
@@ -51,26 +51,23 @@ class ToolSystem(ABC):
 
     @abstractmethod
     def submit_batch(
-        self, scope: Scope, batch_id: str, requests: Sequence[ToolCallRequest]
+        self, user: User, batch_id: str, requests: Sequence[ToolCallRequest]
     ) -> BatchExecution:
         """登记完整成员后异步接纳；初次集合只冻结一次。"""
         ...
 
     @abstractmethod
-    def batch_status(self, scope: Scope, batch_id: str) -> dict[str, Any] | None: ...
+    def batch_status(self, user: User, batch_id: str) -> dict[str, Any] | None: ...
 
     @abstractmethod
     def apply_permission(
-        self, scope: Scope, invocation_id: str, decision: str, command_id: str
+        self, user: User, invocation_id: str, decision: str, command_id: str
     ) -> bool:
         """原子裁定并提交原调用；裁定和执行意图不能分开提交。"""
         ...
 
     @abstractmethod
-    def cancel(self, scope: Scope, run_id: str | None = None) -> None: ...
-
-    @abstractmethod
-    def recover_scope(self, scope: Scope) -> None: ...
+    def cancel(self, user: User, run_id: str | None = None) -> None: ...
 
     @abstractmethod
     def definitions(self) -> tuple[ToolDefinition, ...]:
@@ -82,7 +79,7 @@ class ToolSystem(ABC):
         ...
 
     @abstractmethod
-    def execute(self, scope: Scope, requests: Sequence[ToolCallRequest]) -> BatchExecution:
+    def execute(self, user: User, requests: Sequence[ToolCallRequest]) -> BatchExecution:
         """派发一批调用，**立即返回**。
 
         - 只收批次，没有单条路径：单个调用是长度为 1 的批次。同一批里的调用
@@ -96,13 +93,13 @@ class ToolSystem(ABC):
         ...
 
     @abstractmethod
-    def status(self, scope: Scope, invocation_id: str) -> ToolExecution | None:
+    def status(self, user: User, invocation_id: str) -> ToolExecution | None:
         """查一次执行的状态。查不到返回 `None` —— 这是查询，不是命令。
 
         查询键是 `invocation_id`（Oath 的调用 id），**不是**模型给的
         `tool_call_id`：后者只是透传回对话历史的配对值，不构成一个可查询的标识。
 
-        **跨 scope 一律查不到**：用别的 session 去问一个执行 id 不会得到「它
+        **跨 user 一律查不到**：用别的 session 去问一个执行 id 不会得到「它
         存在」，也不会泄露任何东西。
         """
         ...

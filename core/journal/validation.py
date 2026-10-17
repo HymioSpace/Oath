@@ -19,15 +19,15 @@ from core.protocol.datatype import (
     EventRecord,
     EventType,
     PayloadSchema,
-    Scope,
     StateRecord,
     ToolOutcome,
+    User,
 )
 from core.protocol.error import (
     CorruptRecordError,
     PayloadSchemaError,
     PayloadVersionError,
-    ScopeError,
+    UserError,
     ValidationError,
 )
 from core.utils.encoding import JsonObject, parse_timestamp
@@ -35,7 +35,6 @@ from core.utils.encoding import JsonObject, parse_timestamp
 _EVENT_FIELDS = frozenset(
     {
         "user_id",
-        "session_id",
         "id",
         "type",
         "payload",
@@ -48,7 +47,6 @@ _EVENT_FIELDS = frozenset(
 _STATE_FIELDS = frozenset(
     {
         "user_id",
-        "session_id",
         "id",
         "commit_dt",
         "payload_schema_version",
@@ -136,23 +134,22 @@ def _loads(text: str, what: str) -> JsonObject:
     return require_object(obj, what)
 
 
-def _check_common(obj: JsonObject, allowed: frozenset[str], scope: Scope, what: str) -> None:
-    if not scope.matches(obj):
+def _check_common(obj: JsonObject, allowed: frozenset[str], user: User, what: str) -> None:
+    if not user.matches(obj):
         raise CorruptRecordError(
-            f"{what} 的 scope ({obj.get('user_id')!r}, {obj.get('session_id')!r}) "
-            f"与所在文件 ({scope}) 不一致"
+            f"{what} 的 user {obj.get('user_id')!r} 与所在文件 ({user}) 不一致"
         )
     unknown = set(obj) - allowed
     if unknown:
         raise CorruptRecordError(f"{what} 含未知字段: {sorted(unknown)}")
-    if "user_id" not in obj or "session_id" not in obj:
-        raise ScopeError(f"{what} 缺少 user_id / session_id")
+    if "user_id" not in obj:
+        raise UserError(f"{what} 缺少 user_id")
 
 
-def parse_event_record(text: str, scope: Scope) -> EventRecord:
+def parse_event_record(text: str, user: User) -> EventRecord:
     """解析一行事件日志。结构问题一律抛错，绝不静默跳过。"""
     obj = _loads(text, "事件记录")
-    _check_common(obj, _EVENT_FIELDS, scope, "事件记录")
+    _check_common(obj, _EVENT_FIELDS, user, "事件记录")
 
     type_ = obj.get("type")
     if not isinstance(type_, str):
@@ -184,9 +181,8 @@ def parse_event_record(text: str, scope: Scope) -> EventRecord:
     validate_idempotency_key(str(obj.get("idempotency_key")))
 
     user_id = obj.get("user_id")
-    session_id = obj.get("session_id")
-    if not isinstance(user_id, str) or not isinstance(session_id, str):
-        raise ScopeError("事件记录缺少 user_id / session_id")
+    if not isinstance(user_id, str):
+        raise UserError("事件记录缺少 user_id")
     key = obj.get("idempotency_key")
     if not isinstance(key, str) or not key:
         raise CorruptRecordError("事件记录 idempotency_key 缺失")
@@ -196,7 +192,6 @@ def parse_event_record(text: str, scope: Scope) -> EventRecord:
 
     record: EventRecord = {
         "user_id": user_id,
-        "session_id": session_id,
         "type": type_,
         "payload": payload,
         "payload_schema_version": version,
@@ -210,9 +205,9 @@ def parse_event_record(text: str, scope: Scope) -> EventRecord:
     return record
 
 
-def parse_state_record(text: str, scope: Scope) -> StateRecord:
+def parse_state_record(text: str, user: User) -> StateRecord:
     obj = _loads(text, "状态记录")
-    _check_common(obj, _STATE_FIELDS, scope, "状态记录")
+    _check_common(obj, _STATE_FIELDS, user, "状态记录")
 
     version = obj.get("payload_schema_version")
     if not isinstance(version, int) or isinstance(version, bool):
@@ -229,13 +224,11 @@ def parse_state_record(text: str, scope: Scope) -> StateRecord:
         raise CorruptRecordError(f"状态记录 commit_dt 必须是字符串，得到 {commit_dt!r}")
 
     user_id = obj.get("user_id")
-    session_id = obj.get("session_id")
-    if not isinstance(user_id, str) or not isinstance(session_id, str):
-        raise ScopeError("状态记录缺少 user_id / session_id")
+    if not isinstance(user_id, str):
+        raise UserError("状态记录缺少 user_id")
 
     record: StateRecord = {
         "user_id": user_id,
-        "session_id": session_id,
         "commit_dt": commit_dt,
         "payload_schema_version": version,
         "payload": payload,

@@ -86,7 +86,6 @@ class EventRecord(TypedDict):
     """事件日志一行。`id` 只有 MySQL 实现会写，JSONL 实现省略。"""
 
     user_id: str
-    session_id: str
     id: NotRequired[int]
     type: str
     payload: JsonObject
@@ -100,7 +99,6 @@ class StateRecord(TypedDict):
     """状态快照一行。全量 KV，不是 delta。"""
 
     user_id: str
-    session_id: str
     id: NotRequired[int]
     commit_dt: str
     payload_schema_version: int
@@ -264,7 +262,7 @@ class Recovery:
     知道「工具结果如何改变 state」，那是 agent runtime 的业务语义。调用方的
     恢复流程是两段：
 
-        journal.recover(scope)                    →  自洽的 (state, messages) + pending
+        journal.recover(user)                    →  自洽的 (state, messages) + pending
         runtime: fold(state, pending)             →  最新 state（纯函数，无副作用）
         journal.commit_state(new_state)               →  落盘，下次 recover 更快
     """

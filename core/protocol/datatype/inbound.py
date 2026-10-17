@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.wire import Command, CommandType
 from core.protocol.error import WireProtocolError
-from core.utils.encoding import JsonObject, utc_now_iso
+from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +41,7 @@ class Inbound:
 
         三处按它去重：journal 认领、buffer 里删掉指定那一条、队列确认时找到对应消息。
         """
-        return f"{self.kind}:{self.source_id}"
+        return canonical_json([self.kind, self.source, self.source_id])
 
     def to_dict(self) -> JsonObject:
         return {

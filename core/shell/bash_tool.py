@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Final
 
-from core.protocol.datatype import Scope, ToolDefinition, ToolInvocation, ToolResult
+from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult, User
 from core.protocol.error import ToolExecutionError
 from core.protocol.interface.execution import ExecutionEnvironment
 from core.protocol.interface.tool import Tool
@@ -53,7 +53,7 @@ class BashTool(Tool):
     def __init__(
         self,
         env: ExecutionEnvironment,
-        cli_env: Callable[[Scope], Mapping[str, str]],
+        cli_env: Callable[[User], Mapping[str, str]],
         *,
         root: Path,
     ) -> None:
@@ -84,7 +84,7 @@ class BashTool(Tool):
                 command,
                 cwd=Path(cwd) if isinstance(cwd, str) and cwd else self._root,
                 timeout=self._timeout(invocation.deadline),
-                env=self._cli_env(invocation.scope),
+                env=self._cli_env(invocation.user),
             )
         except OSError as exc:
             # 环境不可用，不是命令的错。

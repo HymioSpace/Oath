@@ -1,37 +1,61 @@
-"""scope 凭证。
+"""用户凭据与短期 CLI capability；内部服务凭据不进入 Bash 环境。"""
 
-两层：服务级凭证预置在配置里，能调 `create_session`；session 级凭证由 manager 签发，
-只认那一个 scope。**session 凭证不进配置文件，也不进命令行** —— 走环境变量，
-否则 `ps` 里任何人都能拿到别人的 session。
-"""
-
+import base64
+import hashlib
+import hmac
+import json
 import os
+import time
 
+from core.protocol.datatype.user import User
 from core.protocol.error import PermissionDeniedError
-from core.protocol.interface.session import SessionAuthenticator, SessionIdentity
-
-#: manager 往子进程注入 session 凭证用的环境变量名。
-SESSION_CREDENTIAL_ENV = "OATH_SESSION_CREDENTIAL"
 
 
-def read_session_credential() -> str:
-    """子进程读自己的 session 凭证。没有就是没有，不回落到配置里的东西。"""
-    return os.environ.get(SESSION_CREDENTIAL_ENV, "")
+def service_token(config):
+    token = os.environ.get(config.services.internal_token_env, "")
+    if len(token) < 32:
+        raise ValueError(f"Set {config.services.internal_token_env} to at least 32 characters")
+    return token
 
 
-class TokenAuthenticator(SessionAuthenticator):
-    def __init__(self, credentials: dict[str, tuple[str, str]]) -> None:
-        self._credentials = credentials
+class UserAuthenticator:
+    def __init__(self, config, *, cli=False):
+        self.users = json.loads(os.environ.get(config.services.users_env, "{}"))
+        self.secret = service_token(config)
+        self.cli = cli
+        if not isinstance(self.users, dict):
+            raise ValueError("OATH_USERS must be a token-to-user_id JSON object")
+        for uid in self.users.values():
+            User(uid)
 
-    def authenticate(self, credential: str) -> SessionIdentity:
-        identity = self._credentials.get(credential)
-        if identity is None:
-            raise PermissionDeniedError("Unknown credential")
-        return SessionIdentity(user_id=identity[0], session_id=identity[1])
+    def authenticate(self, credential):
+        if not credential:
+            raise PermissionDeniedError("Missing credential")
+        for token, uid in self.users.items():
+            if hmac.compare_digest(token, credential):
+                return User(uid)
+        if self.cli:
+            try:
+                body, signature = credential.split(".")
+                expected = hmac.new(self.secret.encode(), body.encode(), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(expected, signature):
+                    raise ValueError()
+                data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+                if data["aud"] != "cli" or data["exp"] <= time.time():
+                    raise ValueError()
+                return User(data["user_id"])
+            except (ValueError, KeyError, TypeError):
+                pass
+        raise PermissionDeniedError("Unknown credential")
 
 
-__all__ = [
-    "SESSION_CREDENTIAL_ENV",
-    "TokenAuthenticator",
-    "read_session_credential",
-]
+def cli_token(config, user):
+    body = (
+        base64.urlsafe_b64encode(
+            json.dumps({"user_id": user.user_id, "aud": "cli", "exp": time.time() + 3600}).encode()
+        )
+        .decode()
+        .rstrip("=")
+    )
+    signature = hmac.new(service_token(config).encode(), body.encode(), hashlib.sha256).hexdigest()
+    return body + "." + signature

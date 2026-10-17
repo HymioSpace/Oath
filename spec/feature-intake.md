@@ -1,5 +1,7 @@
 # Feature — Intake：独立消费、工具批次与 Brain 唤醒
 
+> 部署、身份、持久化和传输以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准；下文保留原模块设计背景。
+
 状态：Implemented（每 scope 一个进程，队列与 buffer 在进程外）
 
 前置：[Journal](feature-journal.md)、[工具系统](feature-tool-system.md)、[Agent Runtime](feature-agent-runtime.md)。

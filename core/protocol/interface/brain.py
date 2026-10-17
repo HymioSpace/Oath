@@ -1,25 +1,15 @@
-"""Brain 只提供串行执行入口；唤醒条件属于各 consumer。"""
+"""Consumer wake requests are scheduling intents, never direct Brain calls."""
 
-from __future__ import annotations
+from typing import Protocol
 
-from abc import ABC, abstractmethod
-
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 
 
-class Brain(ABC):
-    @abstractmethod
-    def wake(self, scope: Scope) -> None:
-        """非阻塞请求。buffer 空就什么都不做。"""
+class WakeRequests(Protocol):
+    def wake(self, user: User) -> None:
+        """Coalesce a pending wake if the user's durable buffers are nonempty."""
         ...
 
-    @abstractmethod
-    def resume(self, scope: Scope) -> None:
-        """恢复未完成 step；失败态需用户显式 retry。"""
+    def resume(self, user: User) -> None:
+        """Schedule recovery of an explicitly retried step."""
         ...
-
-    @abstractmethod
-    def retry(self, scope: Scope) -> None: ...
-
-    @abstractmethod
-    def close(self, *, wait: bool = True) -> None: ...

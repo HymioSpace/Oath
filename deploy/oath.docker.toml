@@ -1,0 +1,30 @@
+data_root = "/data"
+[services]
+bind_host = "0.0.0.0"
+storage_url = "http://storage:8770"
+queue_url = "http://queue:8771"
+manager_url = "http://manager:8772"
+tools_url = "http://tools:8773"
+biz_url = "http://biz:8766"
+gateway_host = "0.0.0.0"
+gateway_port = 8765
+biz_host = "0.0.0.0"
+biz_port = 8766
+workers = 4
+lease_seconds = 30
+request_timeout = 5
+poll_seconds = 0.25
+[agent]
+system_prompt = "You are a personal assistant. Use tools when needed and keep responses concise."
+extension_dirs = ["/app/extensions", "/app/extensions-local"]
+skill_dir = "/app/extensions/skills"
+skill_scan_dirs = []
+workspace_root = "/workspace"
+cli_bin_dir = "/app/scripts"
+[agent.provider]
+model = "${OATH_MODEL}"
+api_base = "${OATH_MODEL_URL}"
+api_key_env = "OPENAI_API_KEY"
+timeout_seconds = 60
+[supervisor]
+invoke_interval_seconds = 30

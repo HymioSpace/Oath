@@ -7,7 +7,7 @@ import time
 from typing import cast
 
 from core.journal.runtime_store import RuntimeStore, State
-from core.protocol.datatype import Scope
+from core.protocol.datatype import User
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.error import ToolRequestError
 from core.protocol.interface.permission import PermissionPolicy
@@ -29,21 +29,21 @@ class PermissionManager:
         self.store, self._policy = store, policy
         self._deadlines, self._ttl = deadlines, ttl_seconds
 
-    def authorize(self, scope: Scope, tool: str, arguments: JsonObject) -> str:
+    def authorize(self, user: User, tool: str, arguments: JsonObject) -> str:
         """纯判定；ask 的登记随完整 batch 接纳提交，不在判定时提前展示授权卡。"""
-        return self._policy.check(scope, tool, copy.deepcopy(arguments))
+        return self._policy.check(user, tool, copy.deepcopy(arguments))
 
-    def get(self, scope: Scope, invocation_id: str) -> State | None:
-        call = self.store.read(scope)["calls"].get(invocation_id)
+    def get(self, user: User, invocation_id: str) -> State | None:
+        call = self.store.read(user)["calls"].get(invocation_id)
         return cast(State, call) if call and call["permission"] is not None else None
 
-    def pending(self, scope: Scope) -> tuple[State, ...]:
+    def pending(self, user: User) -> tuple[State, ...]:
         return tuple(
-            c for c in self.store.read(scope)["calls"].values() if c["status"] == "waiting_approval"
+            c for c in self.store.read(user)["calls"].values() if c["status"] == "waiting_approval"
         )
 
     def decide(
-        self, scope: Scope, invocation_id: str, decision: str, command_id: str
+        self, user: User, invocation_id: str, decision: str, command_id: str
     ) -> tuple[bool, tuple[Inbound, ...]]:
         """落一条审批裁定。返回 `(是否生效, 本次终结出来的终态)`。
 
@@ -75,7 +75,7 @@ class PermissionManager:
             now = time.time()
             expired = (
                 self._deadlines.remaining(
-                    (scope, invocation_id, "approval"), call["approval_deadline"], self._ttl
+                    (user, invocation_id, "approval"), call["approval_deadline"], self._ttl
                 )
                 <= 0
             )
@@ -89,5 +89,5 @@ class PermissionManager:
                     produced.append(collected)
             return True
 
-        result = self.store.transact(scope, "permission.decided", apply)
+        result = self.store.transact(user, "permission.decided", apply)
         return bool(result), tuple(produced)

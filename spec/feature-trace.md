@@ -1,5 +1,7 @@
 # Feature — Trace：一次 ReAct 循环的可观测记录
 
+> 部署、身份、持久化和传输以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准；下文保留原模块设计背景。
+
 状态：Implemented（单进程，文件后端）。
 
 ## 总览

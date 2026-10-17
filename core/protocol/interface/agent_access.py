@@ -1,10 +1,10 @@
-"""Scope-scoped service operations; implementations may cross a network."""
+"""User-scoped service operations; implementations may cross a network."""
 
 from __future__ import annotations
 
 from typing import Protocol
 
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject
 
 
@@ -13,7 +13,7 @@ class AgentUnavailable(Exception):
 
 
 class AgentAccess(Protocol):
-    def user_context(self, scope: Scope) -> JsonObject: ...
+    def user_context(self, user: User) -> JsonObject: ...
 
 
 __all__ = ["AgentAccess", "AgentUnavailable"]

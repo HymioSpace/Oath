@@ -19,7 +19,7 @@ class ValidationError(JournalError):
     """调用方给的数据不合法 —— 补齐参数即可，不是状态问题。"""
 
 
-class ScopeError(ValidationError):
+class UserError(ValidationError):
     """`user_id` / `session_id` 不符合字符集，或与记录所在位置不一致。"""
 
 
@@ -47,7 +47,7 @@ class IdempotencyKeyConflict(JournalError):
 
 
 class CorruptRecordError(JournalError):
-    """记录结构损坏，或记录 scope 与所在文件代表的 scope 不一致。"""
+    """记录结构损坏，或记录 user 与所在文件代表的 user 不一致。"""
 
 
 class ToolError(ProtocolError):
@@ -87,7 +87,7 @@ class PermissionError(ProtocolError):
 
 
 class PermissionStoreError(PermissionError):
-    """权限存储坏了或被写坏了（重复的待审批键、损坏的行、scope 对不上）。"""
+    """权限存储坏了或被写坏了（重复的待审批键、损坏的行、user 对不上）。"""
 
 
 class ToolExecutionError(ToolError):
@@ -159,7 +159,7 @@ __all__ = [
     "PermissionError",
     "PermissionStoreError",
     "ProtocolError",
-    "ScopeError",
+    "UserError",
     "ToolError",
     "ToolExecutionError",
     "ToolNotFoundError",

@@ -1,22 +1,28 @@
-"""Build a biz application from a session manager, CLI declarations and the trace store."""
+"""Biz 独立读取共享用户状态，不依赖某个 Agent 进程在线。"""
+
+import time
 
 from biz.application import BizApplication
-from bootstrap.clients.agent_client import AgentClient
+from bootstrap.common.authentication import UserAuthenticator
 from bootstrap.common.extension_loader import load_extensions
-from bootstrap.manager import SessionManager
-from core.protocol.datatype.config import OathConfig
-from core.trace.impl import FileTraceStore
+from core.context.user_context import current, table_of
+from core.storage.adapters import StoredTraces
 
 
-def build_application(config: OathConfig, manager: SessionManager) -> BizApplication:
-    """把 manager 接成 biz 唯一的一根线。
+class StoredAgentAccess:
+    def __init__(self, storage):
+        self.storage = storage
 
-    biz 不直接找 agent：地址与 session 级凭证都问 manager 要 —— 那两样东西只有它有，
-    也不该在别处再存一份。
-    """
+    def user_context(self, user):
+        state = self.storage.call("state.read", user_id=user.user_id)["state"]
+        return current(table_of(state), now=time.time())
+
+
+def build_application(config, storage, *, cli=False):
     commands = load_extensions(config.agent.extension_dirs, kinds=frozenset({"cli"})).commands
-    # trace 是与 journal 分离的一组只追加文件，读路径本就容忍写了一半的尾行：
-    # biz 自己读，不必向 agent 绕一圈。store 自己按 scope 分目录，这里给根。
-    traces = FileTraceStore(config.data_root / "traces")
-    access = AgentClient(url_of=manager.session_url, credential_of=manager.session_credential)
-    return BizApplication(access, manager, commands, traces)
+    return BizApplication(
+        StoredAgentAccess(storage),
+        UserAuthenticator(config, cli=cli),
+        commands,
+        StoredTraces(storage),
+    )
