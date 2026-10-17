@@ -50,9 +50,9 @@ class Model(BaseHTTPRequestHandler):
                         {
                             "message": {
                                 "content": (
-                                "<context_digest><summary>Earlier conversation retained."
-                                "</summary><facts/><open/></context_digest>"
-                            )
+                                    "<context_digest><summary>Earlier conversation retained."
+                                    "</summary><facts/><open/></context_digest>"
+                                )
                             },
                             "finish_reason": "stop",
                         }
@@ -331,9 +331,8 @@ def main():
         raise SystemExit("Provide --amqp-url for a disposable RabbitMQ instance")
     root = Path(tempfile.mkdtemp(prefix="oath-e2e-"))
     ports = {
-        s: free_port() for s in (
-            "storage", "queue", "manager", "tools", "gateway", "biz", "model", "vault"
-        )
+        s: free_port()
+        for s in ("storage", "queue", "manager", "tools", "gateway", "biz", "model", "vault")
     }
     token = secrets.token_urlsafe(32)
     internal = secrets.token_urlsafe(32)
@@ -347,19 +346,19 @@ def main():
             f'{name}_url = "http://127.0.0.1:{ports[name]}"\n'
             for name in ("storage", "queue", "manager", "tools", "biz")
         )
-        + f'gateway_port = {ports["gateway"]}\nbiz_port = {ports["biz"]}\n'
-        + 'lease_seconds = 6\nrequest_timeout = 2\npoll_seconds = 0.1\nworkers = 2\n'
+        + f"gateway_port = {ports['gateway']}\nbiz_port = {ports['biz']}\n"
+        + "lease_seconds = 6\nrequest_timeout = 2\npoll_seconds = 0.1\nworkers = 2\n"
         + f'internal_token = "{internal}"\nbroker_url = "{args.amqp_url}"\n'
         + f'users = {{ "{token}" = "alice", "{token}b" = "bob", '
         + f'"{token}c" = "charlie" }}\n'
-        + '[agent]\nmax_output_tokens = 512\ncontext_window = 8000\n'
-        + 'compress_keep_recent = 2\ncompress_summary_tokens = 64\n'
+        + "[agent]\nmax_output_tokens = 512\ncontext_window = 8000\n"
+        + "compress_keep_recent = 2\ncompress_summary_tokens = 64\n"
         + f'extension_dirs = []\nskill_dir = "{root}/skills"\n'
         + f'skill_scan_dirs = []\nworkspace_root = "{root}"\ncli_bin_dir = "{ROOT}/scripts"\n'
         + '[agent.provider]\nmodel = "e2e"\n'
         + f'api_base = "http://127.0.0.1:{ports["model"]}/v1"\n'
         + 'credential = "model/e2e"\nimport_env = "E2E_UNUSED_KEY"\n'
-        + 'timeout_seconds = 10\n[supervisor]\ninvoke_interval_seconds = 2\n'
+        + "timeout_seconds = 10\n[supervisor]\ninvoke_interval_seconds = 2\n"
         + f'[secrets]\nvault_url = "http://127.0.0.1:{ports["vault"]}"\n'
         + f'role_id_file = "{root}/role-id"\nsecret_id_file = "{root}/secret-id"\n'
     )

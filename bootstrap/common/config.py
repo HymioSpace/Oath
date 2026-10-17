@@ -158,11 +158,13 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
             vault_url=data.get("secrets", {}).get("vault_url", "http://127.0.0.1:8200"),
             role_id_file=_absolute(
                 data.get("secrets", {}).get("role_id_file"),
-                Path("./data/private/vault-role-id"), base,
+                Path("./data/private/vault-role-id"),
+                base,
             ),
             secret_id_file=_absolute(
                 data.get("secrets", {}).get("secret_id_file"),
-                Path("./data/private/vault-secret-id"), base,
+                Path("./data/private/vault-secret-id"),
+                base,
             ),
         ),
         agent=AgentConfig(

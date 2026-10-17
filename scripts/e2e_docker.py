@@ -87,8 +87,8 @@ def main():
     rabbit_password = secrets.token_hex(24)
     internal = secrets.token_hex(24)
     config = (ROOT / "oath.example.toml").read_text()
-    config = config.replace('gateway_port = 8765', f'gateway_port = {ws_port}')
-    config = config.replace('biz_port = 8766', f'biz_port = {http_port}')
+    config = config.replace("gateway_port = 8765", f"gateway_port = {ws_port}")
+    config = config.replace("biz_port = 8766", f"biz_port = {http_port}")
     config = config.replace('model = "gpt-4o-mini"', 'model = "e2e"')
     config = config.replace(
         'api_base = "https://api.openai.com/v1"',
@@ -97,7 +97,7 @@ def main():
     config = config.replace('credential = "model/openai"', 'credential = "model/e2e"')
     config = config.replace('import_env = "OPENAI_API_KEY"', 'import_env = "E2E_UNUSED_KEY"')
     config = config.replace('internal_token = ""', f'internal_token = "{internal}"')
-    config = config.replace('users = {}', f'users = {{ "{token}" = "docker-user" }}')
+    config = config.replace("users = {}", f'users = {{ "{token}" = "docker-user" }}')
     config = config.replace('rabbitmq_password = ""', f'rabbitmq_password = "{rabbit_password}"')
     config = config.replace(
         'vault_url = "http://127.0.0.1:8200"',
@@ -112,23 +112,32 @@ def main():
         if "volumes" in service:
             service["volumes"] = [
                 str(ROOT / "deploy/vault.hcl") + ":/vault/config/vault.hcl:ro"
-                if volume == "./deploy/vault.hcl:/vault/config/vault.hcl:ro" else volume
+                if volume == "./deploy/vault.hcl:/vault/config/vault.hcl:ro"
+                else volume
                 for volume in service["volumes"]
             ]
     compose = root / "compose.yaml"
     compose.write_text(yaml.safe_dump(spec))
     project = "oath-e2e-" + str(os.getpid())
-    cmd = [
-        "docker", "compose", "-p", project, "-f", str(compose)
-    ]
+    cmd = ["docker", "compose", "-p", project, "-f", str(compose)]
     launcher = [
-        os.sys.executable, "-m", "bootstrap.docker", "--config", str(root / "oath.toml"),
-        "--compose", str(compose), "--project", project,
+        os.sys.executable,
+        "-m",
+        "bootstrap.docker",
+        "--config",
+        str(root / "oath.toml"),
+        "--compose",
+        str(compose),
+        "--project",
+        project,
     ]
     env = {**os.environ, "E2E_UNUSED_KEY": "local-stub"}
     compose_env = {
-        **env, "RABBITMQ_USER": "oath", "RABBITMQ_PASSWORD": rabbit_password,
-        "OATH_WS_PORT": str(ws_port), "OATH_HTTP_PORT": str(http_port),
+        **env,
+        "RABBITMQ_USER": "oath",
+        "RABBITMQ_PASSWORD": rabbit_password,
+        "OATH_WS_PORT": str(ws_port),
+        "OATH_HTTP_PORT": str(http_port),
         "OATH_VAULT_PORT": str(vault_port),
     }
     model = ThreadingHTTPServer(("0.0.0.0", model_port), Model)
@@ -137,17 +146,24 @@ def main():
         subprocess.run([*launcher[:3], "up", *launcher[3:], "--no-build"], check=True, env=env)
         tool_env = subprocess.run(
             ["docker", "exec", project + "-tools-1", "env"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
         assert "E2E_UNUSED_KEY=" not in tool_env
-        mounts = json.loads(subprocess.run(
-            ["docker", "inspect", project + "-tools-1", "--format", "{{json .Mounts}}"],
-            check=True, capture_output=True, text=True,
-        ).stdout)
+        mounts = json.loads(
+            subprocess.run(
+                ["docker", "inspect", project + "-tools-1", "--format", "{{json .Mounts}}"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout
+        )
         assert not any("/run/oath/" in mount["Destination"] for mount in mounts)
         denied = httpx.get(
             f"http://127.0.0.1:{vault_port}/v1/oath/data/model/e2e",
-            timeout=3, trust_env=False,
+            timeout=3,
+            trust_env=False,
         )
         assert denied.status_code == 403
         deadline = time.monotonic() + 60
@@ -169,7 +185,9 @@ def main():
         with (root / "services.log").open("w") as f:
             subprocess.run(
                 [*cmd, "logs", "--no-color"],
-                stdout=f, stderr=subprocess.STDOUT, env=compose_env,
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                env=compose_env,
             )
         subprocess.run([*launcher[:3], "down", *launcher[3:], "--volumes"], check=True, env=env)
         model.shutdown()

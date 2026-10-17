@@ -188,7 +188,7 @@ class SystemConsumer(QueueConsumer):
             def cancel(state: State) -> str | None:
                 key = input_key(item)
                 if key in state["controls"]:
-                    return state["controls"][key].get("run_id")
+                    return str(state["controls"][key].get("run_id") or "") or None
                 run_id = item.payload.get("run_id") or state["meta"].get("run_id")
                 state["controls"][key] = {"applied": True, "run_id": run_id}
                 if run_id:

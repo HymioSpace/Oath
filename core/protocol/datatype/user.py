@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from core.protocol.error import UserError
 
@@ -20,7 +21,7 @@ class User:
         if not is_valid_user_id(self.user_id):
             raise UserError("user_id must match [A-Za-z0-9_-]{1,64}")
 
-    def matches(self, record: dict) -> bool:
+    def matches(self, record: dict[str, Any]) -> bool:
         return record.get("user_id") == self.user_id
 
     def __str__(self) -> str:

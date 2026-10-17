@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from core.protocol.datatype.user import User
 from core.protocol.interface.storage import StorageConflict, StoragePort
@@ -42,7 +42,7 @@ class RuntimeStore:
             self._context_fence.reset(token)
 
     def read(self, user: User) -> State:
-        return self.storage.call("state.read", user_id=user.user_id)["state"]
+        return cast(State, self.storage.call("state.read", user_id=user.user_id)["state"])
 
     def transact(self, user: User, reason: str, change: Callable[[State], T]) -> T:
         for attempt in range(16):

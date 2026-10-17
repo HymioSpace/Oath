@@ -63,10 +63,12 @@ class VaultAdmin:
             )
             _save(
                 self.bootstrap,
-                json.dumps({
-                    "unseal_key": initialized["keys_base64"][0],
-                    "root_token": initialized["root_token"],
-                }),
+                json.dumps(
+                    {
+                        "unseal_key": initialized["keys_base64"][0],
+                        "root_token": initialized["root_token"],
+                    }
+                ),
             )
         if not self.bootstrap.exists():
             raise RuntimeError("Vault bootstrap keys missing; restore them before starting")
@@ -83,21 +85,21 @@ class VaultAdmin:
         mounts = self.call("GET", "sys/mounts", authorized=True)
         if "oath/" not in mounts:
             self.call(
-                "POST", "sys/mounts/oath",
+                "POST",
+                "sys/mounts/oath",
                 payload={"type": "kv", "options": {"version": "2"}},
                 authorized=True,
             )
         auth = self.call("GET", "sys/auth", authorized=True)
         if "approle/" not in auth:
-            self.call(
-                "POST", "sys/auth/approle", payload={"type": "approle"}, authorized=True
-            )
+            self.call("POST", "sys/auth/approle", payload={"type": "approle"}, authorized=True)
         policy = f'path "oath/data/{alias}" {{ capabilities = ["read"] }}'
         self.call(
             "PUT", "sys/policies/acl/oath-worker", payload={"policy": policy}, authorized=True
         )
         self.call(
-            "POST", "auth/approle/role/oath-worker",
+            "POST",
+            "auth/approle/role/oath-worker",
             payload={
                 "token_policies": ["oath-worker"],
                 "token_ttl": "1h",
@@ -107,9 +109,7 @@ class VaultAdmin:
             authorized=True,
         )
         role = self.call("GET", "auth/approle/role/oath-worker/role-id", authorized=True)
-        secret = self.call(
-            "POST", "auth/approle/role/oath-worker/secret-id", authorized=True
-        )
+        secret = self.call("POST", "auth/approle/role/oath-worker/secret-id", authorized=True)
         _save(self.config.secrets.role_id_file, role["data"]["role_id"])
         _save(self.config.secrets.secret_id_file, secret["data"]["secret_id"])
 
@@ -127,9 +127,7 @@ class VaultAdmin:
             value = getpass.getpass(f"API key for {provider.credential}: ")
         if not value:
             raise ValueError("Empty model API key")
-        self.call(
-            "POST", path, payload={"data": {"value": value}}, authorized=True
-        )
+        self.call("POST", path, payload={"data": {"value": value}}, authorized=True)
         print(f"Vault secret ready: {provider.credential}")
 
     def close(self):
@@ -167,13 +165,14 @@ def main():
     if args.action == "down":
         subprocess.run(
             [*cmd, "down", *(["--volumes"] if args.volumes else [])],
-            env=env, check=True,
+            env=env,
+            check=True,
         )
         return
     if args.action in {"status", "logs"}:
-        subcommand = ["ps"] if args.action == "status" else [
-            "logs", *(["-f"] if args.follow else [])
-        ]
+        subcommand = (
+            ["ps"] if args.action == "status" else ["logs", *(["-f"] if args.follow else [])]
+        )
         subprocess.run([*cmd, *subcommand], env=env, check=True)
         return
     subprocess.run([*cmd, "up", "-d", "vault"], env=env, check=True)
@@ -186,9 +185,12 @@ def main():
         admin.close()
     if args.action == "up":
         subprocess.run(
-            [*cmd, "up", "-d", *(
-                ["--no-build", "--pull", "never"] if args.no_build else ["--build"]
-            )],
+            [
+                *cmd,
+                "up",
+                "-d",
+                *(["--no-build", "--pull", "never"] if args.no_build else ["--build"]),
+            ],
             env=env,
             check=True,
         )

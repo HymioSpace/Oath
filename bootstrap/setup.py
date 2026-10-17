@@ -12,9 +12,11 @@ from bootstrap.common.config import load_config
 
 def _toml(value):
     if isinstance(value, dict):
-        return "{ " + ", ".join(
-            f"{json.dumps(key)} = {_toml(item)}" for key, item in value.items()
-        ) + " }"
+        return (
+            "{ "
+            + ", ".join(f"{json.dumps(key)} = {_toml(item)}" for key, item in value.items())
+            + " }"
+        )
     return json.dumps(value)
 
 
@@ -22,8 +24,11 @@ def _table(raw, header, additions):
     lines = raw.splitlines(keepends=True)
     marker = f"[{header}]\n"
     if marker not in lines:
-        return raw.rstrip() + "\n\n" + marker + "".join(
-            f"{name} = {_toml(value)}\n" for name, value in additions.items()
+        return (
+            raw.rstrip()
+            + "\n\n"
+            + marker
+            + "".join(f"{name} = {_toml(value)}\n" for name, value in additions.items())
         )
     start = lines.index(marker) + 1
     end = next((i for i in range(start, len(lines)) if lines[i].startswith("[")), len(lines))
@@ -38,9 +43,7 @@ def _table(raw, header, additions):
                     lines[index] = f"{name} = {_toml(value)}\n"
                     break
     new_lines = [
-        f"{name} = {_toml(value)}\n"
-        for name, value in additions.items()
-        if name not in table
+        f"{name} = {_toml(value)}\n" for name, value in additions.items() if name not in table
     ]
     return "".join(lines[:end] + new_lines + lines[end:])
 
@@ -61,30 +64,41 @@ def main():
         )
     if "api_key_env" in data.get("agent", {}).get("provider", {}):
         old = data["agent"]["provider"]["api_key_env"]
-        raw = "\n".join(
-            line for line in raw.splitlines() if not line.lstrip().startswith("api_key_env =")
-        ) + "\n"
+        raw = (
+            "\n".join(
+                line for line in raw.splitlines() if not line.lstrip().startswith("api_key_env =")
+            )
+            + "\n"
+        )
         raw = _table(raw, "agent.provider", {"credential": "model/main", "import_env": old})
     users = json.loads(legacy_values.get("OATH_USERS", "{}")) if legacy_values else {}
     if not users:
         users = {secrets.token_urlsafe(32): "local"}
     password = legacy_values.get("RABBITMQ_PASSWORD") or secrets.token_hex(24)
     broker_user = legacy_values.get("RABBITMQ_USER") or "oath"
-    raw = _table(raw, "services", {
-        "internal_token": legacy_values.get("OATH_SERVICE_TOKEN") or secrets.token_urlsafe(32),
-        "users": users,
-        "rabbitmq_user": broker_user,
-        "rabbitmq_password": password,
-        "broker_url": (
-            f"amqp://{quote(broker_user, safe='')}:{quote(password, safe='')}"
-            "@127.0.0.1:5672/%2F"
-        ),
-    })
-    raw = _table(raw, "secrets", {
-        "vault_url": "http://127.0.0.1:8200",
-        "role_id_file": "./data/private/vault-role-id",
-        "secret_id_file": "./data/private/vault-secret-id",
-    })
+    raw = _table(
+        raw,
+        "services",
+        {
+            "internal_token": legacy_values.get("OATH_SERVICE_TOKEN") or secrets.token_urlsafe(32),
+            "users": users,
+            "rabbitmq_user": broker_user,
+            "rabbitmq_password": password,
+            "broker_url": (
+                f"amqp://{quote(broker_user, safe='')}:{quote(password, safe='')}"
+                "@127.0.0.1:5672/%2F"
+            ),
+        },
+    )
+    raw = _table(
+        raw,
+        "secrets",
+        {
+            "vault_url": "http://127.0.0.1:8200",
+            "role_id_file": "./data/private/vault-role-id",
+            "secret_id_file": "./data/private/vault-secret-id",
+        },
+    )
     tomllib.loads(raw)
     if raw != config.read_text():
         backup = Path("oath.toml.pre-vault.local")

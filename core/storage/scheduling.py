@@ -5,6 +5,8 @@ import time
 
 from core.protocol.interface.storage import LeaseLost
 
+__all__ = ["LeaseLost"]
+
 
 def check(db, user_id, fence, *, required=False):
     if not fence:

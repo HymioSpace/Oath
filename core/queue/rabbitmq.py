@@ -1,13 +1,15 @@
 """Three durable logical queues. Connections are owned by their calling thread."""
 
 import json
+from typing import Any, cast
 
 import pika
+from pika.adapters.blocking_connection import BlockingChannel
 
 KINDS = ("user", "tool", "system")
 
 
-def connect(url):
+def connect(url) -> tuple[pika.BlockingConnection, BlockingChannel]:
     params = pika.URLParameters(url)
     params.heartbeat = 60
     params.socket_timeout = 10
@@ -15,7 +17,9 @@ def connect(url):
     params.blocked_connection_timeout = 15
     connection = pika.BlockingConnection(params)
     channel = connection.channel()
-    channel.exchange_declare("oath.dead", exchange_type="direct", durable=True)
+    # types-pika 的 stub 只放行 ExchangeType 枚举，而那个枚举在 stub 里是隐式再导出、
+    # 取不到。运行时接受这个字符串。
+    channel.exchange_declare("oath.dead", exchange_type=cast(Any, "direct"), durable=True)
     for kind in KINDS:
         channel.queue_declare(
             f"oath.dead.{kind}", durable=True, arguments={"x-queue-type": "quorum"}

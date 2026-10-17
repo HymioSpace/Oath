@@ -12,9 +12,7 @@ def run(config):
     token = service_token(config)
     storage = ServiceClient(config.services.storage_url, token, config.services.request_timeout)
     stop = threading.Event()
-    thread = threading.Thread(
-        target=relay, args=(storage, config.services.broker_url, stop)
-    )
+    thread = threading.Thread(target=relay, args=(storage, config.services.broker_url, stop))
     thread.start()
     try:
         serve_rpc(

@@ -26,7 +26,9 @@ def relay(storage, broker_url, stop):
                         id=claim["message"]["id"],
                     )
                 else:
-                    connection.process_data_events(time_limit=0.25)
+                    # time_limit 的单位是秒，运行时签名是 Optional[float]；types-pika 的
+                    # stub 还写着 int。
+                    connection.process_data_events(time_limit=0.25)  # type: ignore[arg-type]
         except Exception:
             _log.exception("Broker relay interrupted; unconfirmed records remain pending")
             stop.wait(1)
