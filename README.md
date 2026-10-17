@@ -1,116 +1,136 @@
 <p align="center">
-  <img src="assets/oath-banner.png" alt="Oath — Event-driven, Durable, Supervisor." width="880" />
+  <img src="assets/oath-banner.svg" alt="Oath — Close the chat. The work continues." width="880" />
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-4b70ff?style=flat-square" alt="MIT License" /></a>
-  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11%2B-101b2d?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
-  <a href="https://github.com/HymioSpace"><img src="https://img.shields.io/badge/by-HymioSpace-101b2d?style=flat-square" alt="By HymioSpace" /></a>
+  <a href="pyproject.toml"><img src="https://img.shields.io/badge/python-3.11%2B-182237?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" /></a>
+  <a href="https://github.com/HymioSpace"><img src="https://img.shields.io/badge/by-HymioSpace-182237?style=flat-square" alt="By HymioSpace" /></a>
 </p>
 
 <p align="center">
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a><br />
-  <a href="#three-foundations">Three principles</a> · <a href="#quick-start">Quick start</a> · <a href="#architecture">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
+  <a href="#why-oath">Why Oath</a> · <a href="#three-foundations">Foundations</a> · <a href="#quick-start">Quick start</a> · <a href="#bring-your-own-capabilities">Extensions</a> · <a href="#documentation">Docs</a>
 </p>
 
-Oath is an **event-driven, durable, independently supervised agent runtime** for personal agents that keep working when the user goes offline.
+**Oath is an agent runtime for personal agents that have work to do between conversations.**
 
-One user, one persistent agent. Connect over WebSocket, expose business capabilities over HTTP, and execute work through a bounded worker pool. Part of [HymioSpace](https://github.com/HymioSpace).
+Give your agent a task, close the client, and come back to its progress. Oath separates communication from execution: accepted work continues on the server, events are persisted, and reconnecting clients receive what they missed.
+
+<p align="center">
+  <img src="assets/oath-offline-demo.gif" alt="Illustrated workflow: a user starts a workspace task, disconnects while Oath continues executing tools, then reconnects and receives the saved results." width="880" />
+</p>
+
+<p align="center"><sub>Illustrated workflow with synthetic content, not a bundled chat UI. Offline execution and ordered replay are covered by the <a href="docs/verification-distributed-agent.md">service end-to-end checks</a>.</sub></p>
+
+## Why Oath
+
+A personal agent needs a life beyond an open chat window. It must accept new input while work is underway, wait for a decision without blocking everything else, and preserve progress across disconnects and interruptions.
+
+Oath gives that work a home:
+
+- **Work outlives the connection.** Closing a WebSocket does not cancel accepted work. Reconnect to receive persisted events in order, with explicit offline boundaries and a cursor for each device.
+- **Available around the clock, active when needed.** A shared worker pool runs event-triggered steps. No permanent thread per user; an idle Supervisor check makes no model call. Execution still respects step and time budgets.
+- **Independent services, one Docker command.** Gateway, intake, scheduling, execution, tools, business APIs and supervision communicate through service contracts. Start the single-host deployment locally or on a cloud Docker host with `oath start`.
 
 ## Three foundations
 
-- **Event-driven.** User input, tool results, and system decisions arrive through separate RabbitMQ queues. Consumers decide when to wake an agent; tool approvals do not block unrelated work.
-- **Durable.** Journal, execution state, input buffers, and outbound events live in SQLite behind a Storage service. Stable identities, transactional outboxes, and fenced leases make interrupted work recoverable.
-- **Supervised.** An independent Supervisor requests wake-ups for pending inputs. Empty buffers never trigger a model call. Process restart belongs to the deployment supervisor.
+### Event-driven
 
-## Built in
+User messages, tool results and system interventions enter separate queues. Each consumer decides when its inputs should wake the agent. Brain receives a fixed input batch, builds context, calls the model and dispatches the next actions.
 
-- Tools with validation, approvals, deadlines and immutable terminal results; Bash through a replaceable execution environment.
-- Tool-result truncation with on-demand detail access, background context compaction and synchronous compaction.
-- OpenTelemetry-style traces with raw model requests/responses, causal step links and timing metrics.
-- Public and private extensions: Python tools, CLI commands and Markdown skills.
-- Durable streaming events, device-specific ACK cursors and ordered offline replay.
+**Even a tool result is an event.** Agent progression is driven by incoming work and durable buffers, rather than a single blocking `while True` reasoning loop. With an approval policy, one tool can wait for a user decision while other submitted tools execute. Available results can drive the next step; a later approval or result enters through the event system.
+
+### Durable
+
+An append-only journal records execution facts. Inputs, tool states, execution ownership and outbound events are persisted through the Storage service. Transactional outboxes and fenced leases connect those records to queue delivery and worker recovery.
+
+Recovery uses recorded state. An unconfirmed external side effect is not a promise of exactly-once execution; tools still need their own idempotency where it matters.
+
+### Supervised
+
+The Supervisor is an independent observer of the agent's work, with system events as its path to intervention. Today it periodically checks durable pending work and requests a wake-up; empty buffers never call the model.
+
+That observer role is a foundation to build on. Trace-aware checks, recovery decisions and model-assisted supervision are future directions. Process restarts currently belong to Docker or the deployment platform.
+
+## A shell, small commands, fewer round trips
+
+Oath pairs a core **Bash tool** with **`oath-cli`**, a client for application commands exposed over HTTP. A shell script can compose several commands, pipe and filter their outputs, and return one useful result to the agent. Work that fits a script can take fewer model turns than calling each operation separately.
+
+The execution environment is an interface; the current implementation runs commands in the Tools container. CLI extensions receive the user's current context from Biz, so applications can add their own behavior and authorization.
+
+The core also includes tool deadlines and approvals, skills, tool-result truncation with detail retrieval, context compaction, and traces with raw model requests/responses, causal step links and timing metrics.
 
 ## Quick start
 
-Requires Docker Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Requires Docker with Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/). Start Docker, then:
 
 ```bash
 git clone https://github.com/HymioSpace/Oath.git
 cd Oath
 scripts/oath-install
-# Set model, api_base, credential and import_env in ~/.oath/oath.toml.
-# On first start, the launcher prompts for the model API key if import_env is unset.
+```
+
+Edit **`~/.oath/oath.toml`**: set the model, its OpenAI-compatible `api_base`, and a Vault `credential` alias. The installer creates local service credentials and reuses an existing config.
+
+```bash
 oath start
+# First start builds the image and prompts for the model API key if needed.
+# Once the services are healthy, open the included debug client:
 .venv/bin/python scripts/terminal_client.py
 ```
 
-The installer registers the `oath` command and creates a private `~/.oath/oath.toml` with local service credentials. If it already exists, it is reused; an older checkout's `oath.toml` is migrated on first install. Keep the source checkout: this installation builds its Docker image from it. The model API key is stored in Vault under the configured alias; only the Worker has a Vault identity. The launcher imports the key once, without an `.env` file. Compose runs Vault, RabbitMQ and each Oath service independently. Three ports are published, bound to localhost by default:
+The model key is stored in Vault. No `.env` file is needed. Keep the source checkout: the current installation builds its Docker image from it.
 
-| Endpoint | Purpose |
+| Endpoint | Use |
 | --- | --- |
-| `ws://127.0.0.1:8765` | Messages, approvals, status, streaming events and replay |
+| `ws://127.0.0.1:8765` | Messages, approvals, streaming events and offline replay |
 | `http://127.0.0.1:8766` | Trace queries and CLI business APIs |
-| `http://127.0.0.1:8200` | Local Vault operator endpoint |
 
-No session creation is required. Authenticate with a user credential and a stable client ID. Disconnecting does not stop accepted work.
+Both bind to localhost by default. Authenticate with the generated user credential; the debug client reads it from your config. One `user_id` has one ongoing conversation, with no session creation.
 
 ```bash
 oath status
-oath restart
-oath stop  # preserves data volumes
+oath restart   # reuses the saved config and extension paths
+oath stop      # keeps data volumes
 ```
 
-Pass `--config PATH` to use a different TOML, or `--skill DIR`, `--tool DIR`, or `--cli DIR` to add external directories; each extension option can be repeated. Oath's own extensions load by default. `restart` reuses the saved paths. The [command and extension design](spec/feature-oath-command.md) describes the directory formats and container mounts.
+Use `--config PATH` for a different TOML. The debug client supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`; `--json` shows raw protocol frames.
 
-The terminal supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`. Use `--json` for raw protocol frames.
+## Bring your own capabilities
 
-## Architecture
+Core owns execution semantics and essential tools. Application capabilities live in extensions: **Python tools, HTTP-backed CLI commands and Markdown skills**. Keep them in your own repository and pass their directories at startup:
 
-```mermaid
-flowchart LR
-    Client <-->|WS| Gateway
-    Client <-->|HTTP| Biz
-    Gateway --> Queue[Queue ingress / relay]
-    Queue --> RabbitMQ
-    RabbitMQ --> Consumer
-    Consumer --> Manager
-    Worker -->|claim / renew / finish| Manager
-    Worker --> Tools
-    Supervisor --> Storage
-    Tools & Queue & Consumer & Manager & Worker & Biz --> Storage[(SQLite Storage)]
-    Storage -->|durable events| Gateway
+```bash
+oath start \
+  --skill /path/to/skills \
+  --tool /path/to/tools \
+  --cli /path/to/cli
 ```
 
-`user_id` is the isolation key. A worker holds a lease for one step; new inputs remain independently accepted and scheduled. There is no permanent per-user process or thread.
+Each option can be repeated. Built-in extensions load by default; additional directories are mounted read-only into the services that use them. Duplicate tool or command names fail at startup. See the [extension contracts](spec/feature-oath-command.md).
 
-The default deployment uses **one SQLite owner, one RabbitMQ node and one Vault node**. Service boundaries support distributed deployment; database failover and broker clustering are deployment work, not guarantees of this single-host configuration. Host Bash and the current default allow policy are intended for trusted use, not untrusted multi-tenant sandboxing.
+## Current scope
+
+Oath is early and evolving. The default deployment is single-host Compose with one SQLite owner, one RabbitMQ node and one Vault node. Separate service boundaries support distributed deployments; automatic database failover and broker clustering are not included.
+
+The current Bash environment and default allow-all tool policy are for trusted deployments. Approval execution paths exist; policy configuration and stronger tenant isolation need further work.
 
 ## Documentation
 
-- [Architecture and invariants](spec/feature-distributed-personal-agent.md)
-- [Client integration and operations](spec/manual.md)
 - [Module overview](spec/overview.md)
-- [Command and extensions](spec/feature-oath-command.md)
+- [Distributed execution and recovery](spec/feature-distributed-personal-agent.md)
+- [Client protocol and operations](spec/manual.md)
+- [Command and extension contracts](spec/feature-oath-command.md)
 - [Vault credential flow](spec/feature-vault.md)
+- [End-to-end verification and limits](docs/verification-distributed-agent.md)
 
-Design documentation is currently in Chinese. The distributed-agent spec is the current architecture; older feature specs retain historical module designs and may describe superseded session and file-store behavior.
-
-## Verification
-
-```bash
-# Real service processes, disposable RabbitMQ, SQLite, WS and HTTP model stub:
-.venv/bin/python scripts/e2e_services.py --amqp-url <disposable-broker-url>
-# Isolated Docker Compose environment; requires the locally built image:
-.venv/bin/python scripts/e2e_docker.py
-```
-
-These checks use a deterministic model endpoint, not a paid model. See the [verification record](docs/verification-distributed-agent.md) for covered scenarios and remaining limits.
+Design documents are currently in Chinese. Start with the overview and distributed-agent spec; older feature specs can describe superseded designs.
 
 ## Contributing
 
-Discuss substantial changes in an issue first. Keep module contracts explicit and document feature designs under `spec/`. Product-specific extensions can live in another repository and be passed to `oath start` by directory.
+Ideas, issues and contributions are welcome. Discuss substantial execution changes first, and document their contracts under `spec/`. Application-specific capabilities belong in extensions.
 
 ## License
 
-[MIT](LICENSE). The name comes from MONO’s *Oath*: a commitment to carry work through.
+[MIT](LICENSE). Part of [HymioSpace](https://github.com/HymioSpace). Named after MONO's *Oath*: a commitment to carry work through.
