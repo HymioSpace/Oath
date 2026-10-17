@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="390" viewBox="0 0 1280 390">
+  <title>Oath — Close the chat. The work continues.</title>
+  <desc>Oath's line-drawn keeper, wordmark and three foundations on a light background.</desc>
+  <rect width="1280" height="390" rx="24" fill="#fbfcff"/>
+  <g transform="translate(350 35) scale(1.02)" fill="none" stroke="#182237" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M51 116V65C51 39 65 26 88 26S125 39 125 65V116C125 129 117 137 105 137H71C59 137 51 129 51 116Z" fill="#fff"/>
+    <path d="M51 89C34 89 29 80 29 67V55M125 91C139 91 145 101 145 112M73 138V153M103 138V153M27 55L22 47M29 55L32 44"/>
+    <path d="M75 65V70M100 65V70" stroke-width="7"/>
+    <path d="M82 85Q88 90 94 85" stroke-width="4"/>
+    <path d="M59 108L118 120" stroke="#4b70ff" stroke-width="9"/>
+  </g>
+  <text x="553" y="173" fill="#182237" font-family="Arial,Helvetica,sans-serif" font-size="116" font-weight="700" letter-spacing="-6">oath</text>
+  <text x="640" y="255" text-anchor="middle" fill="#182237" font-family="Arial,Helvetica,sans-serif" font-size="32" letter-spacing="-.6">Close the chat. The work continues.</text>
+  <g fill="#657086" font-family="Arial,Helvetica,sans-serif" font-size="17" letter-spacing="1.1">
+    <text x="640" y="310" text-anchor="middle">EVENT-DRIVEN  ·  DURABLE  ·  SUPERVISED</text>
+  </g>
+</svg>

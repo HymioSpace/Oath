@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" fill="none">
+  <title>Oath keeper</title>
+  <desc>A small line-drawn companion with one hand raised and a blue ribbon.</desc>
+  <g stroke="#182237" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M51 116V65C51 39 65 26 88 26S125 39 125 65V116C125 129 117 137 105 137H71C59 137 51 129 51 116Z" fill="#fff"/>
+    <path d="M51 89C34 89 29 80 29 67V55M125 91C139 91 145 101 145 112M73 138V153M103 138V153"/>
+    <path d="M27 55L22 47M29 55L32 44"/>
+    <path d="M75 65V70M100 65V70" stroke-width="7"/>
+    <path d="M82 85Q88 90 94 85" stroke-width="4"/>
+  </g>
+  <path d="M59 108L118 120" stroke="#4b70ff" stroke-width="9" stroke-linecap="round"/>
+</svg>
