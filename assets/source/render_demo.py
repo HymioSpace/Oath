@@ -97,10 +97,19 @@ def render(t):
     c = Canvas()
     offline, returned = 4 <= t < 14, t >= 14
     done = t >= 11
-    c.text((38, 25), "A connection can end. The work can continue.", 24, bold=True)
-    c.text((39, 62), "One task. One persistent agent. Two independent lifecycles.", 15, MUTED)
+    if offline:
+        title = "02  You leave. Oath keeps working."
+        subtitle = "The client disconnects. Execution continues on the server."
+    elif returned:
+        title = "03  Come back to the results."
+        subtitle = "Saved progress arrives automatically. Continue the conversation."
+    else:
+        title = "01  Give Oath a task."
+        subtitle = "Start a conversation. The server takes care of execution."
+    c.text((38, 25), title, 28, bold=True)
+    c.text((39, 66), subtitle, 16, MUTED)
     c.box((38, 101, 542, 552), "#ffffff", 20, LINE)
-    c.box((560, 101, 962, 552), "#ffffff", 20, LINE)
+    c.box((560, 101, 962, 552), "#ffffff", 20, BLUE if offline else LINE, 2 if offline else 1)
     c.mascot(49, 108, 0.25)
     c.text((101, 122), "Your conversation", 17, bold=True)
     c.dot(438, 133, 4, MUTED if offline else BLUE)
@@ -111,9 +120,9 @@ def render(t):
     c.line([(580, 163), (942, 163)], LINE, 1)
     if not offline:
         if t >= 18.5:
-            c.text((69, 185), "offline.start  /  replay missed events", 11, BLUE, mono=True)
+            c.text((69, 185), "Saved while you were away", 14, BLUE, bold=True)
             chat(c, 210, ["Done while you were away.", "Saved: workspace/action-plan.md"])
-            c.text((69, 302), "offline.end  /  live", 11, MUTED, mono=True)
+            c.text((69, 302), "You're up to date", 13, MUTED)
             chat(c, 330, ["What should I tackle first?"], user=True)
             if t >= 19.7:
                 chat(c, 403, ["Start with the deployment checklist."])
@@ -122,11 +131,11 @@ def render(t):
             if t >= 1.2:
                 chat(c, 278, ["I'll read the notes and save the plan."])
         if returned and t < 18.5:
-            c.text((69, 348), "offline.start  /  replay missed events", 11, BLUE, mono=True)
+            c.text((69, 348), "Saved while you were away", 14, BLUE, bold=True)
             if t >= 14.8:
                 chat(c, 371, ["Done while you were away.", "Saved: workspace/action-plan.md"])
             if t >= 15.8:
-                c.text((69, 463), "offline.end  /  live", 11, MUTED, mono=True)
+                c.text((69, 463), "You're up to date", 13, MUTED)
         c.box((60, 499, 520, 532), PAPER, 11, LINE)
         c.text(
             (74, 507),
@@ -139,7 +148,7 @@ def render(t):
     else:
         c.box((61, 184, 519, 529), PAPER, 16)
         c.mascot(234, 226, 0.65, 3 * math.sin(t * 3))
-        c.text((163, 366), "You closed the client.", 20, bold=True)
+        c.text((142, 366), "You're offline. Oath isn't.", 23, bold=True)
         c.text(
             (127, 402),
             "Your result is saved. Come back anytime."
@@ -172,6 +181,9 @@ def render(t):
         if i < 2:
             c.line([(596, y + 26), (596, y + 55)], LINE, 1)
     c.box((583, 444, 939, 531), PAPER, 13)
+    c.box((585, 413, 937, 418), LINE, 2)
+    progress = min(1.0, max(0.01, t / 11))
+    c.box((585, 413, 585 + 352 * progress, 418), BLUE, 2)
     if t < 1:
         status, detail = "Input accepted", "Ready for a worker"
     elif not done:
@@ -189,8 +201,8 @@ def render(t):
     else:
         status, detail = "Caught up. Ready when you are.", "Idle checks make no model call."
     c.dot(599, 463, 3, BLUE)
-    c.text((612, 454), status, 14, bold=True)
-    c.text((598, 487), detail, 12, MUTED)
+    c.text((612, 454), status, 15, bold=True)
+    c.text((598, 487), detail, 13, MUTED)
     c.text((39, 576), "EVENT-DRIVEN  /  DURABLE  /  SUPERVISED", 11, MUTED, mono=True)
     c.text((791, 575), "ILLUSTRATED WORKFLOW", 10, MUTED, bold=True)
     return c.image.resize((WIDTH, HEIGHT), Image.Resampling.LANCZOS)
@@ -205,7 +217,7 @@ def main():
         ROOT / "oath-offline-demo.gif",
         save_all=True,
         append_images=frames[1:],
-        duration=170,
+        duration=80,
         loop=0,
         optimize=True,
         disposal=1,
