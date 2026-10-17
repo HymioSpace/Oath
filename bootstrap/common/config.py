@@ -1,27 +1,23 @@
 """从 `oath.toml` 读配置。
 
-字符串里的 `${VAR}` 会展开成环境变量。**凭证走这条**：配置文件里只写
-`api_key_env = "OPENAI_API_KEY"`，值从环境里取 —— 配置文件进 git，写死 key 等于
-公开它。
+本地配置不进 Git；模型密钥只用 Vault 别名引用。
 """
 
 from __future__ import annotations
 
-import os
-import re
 import tomllib
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import quote
 
 from core.protocol.datatype.config import (
     AgentConfig,
     ModelProviderConfig,
     OathConfig,
+    SecretsConfig,
     ServicesConfig,
     SupervisorConfig,
 )
-
-_ENV_RE: Final = re.compile(r"\$\{([^}]+)\}")
 
 #: 已知 coding agent 的技能目录。这里只记路径 —— 它们各自的文件格式不解析，共同的
 #: 那部分就是 `SKILL.md`。Codex 的内置技能多一层 `.system`。
@@ -31,16 +27,6 @@ _AGENT_SKILL_DIRS: Final = (
     ".codex/skills",
     ".codex/skills/.system",
 )
-
-
-def _expand(value: Any) -> Any:
-    if isinstance(value, str):
-        return _ENV_RE.sub(lambda m: os.environ.get(m.group(1), ""), value)
-    if isinstance(value, dict):
-        return {k: _expand(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_expand(v) for v in value]
-    return value
 
 
 def _absolute(value: Any, default: Path, base: Path) -> Path:
@@ -76,7 +62,7 @@ def load_config(path: str | Path, *, profile: str = "local") -> OathConfig:
         data = docker_profile(data)
     elif profile != "local":
         raise ValueError(f"Unknown deployment profile: {profile}")
-    return from_dict(_expand(data), base=file.resolve().parent)
+    return from_dict(data, base=file.resolve().parent)
 
 
 def docker_profile(data: dict[str, Any]) -> dict[str, Any]:
@@ -100,13 +86,26 @@ def docker_profile(data: dict[str, Any]) -> dict[str, Any]:
         biz_port=8766,
     )
     data["agent"].update(workspace_root="/workspace", cli_bin_dir="/app/scripts")
+    data["services"].update(
+        broker_url="amqp://"
+        + quote(data["services"].get("rabbitmq_user", "oath"), safe="")
+        + ":"
+        + quote(data["services"].get("rabbitmq_password", ""), safe="")
+        + "@rabbitmq:5672/%2F"
+    )
+    data["secrets"] = {
+        **data.get("secrets", {}),
+        "vault_url": "http://vault:8200",
+        "role_id_file": "/run/oath/role-id",
+        "secret_id_file": "/run/oath/secret-id",
+    }
     return data
 
 
 def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
     """TOML 的 dict → 配置对象。缺省值保证最小可启动。"""
     base = base or Path.cwd()
-    unknown = set(data) - {"data_root", "agent", "services", "supervisor"}
+    unknown = set(data) - {"data_root", "agent", "services", "supervisor", "secrets"}
     if unknown:
         raise ValueError(
             f"Unsupported configuration sections: {sorted(unknown)}; use oath.example.toml"
@@ -155,6 +154,17 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
         data_root=_absolute(data.get("data_root"), Path("./data"), base),
         services=ServicesConfig(**data.get("services", {})),
         supervisor=SupervisorConfig(**data.get("supervisor", {})),
+        secrets=SecretsConfig(
+            vault_url=data.get("secrets", {}).get("vault_url", "http://127.0.0.1:8200"),
+            role_id_file=_absolute(
+                data.get("secrets", {}).get("role_id_file"),
+                Path("./data/private/vault-role-id"), base,
+            ),
+            secret_id_file=_absolute(
+                data.get("secrets", {}).get("secret_id_file"),
+                Path("./data/private/vault-secret-id"), base,
+            ),
+        ),
         agent=AgentConfig(
             system_prompt=agent_raw.get("system_prompt", ""),
             provider=ModelProviderConfig(**provider_raw),

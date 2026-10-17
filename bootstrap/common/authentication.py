@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 
 from core.protocol.datatype.user import User
@@ -12,19 +11,19 @@ from core.protocol.error import PermissionDeniedError
 
 
 def service_token(config):
-    token = os.environ.get(config.services.internal_token_env, "")
+    token = config.services.internal_token
     if len(token) < 32:
-        raise ValueError(f"Set {config.services.internal_token_env} to at least 32 characters")
+        raise ValueError("Set services.internal_token to at least 32 characters")
     return token
 
 
 class UserAuthenticator:
     def __init__(self, config, *, cli=False):
-        self.users = json.loads(os.environ.get(config.services.users_env, "{}"))
+        self.users = config.services.users
         self.secret = service_token(config)
         self.cli = cli
         if not isinstance(self.users, dict):
-            raise ValueError("OATH_USERS must be a token-to-user_id JSON object")
+            raise ValueError("services.users must be a token-to-user_id table")
         for uid in self.users.values():
             User(uid)
 

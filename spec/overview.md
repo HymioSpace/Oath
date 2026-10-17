@@ -16,6 +16,7 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 | core/outbound | 持久事件的设备游标与离线补发顺序 |
 | core/supervisor | 定期检查持久待办并发送 system.invoke；空输入不调用模型 |
 | biz | trace、CLI 等 HTTP 业务能力 |
+| Vault | 模型密钥存储；Worker 按 `oath.toml` 中的别名读取 |
 | bootstrap | 配置、依赖装配、进程入口和部署生命周期 |
 | extensions、extensions-local | 公开 / 私有工具、技能和 CLI；私有目录不进 Git |
 

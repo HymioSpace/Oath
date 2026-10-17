@@ -6,6 +6,7 @@ from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.assembly import build_context
 from bootstrap.common.authentication import service_token
 from bootstrap.common.signals import shutdown_event
+from bootstrap.common.vault import VaultSecrets
 from core.compaction import CompactionCoordinator, LlmCompactor
 from core.journal.runtime_store import RuntimeStore
 from core.llm import OpenAICompatibleProvider
@@ -23,7 +24,12 @@ def run(config):
     manager = ServiceClient(config.services.manager_url, token, config.services.request_timeout)
     tools = ServiceClient(config.services.tools_url, token, config.services.request_timeout)
 
-    provider = OpenAICompatibleProvider(config.agent.provider)
+    secrets = VaultSecrets(
+        config.secrets.vault_url,
+        config.secrets.role_id_file,
+        config.secrets.secret_id_file,
+    )
+    provider = OpenAICompatibleProvider(config.agent.provider, secrets)
     compaction = CompactionCoordinator(
         RuntimeStore(storage),
         LlmCompactor(
@@ -50,5 +56,6 @@ def run(config):
         )
     finally:
         compaction.shutdown()
+        secrets.close()
         for client in (storage, queue, manager, tools):
             client.close()

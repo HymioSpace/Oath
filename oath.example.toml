@@ -1,4 +1,5 @@
-# Copy to oath.toml. Local and Docker read this file; credentials belong in .env.
+# Copy to oath.toml. The installer fills local service credentials.
+# The model API key is stored in Vault, never in this file.
 # Docker maps service addresses, bind hosts, data_root, and workspace_root to containers.
 data_root = "./data"
 
@@ -14,8 +15,11 @@ biz_port = 8766
 workers = 4
 lease_seconds = 60
 poll_seconds = 0.25
-internal_token_env = "OATH_SERVICE_TOKEN"
-users_env = "OATH_USERS"
+internal_token = ""
+users = {}
+rabbitmq_user = "oath"
+rabbitmq_password = ""
+broker_url = ""
 
 [agent]
 system_prompt = """
@@ -51,8 +55,14 @@ cli_bin_dir = "./scripts"
 [agent.provider]
 model = "gpt-4o-mini"
 api_base = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+credential = "model/openai"
+import_env = "OPENAI_API_KEY"
 timeout_seconds = 60
 
 [supervisor]
 invoke_interval_seconds = 30
+
+[secrets]
+vault_url = "http://127.0.0.1:8200"
+role_id_file = "./data/private/vault-role-id"
+secret_id_file = "./data/private/vault-secret-id"

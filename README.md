@@ -39,24 +39,27 @@ Requires Docker Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting
 git clone https://github.com/HymioSpace/Oath.git
 cd Oath
 scripts/oath-install
-# Set OPENAI_API_KEY in .env; set model and api_base in oath.toml.
-docker compose up -d --build
+# Set model, api_base, credential and import_env in oath.toml.
+# On first start, the launcher prompts for the model API key if import_env is unset.
+scripts/oath-docker up
 .venv/bin/python scripts/terminal_client.py
 ```
 
-The installer generates local credentials without overwriting existing files. Both local and Docker services read `oath.toml`; Docker maps service addresses and runtime paths to the container network. Secrets stay in `.env`. Compose runs RabbitMQ and each Oath service independently. Only two ports are published, bound to localhost by default:
+The installer creates a private `oath.toml` and local service credentials. Both local and Docker services read it. The model API key is stored in Vault under the configured alias; only the Worker has a Vault identity. The launcher's host process imports the key once, without an `.env` file. Compose runs Vault, RabbitMQ and each Oath service independently. Three ports are published, bound to localhost by default:
 
 | Endpoint | Purpose |
 | --- | --- |
 | `ws://127.0.0.1:8765` | Messages, approvals, status, streaming events and replay |
 | `http://127.0.0.1:8766` | Trace queries and CLI business APIs |
+| `http://127.0.0.1:8200` | Local Vault operator endpoint |
 
 No session creation is required. Authenticate with a user credential and a stable client ID. Disconnecting does not stop accepted work.
 
 ```bash
-docker compose logs -f worker consumer
-docker compose up -d --scale worker=3
-docker compose down  # preserves data volumes
+scripts/oath-docker status
+scripts/oath-docker logs --follow
+scripts/oath-docker set-secret  # rotate the configured model key
+scripts/oath-docker down        # preserves data volumes
 ```
 
 The terminal supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`. Use `--json` for raw protocol frames.
@@ -80,7 +83,7 @@ flowchart LR
 
 `user_id` is the isolation key. A worker holds a lease for one step; new inputs remain independently accepted and scheduled. There is no permanent per-user process or thread.
 
-The default deployment uses **one SQLite owner and one RabbitMQ node**. Service boundaries support distributed deployment; database failover and broker clustering are deployment work, not guarantees of this single-host configuration. Host Bash and the current default allow policy are intended for trusted use, not untrusted multi-tenant sandboxing.
+The default deployment uses **one SQLite owner, one RabbitMQ node and one Vault node**. Service boundaries support distributed deployment; database failover and broker clustering are deployment work, not guarantees of this single-host configuration. Host Bash and the current default allow policy are intended for trusted use, not untrusted multi-tenant sandboxing.
 
 ## Documentation
 
@@ -88,6 +91,7 @@ The default deployment uses **one SQLite owner and one RabbitMQ node**. Service 
 - [Client integration and operations](spec/manual.md)
 - [Module overview](spec/overview.md)
 - [Extensions](spec/feature-extensions.md)
+- [Vault credential flow](spec/feature-vault.md)
 
 Design documentation is currently in Chinese. The distributed-agent spec supersedes older session-based designs.
 

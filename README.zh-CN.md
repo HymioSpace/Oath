@@ -23,12 +23,12 @@ RabbitMQ 提供三条独立队列；有界 Worker 池按用户租约执行；SQL
 
 ```bash
 scripts/oath-install
-# 在 .env 设置 OPENAI_API_KEY，可选 OATH_MODEL / OATH_MODEL_URL
-docker compose up -d --build
+# 在 oath.toml 配置模型、端点与 Vault 别名；首次启动会提示输入 API Key
+scripts/oath-docker up
 .venv/bin/python scripts/terminal_client.py
 ```
 
-默认 WS 端口 8765，业务 HTTP 端口 8766，只绑定本机。数据保存在独立 Docker volumes。
+默认 WS 端口 8765，业务 HTTP 端口 8766，Vault 本机端口 8200，只绑定本机。数据保存在独立 Docker volumes。
 本机 SQLite 和单节点 RabbitMQ 不提供多机高可用，默认 Bash 也不是多租户沙箱。
 
 - [English README](README.md)

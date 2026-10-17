@@ -4,26 +4,33 @@
 
 ```bash
 scripts/oath-install
-# 编辑 oath.toml：模型、api_base、prompt 等；.env：OPENAI_API_KEY 和凭据
-docker compose up -d --build
-docker compose logs -f worker consumer
+# 编辑 oath.toml：[agent.provider] 的 model、api_base、credential、import_env。
+scripts/oath-docker up
 .venv/bin/python scripts/terminal_client.py
 ```
 
-脚本生成本地凭据并保留已有配置。`.env`、`oath.toml`、数据 volume 不进版本库。
-Compose 只读挂载同一份 oath.toml；Docker profile 将服务地址、监听地址和运行目录映射到容器。修改配置后重启服务即可，无需重建镜像。
-模型选择和 prompt 等始终以 oath.toml 为准；.env 只放凭据与 Compose 的宿主机端口映射。
-端口：WS `ws://127.0.0.1:8765`；Biz `http://127.0.0.1:8766`。默认不发布内部 RPC / AMQP。
-使用反向代理暴露远程访问时配置 TLS；设置 OATH_BIND_HOST 可更改宿主机监听地址。
+`oath.toml` 是配置入口，本地文件不进 Git。`credential` 是 Vault 中的别名；
+首次启动从宿主机的 `import_env` 读取 API Key，未提供时终端安全输入。
+启动器先启动并解封持久化 Vault，设置只读 Worker 身份、注入缺失的模型 Key，再启动 Oath。
+模型 Key 不写入 TOML，也不进入 Agent 服务环境。旧 `.env` 若存在，安装器会归档为 `data/private/legacy-environment.backup`。
 
-停止：`docker compose down` 保留数据；不要加 `-v`，除非确实要删除数据。
-Worker 扩容：`docker compose up -d --scale worker=3`。同用户仍由租约串行。
-RabbitMQ 单节点和 SQLite 单 owner 的部署限制见 feature spec。
+```bash
+scripts/oath-docker status
+scripts/oath-docker logs --follow
+scripts/oath-docker set-secret   # 显式轮换当前模型 Key
+scripts/oath-docker down         # 保留数据和 Vault volume
+```
+
+默认只在本机发布 WS `8765`、Biz `8766` 与 Vault 管理端点 `8200`。
+Compose 服务读取同一份 `oath.toml`；Docker profile 只映射地址和目录。
+容器内 RabbitMQ、Storage 等不发布到宿主机。再次启动会解封 Vault；
+`data/private/vault-bootstrap.json` 是恢复所必需的本机文件，应与 Vault volume 一起备份。
+首版的运维边界见 [Vault 设计](feature-vault.md)。
 
 ## 非 Docker
 
-安装 Python 3.11+ 与 uv 后执行 scripts/oath-install；另行启动 RabbitMQ，设置 OATH_AMQP_URL。
-编辑 oath.toml（以 oath.example.toml 为准），运行 scripts/oath-up。scripts/oath-down 或 Ctrl-C 停止。
+`scripts/oath-up` 使用 `oath.toml`，需要另行提供 RabbitMQ 和可访问的 Vault，
+并用同一套 Worker AppRole 身份文件。`scripts/oath-down` 停止服务。
 单独进程：`.venv/bin/python -m bootstrap worker --config oath.toml`。
 
 ## WS v2
@@ -69,7 +76,7 @@ RabbitMQ 单节点和 SQLite 单 owner 的部署限制见 feature spec。
 
 ## HTTP
 
-用户 bearer token 与 WS 相同；CLI capability 只能访问 CLI，不可查询 trace。
+用户 bearer token 与 WS 相同；调试时从本地 `oath.toml` 的 `services.users` 读取对应 token。CLI capability 只能访问 CLI，不可查询 trace。
 
 ```bash
 curl -H "Authorization: Bearer $OATH_USER_TOKEN" 'http://127.0.0.1:8766/list_traces?limit=10'

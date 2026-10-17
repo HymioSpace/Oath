@@ -1,6 +1,5 @@
 """Queue ingress + relay; RabbitMQ owns message delivery and acknowledgements."""
 
-import os
 import threading
 
 from bootstrap.clients.service_client import ServiceClient
@@ -14,7 +13,7 @@ def run(config):
     storage = ServiceClient(config.services.storage_url, token, config.services.request_timeout)
     stop = threading.Event()
     thread = threading.Thread(
-        target=relay, args=(storage, os.environ[config.services.broker_url_env], stop)
+        target=relay, args=(storage, config.services.broker_url, stop)
     )
     thread.start()
     try:

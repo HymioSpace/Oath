@@ -6,36 +6,4 @@ if ! command -v uv >/dev/null; then
   exit 1
 fi
 uv sync --locked
-.venv/bin/python - <<'PY'
-import json, os, secrets, shutil, sqlite3, tomllib
-from pathlib import Path
-if sqlite3.sqlite_version_info < (3, 35):
-    raise SystemExit('SQLite 3.35+ is required; install a newer Python')
-if not Path('oath.toml').exists():
-    shutil.copyfile('oath.example.toml', 'oath.toml')
-if not Path('.env').exists():
-    fd = os.open('.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, 'w') as f:
-        f.write('OATH_SERVICE_TOKEN=' + secrets.token_urlsafe(32) + '\n')
-        token = secrets.token_urlsafe(32)
-        f.write('OATH_USERS=' + json.dumps({token: 'local'}) + '\n')
-        f.write('OATH_USER_TOKEN=' + token + '\nOPENAI_API_KEY=\n')
-settings = Path('.env').read_text()
-with Path('.env').open('a') as f:
-    if 'RABBITMQ_USER=' not in settings:
-        f.write('\nRABBITMQ_USER=oath\n')
-    if 'RABBITMQ_PASSWORD=' not in settings:
-        f.write('RABBITMQ_PASSWORD=' + secrets.token_hex(24) + '\n')
-provider = tomllib.loads(Path('oath.toml').read_text()).get('agent', {}).get('provider', {})
-key_name = provider.get('api_key_env', 'OPENAI_API_KEY')
-if not isinstance(key_name, str) or not key_name.isidentifier():
-    raise SystemExit('agent.provider.api_key_env must name an environment variable')
-if not any(
-    line.startswith(key_name + '=') for line in Path('.env').read_text().splitlines()
-):
-    with Path('.env').open('a') as f:
-        f.write(key_name + '=\n')
-Path('workspace').mkdir(exist_ok=True)
-print('Ready. Configure .env, then run docker compose up -d --build.')
-print('SQLite is included in Python; no database server installation is needed.')
-PY
+.venv/bin/python -m bootstrap.setup

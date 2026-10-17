@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 from bootstrap.common.config import load_config
-from bootstrap.common.environment import load_environment
 
 SERVICES = (
     "storage",
@@ -30,7 +29,6 @@ def main():
     parser.add_argument("--config", default="oath.toml")
     parser.add_argument("--stop", action="store_true")
     args = parser.parse_args()
-    load_environment()
     config = load_config(args.config)
     root = config.data_root.resolve()
     root.mkdir(parents=True, exist_ok=True)

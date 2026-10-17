@@ -1,6 +1,5 @@
 """Consumer service dependency assembly."""
 
-import os
 import threading
 
 from bootstrap.clients.service_client import ServiceClient
@@ -35,7 +34,7 @@ def run(config):
                 storage,
                 manager,
                 context,
-                os.environ[config.services.broker_url_env],
+                config.services.broker_url,
                 stop,
                 config.services.lease_seconds,
                 config.services.poll_seconds,

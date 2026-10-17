@@ -3,8 +3,7 @@
 一份配置管三块：模型、server、路径。全部 frozen dataclass，由 `bootstrap` 从
 `oath.toml` 读出来（读法是装配层的事，core 只声明形状）。
 
-**凭证只走环境变量。** 配置里只有 `api_key_env`（环境变量名），没有 `api_key` ——
-配置文件会进 git，写死 key 等于公开它。
+模型凭据用 Vault 别名引用；本地 oath.toml 不进 Git。
 """
 
 from __future__ import annotations
@@ -30,7 +29,8 @@ class ModelProviderConfig:
 
     model: str = ""
     api_base: str = ""
-    api_key_env: str = ""
+    credential: str = ""
+    import_env: str = ""
     timeout_seconds: float = 60.0
     extra_params: JsonObject = field(default_factory=dict)
 
@@ -122,7 +122,9 @@ class AgentConfig:
 
 @dataclass(frozen=True, slots=True)
 class ServicesConfig:
-    broker_url_env: str = "OATH_AMQP_URL"
+    broker_url: str = ""
+    rabbitmq_user: str = "oath"
+    rabbitmq_password: str = ""
     bind_host: str = "127.0.0.1"
     storage_url: str = "http://127.0.0.1:8770"
     queue_url: str = "http://127.0.0.1:8771"
@@ -133,8 +135,8 @@ class ServicesConfig:
     biz_url: str = "http://127.0.0.1:8766"
     biz_host: str = "127.0.0.1"
     biz_port: int = 8766
-    internal_token_env: str = "OATH_SERVICE_TOKEN"
-    users_env: str = "OATH_USERS"
+    internal_token: str = ""
+    users: dict[str, str] = field(default_factory=dict)
     request_timeout: float = 10.0
     poll_seconds: float = 0.25
     lease_seconds: float = 60.0
@@ -166,11 +168,19 @@ class SupervisorConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SecretsConfig:
+    vault_url: str = "http://127.0.0.1:8200"
+    role_id_file: Path = Path("./data/private/vault-role-id")
+    secret_id_file: Path = Path("./data/private/vault-secret-id")
+
+
+@dataclass(frozen=True, slots=True)
 class OathConfig:
     data_root: Path = field(default_factory=lambda: Path("./data"))
     services: ServicesConfig = field(default_factory=ServicesConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
 
     @property
     def database_path(self) -> Path:

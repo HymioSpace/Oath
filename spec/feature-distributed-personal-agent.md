@@ -23,6 +23,7 @@ flowchart LR
   Manager <-->|调度版本 / 租约| Storage
   Worker -->|领取 / 续租 / 完成| Manager
   Worker -->|认领全部 buffer / 执行 step| Storage
+  Worker -->|AppRole 只读模型密钥| Vault[(Vault KV v2)]
   Worker -->|工具意图| Tools
   Storage -->|有序 Outbox| Gateway
   Biz --> Storage
@@ -187,7 +188,7 @@ H 之后的新 event（在线流）
 
 ## 7. 部署与范围
 
-Compose 启动全部服务；仅 Gateway 8765 和 Biz 8766 默认绑定宿主机 loopback，内部服务和 RabbitMQ 无公开端口。
+启动器初始化 / 解封 Vault 后，Compose 启动全部服务；Gateway 8765、Biz 8766、Vault 管理端点 8200 默认绑定宿主机 loopback。内部服务和 RabbitMQ 无公开端口。
 Storage、RabbitMQ、workspace 分别使用独立 volume。服务有独立 restart policy，Supervisor 不内存干涉其他服务。
 本地无 Docker 时 `scripts/oath-up` 做进程启动 / 重启，RabbitMQ 另行提供。
 

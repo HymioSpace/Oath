@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import contextlib
 import json
-import os
 import sys
 import uuid
 from datetime import datetime
@@ -13,7 +12,7 @@ from pathlib import Path
 from websockets.asyncio.client import connect
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from bootstrap.common.environment import load_environment
+from bootstrap.common.config import load_config
 
 
 class Console:
@@ -81,9 +80,11 @@ class Console:
 
 
 async def chat(args):
-    credential = os.environ.get("OATH_USER_TOKEN", "")
-    if not credential:
-        raise SystemExit("Set OATH_USER_TOKEN in .env")
+    config = load_config(args.config)
+    matches = [token for token, uid in config.services.users.items() if uid == args.user_id]
+    if len(matches) != 1:
+        raise SystemExit("Exactly one user credential is required for --user-id")
+    credential = matches[0]
     ui = Console(args.json)
     if not args.json:
         ui.line("OATH", f"{args.url}  ·  device={args.client_id}")
@@ -151,9 +152,10 @@ async def chat(args):
 
 
 if __name__ == "__main__":
-    load_environment()
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="ws://127.0.0.1:8765")
+    parser.add_argument("--config", default="oath.toml")
+    parser.add_argument("--user-id", default="local")
     parser.add_argument("--client-id", default="terminal")
     parser.add_argument("--json", action="store_true")
     with contextlib.suppress(KeyboardInterrupt):
