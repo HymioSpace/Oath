@@ -1,6 +1,6 @@
 # Feature — Skill：技能索引与按需加载
 
-状态：Implemented（单进程）。
+状态：历史设计（模块思路保留；当前部署、身份与存储以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准）。
 
 ## 总览
 

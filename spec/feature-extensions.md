@@ -1,6 +1,6 @@
 # Feature — 扩展目录
 
-状态：Draft
+状态：历史设计（模块思路保留；当前部署、身份与存储以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准）。
 
 ## 1 背景与目标
 

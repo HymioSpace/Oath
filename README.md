@@ -93,7 +93,7 @@ The default deployment uses **one SQLite owner, one RabbitMQ node and one Vault 
 - [Extensions](spec/feature-extensions.md)
 - [Vault credential flow](spec/feature-vault.md)
 
-Design documentation is currently in Chinese. The distributed-agent spec supersedes older session-based designs.
+Design documentation is currently in Chinese. The distributed-agent spec is the current architecture; older feature specs retain historical module designs and may describe superseded session and file-store behavior.
 
 ## Verification
 
