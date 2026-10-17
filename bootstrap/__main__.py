@@ -17,11 +17,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("service", choices=SERVICES)
     parser.add_argument("--config", default="oath.toml")
+    parser.add_argument("--profile", choices=("local", "docker"), default="local")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("pika").setLevel(logging.WARNING)
-    config = load_config(args.config)
+    config = load_config(args.config, profile=args.profile)
     importlib.import_module(SERVICES[args.service]).run(config)
 
 

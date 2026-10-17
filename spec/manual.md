@@ -4,14 +4,15 @@
 
 ```bash
 scripts/oath-install
-# 编辑 .env：OPENAI_API_KEY；可选 OATH_MODEL、OATH_MODEL_URL
+# 编辑 oath.toml：模型、api_base、prompt 等；.env：OPENAI_API_KEY 和凭据
 docker compose up -d --build
 docker compose logs -f worker consumer
 .venv/bin/python scripts/terminal_client.py
 ```
 
 脚本生成本地凭据并保留已有配置。`.env`、`oath.toml`、数据 volume 不进版本库。
-Compose 使用 deploy/oath.docker.toml；宿主机 oath.toml 不会被隐式挂载。修改部署配置后重建镜像。
+Compose 只读挂载同一份 oath.toml；Docker profile 将服务地址、监听地址和运行目录映射到容器。修改配置后重启服务即可，无需重建镜像。
+模型选择和 prompt 等始终以 oath.toml 为准；.env 只放凭据与 Compose 的宿主机端口映射。
 端口：WS `ws://127.0.0.1:8765`；Biz `http://127.0.0.1:8766`。默认不发布内部 RPC / AMQP。
 使用反向代理暴露远程访问时配置 TLS；设置 OATH_BIND_HOST 可更改宿主机监听地址。
 

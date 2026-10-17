@@ -5,10 +5,9 @@ x-service: &service
   init: true
   restart: unless-stopped
   env_file: .env
+  volumes: ["./oath.toml:/app/oath.toml:ro"]
   environment: &environment
     OATH_AMQP_URL: amqp://${RABBITMQ_USER:?Run scripts/oath-install}:${RABBITMQ_PASSWORD:?Run scripts/oath-install}@rabbitmq:5672/%2F
-    OATH_MODEL: ${OATH_MODEL:-gpt-4o-mini}
-    OATH_MODEL_URL: ${OATH_MODEL_URL:-https://api.openai.com/v1}
   stop_grace_period: 30s
   networks: [oath]
 services:
@@ -28,8 +27,8 @@ services:
       retries: 12
   storage:
     <<: *service
-    command: [storage, --config, /app/deploy/oath.docker.toml]
-    volumes: [oath-data:/data]
+    command: [storage, --config, /app/oath.toml, --profile, docker]
+    volumes: ["./oath.toml:/app/oath.toml:ro", oath-data:/data]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8770/heartbeat]
       interval: 5s
@@ -37,7 +36,7 @@ services:
       retries: 10
   queue:
     <<: *service
-    command: [queue, --config, /app/deploy/oath.docker.toml]
+    command: [queue, --config, /app/oath.toml, --profile, docker]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8771/heartbeat]
       interval: 3s
@@ -48,7 +47,7 @@ services:
       rabbitmq: {condition: service_healthy}
   manager:
     <<: *service
-    command: [manager, --config, /app/deploy/oath.docker.toml]
+    command: [manager, --config, /app/oath.toml, --profile, docker]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8772/heartbeat]
       interval: 3s
@@ -58,36 +57,36 @@ services:
       storage: {condition: service_healthy}
   tools:
     <<: *service
-    command: [tools, --config, /app/deploy/oath.docker.toml]
+    command: [tools, --config, /app/oath.toml, --profile, docker]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8773/heartbeat]
       interval: 3s
       timeout: 2s
       retries: 20
-    volumes: [workspace:/workspace]
+    volumes: ["./oath.toml:/app/oath.toml:ro", workspace:/workspace]
     depends_on:
       storage: {condition: service_healthy}
   consumer:
     <<: *service
-    command: [consumer, --config, /app/deploy/oath.docker.toml]
+    command: [consumer, --config, /app/oath.toml, --profile, docker]
     depends_on:
       rabbitmq: {condition: service_healthy}
       storage: {condition: service_healthy}
   worker:
     <<: *service
-    command: [worker, --config, /app/deploy/oath.docker.toml]
+    command: [worker, --config, /app/oath.toml, --profile, docker]
     depends_on:
       storage: {condition: service_healthy}
       manager: {condition: service_healthy}
       tools: {condition: service_healthy}
   supervisor:
     <<: *service
-    command: [supervisor, --config, /app/deploy/oath.docker.toml]
+    command: [supervisor, --config, /app/oath.toml, --profile, docker]
     depends_on:
       storage: {condition: service_healthy}
   gateway:
     <<: *service
-    command: [gateway, --config, /app/deploy/oath.docker.toml]
+    command: [gateway, --config, /app/oath.toml, --profile, docker]
     healthcheck:
       test: [CMD, curl, -fsS, http://127.0.0.1:8765/heartbeat]
       interval: 3s
@@ -99,7 +98,7 @@ services:
       queue: {condition: service_healthy}
   biz:
     <<: *service
-    command: [biz, --config, /app/deploy/oath.docker.toml]
+    command: [biz, --config, /app/oath.toml, --profile, docker]
     ports: ["${OATH_BIND_HOST:-127.0.0.1}:${OATH_HTTP_PORT:-8766}:8766"]
     depends_on:
       storage: {condition: service_healthy}

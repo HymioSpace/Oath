@@ -12,7 +12,5 @@
 !extensions/**
 !scripts/
 !scripts/oath-cli
-!deploy/
-!deploy/oath.docker.toml
 **/__pycache__
 **/*.pyc

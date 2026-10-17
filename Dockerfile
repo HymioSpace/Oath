@@ -11,8 +11,7 @@ COPY bootstrap bootstrap
 COPY biz biz
 COPY extensions extensions
 COPY scripts/oath-cli scripts/oath-cli
-COPY deploy/oath.docker.toml deploy/oath.docker.toml
 RUN useradd --create-home --uid 10001 oath && mkdir -p /data /workspace && chown oath:oath /data /workspace && chmod +x scripts/oath-cli
 USER oath
 ENTRYPOINT ["python", "-m", "bootstrap"]
-CMD ["gateway", "--config", "/app/deploy/oath.docker.toml"]
+CMD ["gateway", "--config", "/app/oath.toml", "--profile", "docker"]

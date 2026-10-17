@@ -92,8 +92,6 @@ def main():
                 "OPENAI_API_KEY=local-stub",
                 "RABBITMQ_USER=oath",
                 "RABBITMQ_PASSWORD=" + secrets.token_hex(24),
-                "OATH_MODEL=e2e",
-                f"OATH_MODEL_URL=http://host.docker.internal:{model_port}/v1",
                 f"OATH_WS_PORT={ws_port}",
                 f"OATH_HTTP_PORT={http_port}",
             ]
@@ -101,6 +99,13 @@ def main():
         + "\n"
     )
     env.chmod(0o600)
+    config = (ROOT / "oath.example.toml").read_text()
+    config = config.replace('model = "gpt-4o-mini"', 'model = "e2e"')
+    config = config.replace(
+        'api_base = "https://api.openai.com/v1"',
+        f'api_base = "http://host.docker.internal:{model_port}/v1"',
+    )
+    (root / "oath.toml").write_text(config)
     spec = yaml.safe_load((ROOT / "compose.yaml").read_text())
     spec.pop("x-service", None)
     for service in spec["services"].values():
@@ -108,6 +113,12 @@ def main():
             service["build"] = str(ROOT)
         if "env_file" in service:
             service["env_file"] = str(env)
+        if "volumes" in service:
+            service["volumes"] = [
+                str(root / "oath.toml") + ":/app/oath.toml:ro"
+                if volume == "./oath.toml:/app/oath.toml:ro" else volume
+                for volume in service["volumes"]
+            ]
     compose = root / "compose.yaml"
     compose.write_text(yaml.safe_dump(spec))
     project = "oath-e2e-" + str(os.getpid())

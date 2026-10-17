@@ -65,13 +65,42 @@ def _absolute_dirs(values: Any, default: tuple[Path, ...], base: Path) -> tuple[
     return tuple(path if path.is_absolute() else base / path for path in paths)
 
 
-def load_config(path: str | Path) -> OathConfig:
+def load_config(path: str | Path, *, profile: str = "local") -> OathConfig:
     """读一份配置。文件不存在直接报错 —— 起不来就说清楚为什么。"""
     file = Path(path)
     if not file.exists():
         raise FileNotFoundError(f"配置文件不存在: {file}")
     with file.open("rb") as handle:
-        return from_dict(_expand(tomllib.load(handle)), base=file.resolve().parent)
+        data = tomllib.load(handle)
+    if profile == "docker":
+        data = docker_profile(data)
+    elif profile != "local":
+        raise ValueError(f"Unknown deployment profile: {profile}")
+    return from_dict(_expand(data), base=file.resolve().parent)
+
+
+def docker_profile(data: dict[str, Any]) -> dict[str, Any]:
+    """Map host paths and service addresses to the Compose network."""
+    data = {
+        **data,
+        "services": dict(data.get("services", {})),
+        "agent": dict(data.get("agent", {})),
+    }
+    data["data_root"] = "/data"
+    data["services"].update(
+        bind_host="0.0.0.0",
+        storage_url="http://storage:8770",
+        queue_url="http://queue:8771",
+        manager_url="http://manager:8772",
+        tools_url="http://tools:8773",
+        biz_url="http://biz:8766",
+        gateway_host="0.0.0.0",
+        gateway_port=8765,
+        biz_host="0.0.0.0",
+        biz_port=8766,
+    )
+    data["agent"].update(workspace_root="/workspace", cli_bin_dir="/app/scripts")
+    return data
 
 
 def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:

@@ -39,13 +39,12 @@ Requires Docker Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting
 git clone https://github.com/HymioSpace/Oath.git
 cd Oath
 scripts/oath-install
-# Set OPENAI_API_KEY in .env.
-# Optional: OATH_MODEL and OATH_MODEL_URL for another OpenAI-compatible endpoint.
+# Set OPENAI_API_KEY in .env; set model and api_base in oath.toml.
 docker compose up -d --build
 .venv/bin/python scripts/terminal_client.py
 ```
 
-The installer generates local credentials without overwriting existing files. Compose runs RabbitMQ and each Oath service independently. Only two ports are published, bound to localhost by default:
+The installer generates local credentials without overwriting existing files. Both local and Docker services read `oath.toml`; Docker maps service addresses and runtime paths to the container network. Secrets stay in `.env`. Compose runs RabbitMQ and each Oath service independently. Only two ports are published, bound to localhost by default:
 
 | Endpoint | Purpose |
 | --- | --- |

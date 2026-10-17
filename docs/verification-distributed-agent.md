@@ -20,7 +20,7 @@ Bash tool round trip, user isolation, Biz trace queries, Worker termination and
 lease recovery, Storage restart, rejection of stale lease writes, RabbitMQ outage
 and recovery, context compaction across steps, and idle Supervisor without model calls.
 
-The Docker check creates isolated volumes and ports, starts all services,
+The Docker check mounts a temporary oath.toml, creates isolated volumes and ports, starts all services,
 executes a Bash tool round trip while the client is disconnected, queries traces,
 and reconnects to verify ordered replay. It removes its own containers and volumes.
 
