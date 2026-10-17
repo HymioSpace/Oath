@@ -4,14 +4,14 @@
 **执行用 POST 而不是 GET** —— 命令是动作；将来代理写操作时，GET 的缓存、预取与重试
 语义都不对。
 
-**鉴权只有一处**：请求头里的 credential 换成 scope，之后 `user_context` 整份交给命令 ——
+**鉴权只有一处**：请求头里的 credential 换成 user，之后 `user_context` 整份交给命令 ——
 框架不解释它、不拿它判权限，要不要用、怎么判是业务自己的事。
 
 命令本身在扩展目录里声明（`COMMANDS`，见 `spec/feature-extensions.md`），启动时扫出来
 由 biz 持有。handler 的签名统一：参数按 `parameters` 声明的名字接，另有两个
 keyword-only 参数由框架给：
 
-- `scope`：这次调用属于哪个会话；
+- `user`：这次调用属于哪个会话；
 - `user_context`：客户端随消息带来的 kv，已裁掉超过 24 小时没碰过的项。
 """
 
@@ -29,7 +29,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from biz.service import BizService
-from biz.session_scope import BadQuery, Unauthorized, error_response, scope_of
+from biz.user_identity import BadQuery, Unauthorized, error_response, user_of
 from core.protocol.interface.agent_access import AgentUnavailable
 from core.utils.encoding import JsonObject, JsonValue
 
@@ -72,13 +72,13 @@ def _command_endpoint(service: BizService) -> Callable[[Request], Any]:
             return JSONResponse({"error": "unknown_command", "name": name}, status_code=404)
         try:
             # 先认身份再读 body：参数不合法不该在没通过认证之前被试探出来。
-            scope = scope_of(service, request)
+            user = user_of(service, request)
             arguments = await _arguments(declaration, request)
         except (Unauthorized, BadQuery) as exc:
             return error_response(exc)
 
         try:
-            value = await run_in_threadpool(service.run_cli, scope, name, arguments)
+            value = await run_in_threadpool(service.run_cli, user, name, arguments)
             return JSONResponse(value)
         except KeyError:
             # 命令表与执行端不一致：重启的窗口期里客户端会看到这个。

@@ -53,8 +53,7 @@ class MessageEventType:
 
     `TOOL_CALL` 也从这里走：它也是模型说的话的一部分，客户端要靠它显示「正在调什么」。
 
-    `DELTA` 是唯一**不落盘**的一个：它是一段增量文本，收到就往界面上追加，重放时靠
-    完整的 `ASSISTANT_MESSAGE` 兜底。落盘它等于让 journal 里出现半句话。
+    DELTA 同样持久化到 Outbox；完整消息是最终展示依据，重试按 attempt 区分。
     """
 
     USER_MESSAGE: Final = "user.message"
@@ -77,8 +76,7 @@ class MessageEvent(AgentEvent):
     def to_dict(self) -> JsonObject:
         return {
             "type": self.type,
-            "user_id": self.scope.user_id,
-            "session_id": self.scope.session_id,
+            "user_id": self.user.user_id,
             "payload": self.payload,
             "idempotency_key": self.idempotency_key,
             "occur_dt": self.occur_dt,

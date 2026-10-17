@@ -13,7 +13,7 @@ from typing import cast
 from core.compaction.coordinator import CompactionCoordinator
 from core.intake import IntakeCoordinator
 from core.journal.runtime_store import State
-from core.protocol.datatype import Message, Scope, ToolCallRequest, ToolDefinition
+from core.protocol.datatype import Message, ToolCallRequest, ToolDefinition, User
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
 from core.protocol.datatype.message import MessageEvent, MessageEventType
 from core.protocol.datatype.trace import (
@@ -24,7 +24,6 @@ from core.protocol.datatype.trace import (
     SpanLink,
     SpanStatus,
 )
-from core.protocol.interface.brain import Brain
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
 from core.shell import workspace_note
@@ -66,7 +65,7 @@ from core.utils.tokens import estimate_text
 _log = logging.getLogger(__name__)
 
 
-class AgentBrain(Brain):
+class AgentBrain:
     def __init__(
         self, ctx: AgentContext, provider: ModelProvider, compaction: CompactionCoordinator
     ) -> None:
@@ -77,15 +76,6 @@ class AgentBrain(Brain):
         self._stages: dict[str, dict[str, SpanEvent]] = {}
         self._stop = threading.Event()
         self.intake = IntakeCoordinator(ctx, self, self._stop)
-
-    def wake(self, scope: Scope) -> None:
-        self.intake.wake(scope)
-
-    def resume(self, scope: Scope) -> None:
-        self.intake.resume(scope)
-
-    def retry(self, scope: Scope) -> None:
-        self.intake.retry(scope)
 
     def system_prompt(self) -> str:
         """system prompt + 工作区 + 技能索引。模型先读规则，再知道在哪干活、有什么可选能力。
@@ -99,7 +89,7 @@ class AgentBrain(Brain):
         ]
         return "\n\n".join(part for part in parts if part)
 
-    def _prepare_request(self, scope: Scope, step: State) -> State:
+    def _prepare_request(self, user: User, step: State) -> State:
         if step["request"] is not None:
             return step
         draft = step["request_draft"]
@@ -107,7 +97,9 @@ class AgentBrain(Brain):
         # system prompt 已在 draft；Coordinator 负责加入固定开销，不能重复计入。
         overhead = estimate_text(canonical_json(draft["tools"])) + draft["max_output_tokens"]
         prompt = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
-        self._compaction.prepare(scope, overhead=overhead, system_prompt=prompt)
+        self._compaction.prepare(
+            user, overhead=overhead, system_prompt=prompt, fence=self._store.fence
+        )
         if self._stop.is_set():
             return step
 
@@ -121,33 +113,33 @@ class AgentBrain(Brain):
                 current["request_draft"] = None
             return cast(State, current)
 
-        prepared = self._store.transact(scope, "step.request", freeze)
+        prepared = self._store.transact(user, "step.request", freeze)
         # 压缩判定可能同步调一次模型，所以这个时刻之前的时间都算「模型之前」。
         self._stage(
-            scope,
+            user,
             step["step_id"],
             STAGE_REQUEST_PREPARED,
             {OATH_STEP_INPUT_COUNT: len(prepared["request"]["messages"])},
         )
         return prepared
 
-    def execute(self, scope: Scope, step: State) -> None:
+    def execute(self, user: User, step: State) -> None:
         if step["response"] is None:
-            step = self._prepare_request(scope, step)
+            step = self._prepare_request(user, step)
         if self._stop.is_set():
             return
         step_id = step["step_id"]
         if step["response"] is None:
             if step["attempts"] >= self._ctx.config.llm_max_attempts:
-                self._fail(scope, step_id, "模型重试次数已耗尽")
+                self._fail(user, step_id, "模型重试次数已耗尽")
                 return
 
             def attempt(state: State) -> None:
                 state["steps"][step_id]["attempts"] += 1
 
-            self._store.transact(scope, "step.attempt", attempt)
+            self._store.transact(user, "step.attempt", attempt)
             attempt_no = int(step["attempts"]) + 1
-            emit = self._delta(scope, step_id)
+            emit = self._delta(user, step_id)
             # ttft = 第一段增量到达的时刻。计时用单调时钟：墙上时间会被 NTP 拨一下。
             timing: list[float] = []
             clock = time.monotonic()
@@ -164,23 +156,22 @@ class AgentBrain(Brain):
                     return
                 payload = _response(response)
             except Exception as exc:
-                self._record_llm(scope, step, attempt_no, started_ns, clock, timing, None, str(exc))
-                self._fail(scope, step_id, str(exc))
+                self._record_llm(user, step, attempt_no, started_ns, clock, timing, None, str(exc))
+                self._fail(user, step_id, str(exc))
                 return
-            self._record_llm(scope, step, attempt_no, started_ns, clock, timing, response, None)
+            self._record_llm(user, step, attempt_no, started_ns, clock, timing, response, None)
 
             def save(state: State) -> None:
                 state["steps"][step_id]["response"] = payload
 
-            self._store.transact(scope, "step.response", save)
+            self._store.transact(user, "step.response", save)
             step["response"] = payload
-            self.emit(scope, "assistant.message", {**payload, "step_id": step_id})
         # 已保存响应后只补后处理；不重新调用模型。
-        cancelled = self._store.read(scope)["meta"].get(f"cancelled:{step['run_id']}")
+        cancelled = self._store.read(user)["meta"].get(f"cancelled:{step['run_id']}")
         calls = [] if cancelled else step["response"]["tool_calls"]
         if calls:
             self._ctx.tools.submit_batch(
-                scope,
+                user,
                 step_id,
                 [
                     ToolCallRequest(
@@ -194,7 +185,7 @@ class AgentBrain(Brain):
                     for i, c in enumerate(calls)
                 ],
             )
-            self._stage(scope, step_id, STAGE_TOOLS_SUBMITTED, {OATH_STEP_TOOL_CALLS: len(calls)})
+            self._stage(user, step_id, STAGE_TOOLS_SUBMITTED, {OATH_STEP_TOOL_CALLS: len(calls)})
 
         def finish(state: State) -> State:
             current = state["steps"][step_id]
@@ -219,41 +210,35 @@ class AgentBrain(Brain):
             return cast(State, current)
 
         # 终态从事务里回读，不复用认领时那份 —— 写进 span 的必须是最终的 status。
-        closed = self._store.transact(scope, "step.completed", finish)
-        self._stage(scope, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
-        self._close_step(scope, closed, SpanStatus.OK, int(closed["attempts"]))
+        closed = self._store.transact(user, "step.completed", finish)
+        self._stage(user, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
+        self._close_step(user, closed, SpanStatus.OK, int(closed["attempts"]))
 
-    def _fail(self, scope: Scope, step_id: str, error: str) -> None:
+    def _fail(self, user: User, step_id: str, error: str) -> None:
         def change(state: State) -> State:
             step = state["steps"][step_id]
             failed = step["attempts"] >= self._ctx.config.llm_max_attempts
             step.update(status="failed" if failed else "prepared", error=error[:500])
             return cast(State, step)
 
-        step = self._store.transact(scope, "step.error", change)
-        self.emit(
-            scope,
-            "step.status",
-            {"step_id": step_id, "status": step["status"], "error": error[:500]},
-        )
+        step = self._store.transact(user, "step.error", change)
         if step["status"] == "failed":
-            self._close_step(scope, step, SpanStatus.ERROR, int(step["attempts"]))
+            self._close_step(user, step, SpanStatus.ERROR, int(step["attempts"]))
             return
         self._stop.wait(self._ctx.config.llm_retry_delay)
-        self.resume(scope)
 
     # -- trace ---------------------------------------------------------------
 
-    def _trace(self, scope: Scope, span: Span) -> None:
+    def _trace(self, user: User, span: Span) -> None:
         """写一条 span。**写失败不上抛**：trace 是派生的，journal 才是事实来源。"""
         try:
-            self._ctx.traces.append(scope, span)
+            self._ctx.traces.append(user, span)
         except Exception:
             _log.exception("写 trace 失败，推理不受影响")
 
     def open_step(
         self,
-        scope: Scope,
+        user: User,
         step: State,
         claimed: list[tuple[str, float | None, State]],
         links: tuple[SpanLink, ...],
@@ -261,7 +246,7 @@ class AgentBrain(Brain):
         """step 认领时的第一条 span。`end` 为空 —— 进程崩在这一步中途就留个空 end。"""
         started = int(step["trace_started"])
         self._trace(
-            scope,
+            user,
             Span(
                 trace_id=step["trace_id"],
                 span_id=_step_span_id(step["step_id"]),
@@ -283,7 +268,7 @@ class AgentBrain(Brain):
             ),
         )
 
-    def _stage(self, scope: Scope, step_id: str, name: str, attributes: JsonObject) -> None:
+    def _stage(self, user: User, step_id: str, name: str, attributes: JsonObject) -> None:
         """记一个 Brain 阶段节点。step span 要到最后才整条写出去，节点先攒着。
 
         攒在内存里而不是 journal 里：trace 不参与恢复，进程崩了这几个节点就该没有。
@@ -296,7 +281,7 @@ class AgentBrain(Brain):
         with self._lock:
             return tuple(self._stages.pop(step_id, {}).values())
 
-    def _close_step(self, scope: Scope, step: State, status: str, llm_calls: int) -> None:
+    def _close_step(self, user: User, step: State, status: str, llm_calls: int) -> None:
         """step 到终态时的第二条 span。同一个 span_id，读的时候后写的赢。
 
         输入事件在这里重读一遍，不靠认领时那份：后写的整条覆盖先写的，事件不补回来
@@ -304,13 +289,13 @@ class AgentBrain(Brain):
         """
         start = int(step["trace_started"])
         end = time.time_ns()
-        state = self._store.read(scope)
+        state = self._store.read(user)
         entries = state["inputs"]
         inputs = [entries[key] for key in step["input_ids"] if key in entries]
         claimed = [(entry["queue"], entry["buffered_at"], entry["item"]) for entry in inputs]
         stages = self._take_stages(step["step_id"])
         self._trace(
-            scope,
+            user,
             Span(
                 trace_id=step["trace_id"],
                 span_id=_step_span_id(step["step_id"]),
@@ -336,7 +321,7 @@ class AgentBrain(Brain):
 
     def _record_llm(
         self,
-        scope: Scope,
+        user: User,
         step: State,
         attempt: int,
         started_ns: int,
@@ -380,7 +365,7 @@ class AgentBrain(Brain):
             raw = canonical_json(_body(response))
             events.append(SpanEvent(RESPONSE_EVENT, end_ns, {BODY: raw}))
         self._trace(
-            scope,
+            user,
             Span(
                 trace_id=step["trace_id"],
                 span_id=_llm_span_id(step["step_id"], attempt),
@@ -395,34 +380,34 @@ class AgentBrain(Brain):
             ),
         )
 
-    def _delta(self, scope: Scope, step_id: str) -> Callable[[str, str], None]:
+    def _delta(self, user: User, step_id: str) -> Callable[[str, str], None]:
         counter = itertools.count(1)
+        attempt = self._ctx.store.read(user)["steps"][step_id]["attempts"]
 
-        def emit(channel: str, text: str) -> None:
+        def delta(channel: str, text: str) -> None:
             self.emit(
-                scope,
+                user,
                 MessageEventType.DELTA,
-                {"step_id": step_id, "seq": next(counter), "channel": channel, "text": text},
+                {
+                    "step_id": step_id,
+                    "attempt": attempt,
+                    "seq": next(counter),
+                    "channel": channel,
+                    "text": text,
+                },
             )
 
-        return emit
+        return delta
 
-    def emit(self, scope: Scope, type_: str, payload: State) -> None:
-        try:
-            self._ctx.sink.emit(
-                MessageEvent(
-                    type=type_,
-                    scope=scope,
-                    payload=payload,
-                    idempotency_key="",
-                    occur_dt=utc_now_iso(),
-                )
+    def emit(self, user: User, type_: str, payload: State) -> None:
+        self._ctx.sink.emit(
+            MessageEvent(
+                type=type_, user=user, payload=payload, idempotency_key="", occur_dt=utc_now_iso()
             )
-        except Exception:
-            _log.exception("Brain 通知失败，已保存状态可查询")
+        )
 
     def close(self, *, wait: bool = True) -> None:
-        self.intake.close(wait=wait)
+        self._stop.set()
         with self._lock:
             self._stages.clear()
 

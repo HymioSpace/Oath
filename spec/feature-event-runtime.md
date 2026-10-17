@@ -1,6 +1,8 @@
 # Feature — 事件通路与客户端接入
 
-状态：Implemented（WebSocket + 三条进程外队列）。
+> 部署、身份、持久化和传输以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准；下文保留原模块设计背景。
+
+状态：历史设计（模块思路保留；当前部署、身份与存储以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准）。
 
 ## 总览
 

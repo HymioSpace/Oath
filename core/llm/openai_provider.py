@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from dataclasses import dataclass, field
 
 import httpx
@@ -139,10 +138,6 @@ def build_payload(request: LlmRequest, model: str, *, stream: bool = False) -> J
     payload.update(request.extra_params)
     payload["stream"] = stream
     return payload
-
-
-def _api_key(config: ModelProviderConfig) -> str:
-    return os.environ.get(config.api_key_env, "")
 
 
 def parse_response(body: JsonValue) -> LlmResponse:
@@ -374,13 +369,17 @@ class _StreamAccumulator:
 class OpenAICompatibleProvider(ModelProvider):
     """一次 chat/completions 调用。`on_delta` 给了就走流式。"""
 
-    def __init__(self, config: ModelProviderConfig) -> None:
+    def __init__(self, config: ModelProviderConfig, secrets=None) -> None:
         self._config = config
+        self._secrets = secrets
 
     def complete(self, request: LlmRequest, *, on_delta: DeltaSink | None = None) -> LlmResponse:
-        key = _api_key(self._config)
-        if not key:
-            raise LlmError(f"环境变量 {self._config.api_key_env} 没设置，取不到 api key")
+        if not self._secrets or not self._config.credential:
+            raise LlmError("Model credential is not configured")
+        try:
+            key = self._secrets.get(self._config.credential)
+        except Exception as exc:
+            raise LlmError("Cannot read model credential from Vault") from exc
         base = self._config.api_base.rstrip("/")
         if base.endswith(_CHAT_SUFFIX):
             base = base[: -len(_CHAT_SUFFIX)]

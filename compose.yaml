@@ -1,0 +1,128 @@
+name: oath
+x-service: &service
+  image: oath-runtime:local
+  build: .
+  init: true
+  restart: unless-stopped
+  volumes: ["${OATH_CONFIG_PATH:-./oath.toml}:/app/oath.toml:ro"]
+  stop_grace_period: 30s
+  networks: [oath]
+services:
+  vault:
+    image: hashicorp/vault:1.21.2
+    restart: unless-stopped
+    cap_add: [IPC_LOCK]
+    command: [server]
+    volumes:
+      - vault-data:/vault/file
+      - ./deploy/vault.hcl:/vault/config/vault.hcl:ro
+    ports: ["127.0.0.1:${OATH_VAULT_PORT:-8200}:8200"]
+    networks: [oath]
+    healthcheck:
+      test: [CMD, vault, status, -address=http://127.0.0.1:8200]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+  rabbitmq:
+    image: rabbitmq:4.2-management
+    restart: unless-stopped
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?Run scripts/oath-install}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Run scripts/oath-install}
+    volumes: [rabbitmq-data:/var/lib/rabbitmq]
+    networks: [oath]
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+  storage:
+    <<: *service
+    command: [storage, --config, /app/oath.toml, --profile, docker]
+    volumes: ["${OATH_CONFIG_PATH:-./oath.toml}:/app/oath.toml:ro", oath-data:/data]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8770/heartbeat]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  queue:
+    <<: *service
+    command: [queue, --config, /app/oath.toml, --profile, docker]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8771/heartbeat]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    depends_on:
+      storage: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+  manager:
+    <<: *service
+    command: [manager, --config, /app/oath.toml, --profile, docker]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8772/heartbeat]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    depends_on:
+      storage: {condition: service_healthy}
+  tools:
+    <<: *service
+    command: [tools, --config, /app/oath.toml, --profile, docker]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8773/heartbeat]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    volumes: ["${OATH_CONFIG_PATH:-./oath.toml}:/app/oath.toml:ro", workspace:/workspace]
+    depends_on:
+      storage: {condition: service_healthy}
+  consumer:
+    <<: *service
+    command: [consumer, --config, /app/oath.toml, --profile, docker]
+    depends_on:
+      rabbitmq: {condition: service_healthy}
+      storage: {condition: service_healthy}
+  worker:
+    <<: *service
+    command: [worker, --config, /app/oath.toml, --profile, docker]
+    volumes:
+      - ${OATH_CONFIG_PATH:-./oath.toml}:/app/oath.toml:ro
+      - ${OATH_ROLE_ID_PATH:-./data/private/vault-role-id}:/run/oath/role-id:ro
+      - ${OATH_SECRET_ID_PATH:-./data/private/vault-secret-id}:/run/oath/secret-id:ro
+    depends_on:
+      vault: {condition: service_healthy}
+      storage: {condition: service_healthy}
+      manager: {condition: service_healthy}
+      tools: {condition: service_healthy}
+  supervisor:
+    <<: *service
+    command: [supervisor, --config, /app/oath.toml, --profile, docker]
+    depends_on:
+      storage: {condition: service_healthy}
+  gateway:
+    <<: *service
+    command: [gateway, --config, /app/oath.toml, --profile, docker]
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:8765/heartbeat]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+    ports: ["${OATH_BIND_HOST:-127.0.0.1}:${OATH_WS_PORT:-8765}:8765"]
+    depends_on:
+      storage: {condition: service_healthy}
+      queue: {condition: service_healthy}
+  biz:
+    <<: *service
+    command: [biz, --config, /app/oath.toml, --profile, docker]
+    ports: ["${OATH_BIND_HOST:-127.0.0.1}:${OATH_HTTP_PORT:-8766}:8766"]
+    depends_on:
+      storage: {condition: service_healthy}
+volumes:
+  oath-data:
+  vault-data:
+  rabbitmq-data:
+  workspace:
+networks:
+  oath:

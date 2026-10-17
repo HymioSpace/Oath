@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Final, NotRequired, TypedDict
 
 from core.protocol.datatype.event import AgentEvent
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject, parse_timestamp, utc_now_iso
 
 
@@ -85,8 +85,7 @@ class PermissionRecordType:
 class PermissionRecordDict(TypedDict):
     """落盘的一行。字段名与 `PermissionRecord` 的字段一一对应。"""
 
-    scope_user_id: str
-    scope_session_id: str
+    user_id: str
     type: str
     tool_call_id: str
     invocation_id: str
@@ -119,8 +118,7 @@ class PermissionEvent(AgentEvent):
     def to_dict(self) -> JsonObject:
         return {
             "type": self.type,
-            "user_id": self.scope.user_id,
-            "session_id": self.scope.session_id,
+            "user_id": self.user.user_id,
             "tool_call_id": self.tool_call_id,
             "invocation_id": self.invocation_id,
             "tool": self.tool,
@@ -148,7 +146,7 @@ class PermissionRecord:
     墙钟会回拨）。
     """
 
-    scope: Scope
+    user: User
     tool_call_id: str
     invocation_id: str
     tool: str
@@ -166,8 +164,7 @@ class PermissionRecord:
 
     def to_dict(self) -> PermissionRecordDict:
         return PermissionRecordDict(
-            scope_user_id=self.scope.user_id,
-            scope_session_id=self.scope.session_id,
+            user_id=self.user.user_id,
             type=(
                 PermissionRecordType.RESOLVED
                 if self.is_resolved

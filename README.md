@@ -10,176 +10,106 @@
 
 <p align="center">
   <strong>English</strong> · <a href="README.zh-CN.md">简体中文</a><br />
-  <a href="#three-principles">Three principles</a> · <a href="#quick-start">Quick start</a> · <a href="#how-it-works">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
+  <a href="#three-foundations">Three principles</a> · <a href="#quick-start">Quick start</a> · <a href="#architecture">Architecture</a> · <a href="#documentation">Documentation</a> · <a href="#contributing">Contributing</a>
 </p>
 
-Oath is a Python agent runtime built around three principles: **event-driven execution, durable state, and independent supervision**. It provides the foundation for agents that handle incoming messages, run tools, wait for approvals, and continue work across interruptions.
+Oath is an **event-driven, durable, independently supervised agent runtime** for personal agents that keep working when the user goes offline.
 
-Ask your service for a session, connect over WebSocket, add your tools and skills, and use HTTP APIs to inspect runs. Oath is part of [HymioSpace](https://github.com/HymioSpace) and can also run independently.
+One user, one persistent agent. Connect over WebSocket, expose business capabilities over HTTP, and execute work through a bounded worker pool. Part of [HymioSpace](https://github.com/HymioSpace).
 
-> **Early development.** APIs may change. Each session runs in its own process and the queue is external middleware, so an agent process can die and be restarted without losing accepted work; sharing one session across machines is outside its guarantees.
+## Three foundations
 
-## Three principles
-
-### Event-driven — respond as work arrives
-
-User messages, tool results, and system decisions enter separate queues — external middleware that outlives any process. Each session runs its own agent process with one consumer per queue; each consumer decides when to wake the agent, so a pending approval does not have to hold up unrelated results.
-
-### Durable — keep progress through interruptions
-
-Incoming events land in a persistent buffer, not the journal: an append-only journal records only what the agent actually claimed, together with execution intent and state transitions. Recovery preserves step and tool-call identities, pending approvals, and recorded results. External actions with uncertain outcomes are reported explicitly, never blindly repeated.
-
-### Supervisor — keep execution moving
-
-Every session has its own supervisor process. It periodically publishes a `system.invoke` event — an event, not a call — that wakes the agent to re-examine buffered input. Sessions are reclaimed on connection count alone. Empty buffers require no LLM call. See the [Supervisor design](spec/feature-supervisor.md).
-
-Together, these principles define how Oath reacts to new work, preserves what happened, and identifies when execution needs intervention.
+- **Event-driven.** User input, tool results, and system decisions arrive through separate RabbitMQ queues. Consumers decide when to wake an agent; tool approvals do not block unrelated work.
+- **Durable.** Journal, execution state, input buffers, and outbound events live in SQLite behind a Storage service. Stable identities, transactional outboxes, and fenced leases make interrupted work recoverable.
+- **Supervised.** An independent Supervisor requests wake-ups for pending inputs. Empty buffers never trigger a model call. Process restart belongs to the deployment supervisor.
 
 ## Built in
 
-- **Tools have a lifecycle.** Schema validation, permissions, deadlines, cancellation, and terminal results are managed by the runtime. Built-in Bash runs through a replaceable execution environment.
-- **Context stays manageable.** Large tool outputs are shortened with on-demand access to the original. Background and synchronous compaction preserve complete tool-call/result groups.
-- **Runs are inspectable.** Follow input events, model requests and responses, causal links between steps, and timing metrics through traces modeled on OpenTelemetry spans.
-- **Extensions stay simple.** Add Python tools, CLI commands, and Markdown skills through configured directories. Keep private extensions in the gitignored `extensions-local/` directory.
+- Tools with validation, approvals, deadlines and immutable terminal results; Bash through a replaceable execution environment.
+- Tool-result truncation with on-demand detail access, background context compaction and synchronous compaction.
+- OpenTelemetry-style traces with raw model requests/responses, causal step links and timing metrics.
+- Public and private extensions: Python tools, CLI commands and Markdown skills.
+- Durable streaming events, device-specific ACK cursors and ordered offline replay.
 
 ## Quick start
 
-You need **Python 3.11+**, [uv](https://docs.astral.sh/uv/getting-started/installation/), Bash, and credentials for an OpenAI-compatible model endpoint.
-
-### 1. Install
+Requires Docker Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
 git clone https://github.com/HymioSpace/Oath.git
 cd Oath
-uv sync
-cp oath.example.toml oath.toml
-mkdir -p workspace
+scripts/oath-install
+# Set model, api_base, credential and import_env in oath.toml.
+# On first start, the launcher prompts for the model API key if import_env is unset.
+scripts/oath-docker up
+.venv/bin/python scripts/terminal_client.py
 ```
 
-### 2. Configure and start
+The installer creates a private `oath.toml` and local service credentials. Both local and Docker services read it. The model API key is stored in Vault under the configured alias; only the Worker has a Vault identity. The launcher's host process imports the key once, without an `.env` file. Compose runs Vault, RabbitMQ and each Oath service independently. Three ports are published, bound to localhost by default:
 
-In `oath.toml`, set `model`, `api_base`, and `api_key_env` under `[agent.provider]` for your provider, and put your service token in `service_credentials`. The example reads both from the environment:
+| Endpoint | Purpose |
+| --- | --- |
+| `ws://127.0.0.1:8765` | Messages, approvals, status, streaming events and replay |
+| `http://127.0.0.1:8766` | Trace queries and CLI business APIs |
+| `http://127.0.0.1:8200` | Local Vault operator endpoint |
+
+No session creation is required. Authenticate with a user credential and a stable client ID. Disconnecting does not stop accepted work.
 
 ```bash
-export OPENAI_API_KEY="your-api-key"
-export OATH_SERVICE_TOKEN="$(uuidgen)"
-uv run python -m bootstrap.biz.process --config oath.toml
+scripts/oath-docker status
+scripts/oath-docker logs --follow
+scripts/oath-docker set-secret  # rotate the configured model key
+scripts/oath-docker down        # preserves data volumes
 ```
 
-Run commands from the repository root. You need a Redis reachable at `middleware.redis_url`.
+The terminal supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`. Use `--json` for raw protocol frames.
 
-One process starts everything:
-
-| Process | Default address | Purpose |
-| --- | --- | --- |
-| biz (with the session manager) | `http://127.0.0.1:8766` | `create_session`, trace queries, CLI commands |
-| agent, one per session | `ws://127.0.0.1:<allocated>` | Messages, approvals, streamed events |
-| supervisor, one per session | No listener | Forced wake-ups |
-
-The manager allocates a port, signs a session credential, and launches the agent and supervisor pair. Queues and buffers live outside every process, so accepted input outlives any single process. The manager reclaims a session when its connection count stays at zero past the grace period.
-
-The example is for local use: the default tool policy allows all calls. Bash executes on the host; `workspace_root` is its default working directory, **not a sandbox boundary**. See the [tool permissions](spec/feature-tool-system.md) and [execution environment](spec/feature-bash-cli.md) designs before exposing it to other users.
-
-### 3. Talk to the agent
-
-In another terminal, from the same repository:
-
-```bash
-uv run python scripts/terminal_client.py
-```
-
-The client asks the manager for a session and connects with the credential it gets back. Try: `Use bash to list the files in the workspace.` The client prints replies and runtime events. Enter `:quit` to exit.
-
-To inspect recent traces, use that session's credential:
-
-```bash
-curl -H "Authorization: Bearer $SESSION_CREDENTIAL" \
-  "http://127.0.0.1:8766/list_traces?limit=10"
-```
-
-Building your own client? The [integration guide](spec/manual.md) covers session binding, message payloads, approval decisions, reconnection, and trace queries. Design and protocol documentation is currently in Chinese.
-
-## How it works
+## Architecture
 
 ```mermaid
 flowchart LR
-    Client[Your application] -->|create_session| Manager[Manager]
-    Manager -->|launches| Agent[Agent process]
-    Client -->|WebSocket commands| Agent
-    Agent --> Queue[Queue: user / tool / system]
-    Queue --> Consumers[One consumer per queue]
-    Consumers --> Buffers[Persistent buffers]
-    Consumers -->|wake| Intake[Atomic claim]
-    Intake --> Journal[Durable journal]
-    Intake --> Brain[Context → model → tool calls]
-    Brain --> Tools[Tool system]
-    Tools -->|Terminal results| Queue
-    Brain -->|Replies and events| Client
-    Brain -.-> Traces[Trace storage]
-    Client -->|HTTP queries| API[Biz]
-    API --> Traces
-    Supervisor[Supervisor] -.->|system.invoke| Queue
-    Supervisor -.->|Heartbeat| Agent
-    Supervisor -.->|Restart request| Manager
+    Client <-->|WS| Gateway
+    Client <-->|HTTP| Biz
+    Gateway --> Queue[Queue ingress / relay]
+    Queue --> RabbitMQ
+    RabbitMQ --> Consumer
+    Consumer --> Manager
+    Worker -->|claim / renew / finish| Manager
+    Worker --> Tools
+    Supervisor --> Storage
+    Tools & Queue & Consumer & Manager & Worker & Biz --> Storage[(SQLite Storage)]
+    Storage -->|durable events| Gateway
 ```
 
-Events do not reach the journal when they arrive — they sit in a persistent buffer until the agent claims them, and that claim is the only thing that writes them down. Each consumer applies its own wake-up rule; the claim takes all three buffers in one durable operation. Model steps are serialized within a session; tools execute through their own lifecycle.
+`user_id` is the isolation key. A worker holds a lease for one step; new inputs remain independently accepted and scheduled. There is no permanent per-user process or thread.
 
-State is scoped by `user_id` and `session_id`, with run, step, and trace IDs for inspection. The journal drives recovery; traces provide an observable view of execution. Queue and buffer sit behind interfaces, with Redis Streams and local disk cache supplied today.
-
-## Extend Oath
-
-Add capabilities to a configured extension directory and restart the runtime:
-
-```text
-extensions-local/
-├── tools/
-│   └── notes.py             # Tool subclasses
-├── cli/
-│   └── echo.py              # CLI command declarations and handlers
-└── skills/
-    └── research/
-        └── SKILL.md         # Instructions and supporting resources
-```
-
-Tools are exposed to the model, skills provide reusable instructions, and CLI commands are available through `oath-cli <command>` inside Bash. Both `extensions/` and `extensions-local/` use the same loading rules.
-
-Start with the [extension guide](spec/feature-extensions.md) and the included [CLI example](extensions/cli/echo.py).
+The default deployment uses **one SQLite owner, one RabbitMQ node and one Vault node**. Service boundaries support distributed deployment; database failover and broker clustering are deployment work, not guarantees of this single-host configuration. Host Bash and the current default allow policy are intended for trusted use, not untrusted multi-tenant sandboxing.
 
 ## Documentation
 
-| Guide | What you will find |
-| --- | --- |
-| [Architecture](spec/overview.md) | Components, boundaries, and recovery model |
-| [Client integration](spec/manual.md) | WebSocket protocol, HTTP APIs, and examples |
-| [Events and approvals](spec/feature-intake.md) | Scheduling, tool batches, and approval handling |
-| [Durability](spec/feature-journal.md) | Journal, state persistence, and restart recovery |
-| [Supervisor](spec/feature-supervisor.md) | Independent process, periodic wake-up events |
-| [Context compaction](spec/feature-compaction.md) | Tool output limits and history compression |
-| [Tracing](spec/feature-trace.md) | Step relationships, model calls, and metrics |
-| [Extensions](spec/feature-extensions.md) | Tools, CLI commands, and skills |
+- [Architecture and invariants](spec/feature-distributed-personal-agent.md)
+- [Client integration and operations](spec/manual.md)
+- [Module overview](spec/overview.md)
+- [Extensions](spec/feature-extensions.md)
+- [Vault credential flow](spec/feature-vault.md)
+
+Design documentation is currently in Chinese. The distributed-agent spec is the current architecture; older feature specs retain historical module designs and may describe superseded session and file-store behavior.
+
+## Verification
+
+```bash
+# Real service processes, disposable RabbitMQ, SQLite, WS and HTTP model stub:
+.venv/bin/python scripts/e2e_services.py --amqp-url <disposable-broker-url>
+# Isolated Docker Compose environment; requires the locally built image:
+.venv/bin/python scripts/e2e_docker.py
+```
+
+These checks use a deterministic model endpoint, not a paid model. See the [verification record](docs/verification-distributed-agent.md) for covered scenarios and remaining limits.
 
 ## Contributing
 
-Bug reports, documentation improvements, and focused pull requests are welcome. For changes to execution semantics or public interfaces, open an [issue](https://github.com/HymioSpace/Oath/issues) to discuss the design first.
-
-See [spec/](spec/) for the architecture and feature designs. To run the local checks:
-
-```bash
-uv sync
-uv run ruff check .
-uv run mypy .
-uv run pytest tests/ -q
-```
-
-The default test run excludes slow tests. See [pytest configuration](pyproject.toml) for the full test setup.
-
-## Part of HymioSpace
-
-[Hymio](https://github.com/HymioSpace/Hymio) brings agents into everyday applications. [Nostalgia](https://github.com/HymioSpace/Nostalgia) manages personal context. Oath provides the runtime beneath them.
-
-The name comes from [MONO’s *Oath*](https://monoofjapan.bandcamp.com/album/oath), and the commitment to carry work through interruptions.
+Discuss substantial changes in an issue first. Keep module contracts explicit and document feature designs under `spec/`. Private extensions belong in the gitignored `extensions-local/` directory.
 
 ## License
 
-[MIT](LICENSE) © HymioSpace.
+[MIT](LICENSE). The name comes from MONO’s *Oath*: a commitment to carry work through.

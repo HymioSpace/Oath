@@ -1,1 +1,1 @@
-"""Service entrypoints and deployment adapters. Import services explicitly."""
+"""Service-backed components; see core.storage.adapters."""

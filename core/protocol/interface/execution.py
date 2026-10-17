@@ -39,7 +39,7 @@ class ExecutionEnvironment(ABC):
     ) -> ExecutionResult:
         """跑一条命令，等它结束或到 `timeout`。
 
-        `env` **每次调用给**：一个进程里有多个 scope，把某个身份写进构造参数等于所有
+        `env` **每次调用给**：一个进程里有多个 user，把某个身份写进构造参数等于所有
         session 共用它。它是这次调用要注入子进程的环境变量，不替换继承来的整个环境。
 
         **超时由实现自己收手**，返回 `timed_out=True`。调用方的 deadline 到点只是不再

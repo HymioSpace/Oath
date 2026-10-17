@@ -1,4 +1,4 @@
-"""`Cursor` —— 在某个 scope 的追加日志里定位一条记录。
+"""`Cursor` —— 在某个 user 的追加日志里定位一条记录。
 
 水位线是游标而不是时间戳：墙钟会回拨、会撞精度，用时间戳做水位线会静默丢
 数据。见 `spec/feature-journal.md`「为什么不用 commit_dt 做水位线」。
@@ -30,7 +30,7 @@ class CursorKind:
 class Cursor:
     """日志里的一个位置。
 
-    `LINE` 取物理行号（1-based，不计空行），`ID` 取该 scope 内的自增 id。
+    `LINE` 取物理行号（1-based，不计空行），`ID` 取该 user 内的自增 id。
     0 是合法值而不是哨兵对象，表示「第一条记录之前」，所以游标能正常比较。
     """
 

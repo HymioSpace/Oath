@@ -27,7 +27,7 @@ from core.protocol.datatype.journal import (
     MAX_IDEMPOTENCY_KEY_LENGTH,
     ToolOutcome,
 )
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject, JsonValue
 
 #: 工具名的合法字符集。多家 provider 拒收含点、连字符、空格或大写的工具名 ——
@@ -206,8 +206,7 @@ class ToolEvent(AgentEvent):
     def to_dict(self) -> JsonObject:
         return {
             "type": self.type,
-            "user_id": self.scope.user_id,
-            "session_id": self.scope.session_id,
+            "user_id": self.user.user_id,
             "tool_call_id": self.tool_call_id,
             "invocation_id": self.invocation_id,
             "tool": self.tool,
@@ -250,7 +249,7 @@ class ToolInvocation:
     超时。它只是提示：core 到点就不再等待，不靠它收手。
     """
 
-    scope: Scope
+    user: User
     invocation_id: str
     arguments: JsonObject
     deadline: float | None
@@ -289,7 +288,7 @@ class ToolExecution:
     丢数据（对照 journal 的 `cursor` 不存时间戳）。
     """
 
-    scope: Scope
+    user: User
     invocation_id: str
     tool_call_id: str
     tool: str

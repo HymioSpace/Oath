@@ -15,7 +15,7 @@ NAME = "detail_read"
 
 
 class DetailReadTool(Tool):
-    """按 `detail_key` 取全文。key 不存在和 scope 不匹配都报取不到。"""
+    """按 `detail_key` 取全文。key 不存在和 user 不匹配都报取不到。"""
 
     def __init__(self, store: DetailStore) -> None:
         self._store = store
@@ -37,7 +37,7 @@ class DetailReadTool(Tool):
         key = invocation.arguments.get("detail_key")
         if not isinstance(key, str) or not key:
             raise ToolExecutionError("detail_key 必须是文本")
-        content = self._store.get(invocation.scope, key)
+        content = self._store.get(invocation.user, key)
         if content is None:
             raise ToolExecutionError(f"取不到 detail_key={key}")
         return ToolResult(content)

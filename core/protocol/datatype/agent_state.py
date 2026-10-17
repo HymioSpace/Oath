@@ -1,6 +1,6 @@
 """`AgentState` —— agent 的可恢复状态。
 
-成员是这份状态的完整身份：属于哪个 `scope`、覆盖 `cursor_start` / `cursor_end`
+成员是这份状态的完整身份：属于哪个 `user`、覆盖 `cursor_start` / `cursor_end`
 这段事件日志、内容 `payload` 是什么、`payload_schema_version` 是多少。它们全
 都是状态本身而不是某次调用的入参 —— 交回去的和拿回来的必然是同一份，写不岔。
 
@@ -14,13 +14,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from core.protocol.datatype.cursor import Cursor
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject, JsonValue
 
 
 @dataclass(frozen=True, slots=True)
 class AgentState:
-    scope: Scope
+    user: User
     cursor_start: Cursor | None
     cursor_end: Cursor
     payload: JsonObject = field(default_factory=dict)
@@ -29,20 +29,20 @@ class AgentState:
     @classmethod
     def covering(
         cls,
-        scope: Scope,
+        user: User,
         cursor_end: Cursor,
         payload: JsonObject | None = None,
         *,
         cursor_start: Cursor | None = None,
         payload_schema_version: int = 1,
     ) -> AgentState:
-        """声明一份属于 `scope`、覆盖到 `cursor_end` 的状态。
+        """声明一份属于 `user`、覆盖到 `cursor_end` 的状态。
 
         `cursor_start` 是上一次快照的位置，只是审计信息 —— 恢复只按
         `cursor_end` 截断。
         """
         return cls(
-            scope=scope,
+            user=user,
             cursor_start=cursor_start,
             cursor_end=cursor_end,
             payload=dict(payload or {}),
@@ -52,7 +52,7 @@ class AgentState:
     @classmethod
     def from_record(
         cls,
-        scope: Scope,
+        user: User,
         payload: JsonObject,
         cursor_start: Cursor | None,
         cursor_end: Cursor,
@@ -60,7 +60,7 @@ class AgentState:
     ) -> AgentState:
         """从状态记录重建。五个入参就是记录上的五个列。"""
         return cls(
-            scope=scope,
+            user=user,
             cursor_start=cursor_start,
             cursor_end=cursor_end,
             payload=dict(payload),
@@ -73,7 +73,7 @@ class AgentState:
     def updated(self, payload: JsonObject) -> AgentState:
         """合并内容。覆盖区间与版本不变。"""
         return AgentState(
-            scope=self.scope,
+            user=self.user,
             cursor_start=self.cursor_start,
             cursor_end=self.cursor_end,
             payload={**self.payload, **payload},

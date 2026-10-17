@@ -1,0 +1,16 @@
+*
+!Dockerfile
+!pyproject.toml
+!uv.lock
+!core/
+!core/**
+!bootstrap/
+!bootstrap/**
+!biz/
+!biz/**
+!extensions/
+!extensions/**
+!scripts/
+!scripts/oath-cli
+**/__pycache__
+**/*.pyc

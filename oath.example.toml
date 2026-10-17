@@ -1,50 +1,25 @@
-# Oath 配置。复制成 oath.toml 后按需改。
-#
-# **凭证只写环境变量名**：`api_key_env` 是变量名，不是值。配置文件会进 git，
-# 把 key 写在这里等于公开它。
-
+# Copy to oath.toml. The installer fills local service credentials.
+# The model API key is stored in Vault, never in this file.
+# Docker maps service addresses, bind hosts, data_root, and workspace_root to containers.
 data_root = "./data"
 
-# 服务级凭证：能调 create_session / list_sessions 的那些。**不含任何 session 的凭证**
-# —— session token 由 manager 签发，只进那一个 scope 的 agent 进程。
-service_credentials = ["${OATH_SERVICE_TOKEN}"]
-
-# 中间件。**队列与 buffer 的具体实现由这两项决定** —— 换中间件就是重写一套
-# EventQueue / EventBuffer 实现，core 不感知。
-[middleware]
-# 队列：Redis Streams。三条队列（user / tool / system）的 key 都带 scope。
-redis_url = "redis://127.0.0.1:6379/0"
-# 单次队列操作的超时。取不到就是取不到，不阻塞到天荒地老。
-redis_timeout_seconds = 5.0
-
-# buffer 用 diskcache（SQLite），落 data_root/<user_id>/<session_id>/buffer 下，
-# 重启能接着读，所以上面这一项不需要单独配路径。
-
-# scope 的增删。每个 session 一对进程：一个 agent、一个 supervisor。
-[manager]
-# 同时存在多少个 scope。满了 create_session 直接报失败，不排队。
-max_sessions = 64
-# 分配给 agent 进程的端口区间。闭区间，撞上就换一个。
-port_range_start = 8800
-port_range_end = 8899
-# 多久探一次每个 agent 的连接数，以及单次探测的上限。**timeout 必须短于 interval**。
-reap_interval_seconds = 5.0
-probe_timeout_seconds = 3.0
-# 连接数连续为 0 多久之后回收这个 scope。给重连留一段冷却。
-idle_grace_seconds = 60.0
-
-[server]
-host = "127.0.0.1"
-# biz server 的端口。整个 biz 一个端口，每条能力是其中一个 path（/create_session、
-# /list_traces、/query_trace、/cli/<命令名>）。与 WebSocket 分开：查询不是 command，
-# 不占会话连接。
-http_port = 8766
-# 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
-send_queue_size = 256
-# 一个 scope 的 agent 同时接受多少条连接。
-max_connections = 32
-# 一条连接多久没有任何 command 就断开。
-idle_timeout_seconds = 300.0
+[services]
+storage_url = "http://127.0.0.1:8770"
+queue_url = "http://127.0.0.1:8771"
+manager_url = "http://127.0.0.1:8772"
+tools_url = "http://127.0.0.1:8773"
+gateway_host = "127.0.0.1"
+gateway_port = 8765
+biz_host = "127.0.0.1"
+biz_port = 8766
+workers = 4
+lease_seconds = 60
+poll_seconds = 0.25
+internal_token = ""
+users = {}
+rabbitmq_user = "oath"
+rabbitmq_password = ""
+broker_url = ""
 
 [agent]
 system_prompt = """
@@ -73,22 +48,21 @@ skill_scan_dirs = []
 # 命令默认在它下面跑；模型要访问别处就给 bash 传 cwd，不受这里限制。
 workspace_root = "./workspace"
 # oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli echo ...`。
-# 与 workspace_root 一样在装配期解析成绝对路径，相对路径按 biz 进程的 cwd 算，
+# 与 workspace_root 一样在装配期解析成绝对路径，相对路径按配置文件目录算，
 # 不是按命令的 cwd（命令默认在 workspace 下）。
 cli_bin_dir = "./scripts"
 
 [agent.provider]
 model = "gpt-4o-mini"
 api_base = "https://api.openai.com/v1"
-api_key_env = "OPENAI_API_KEY"
+credential = "model/openai"
+import_env = "OPENAI_API_KEY"
 timeout_seconds = 60
 
-# 每个 scope 的 supervisor：定时往 system 队列投一次强制唤醒。
 [supervisor]
-# 多久投一次 system.invoke，以及单次投递的上限。**timeout 必须短于 interval** ——
-# 慢投递不能连着慢两轮。强制唤醒：让 idle 的模型再看一眼攒着的输入与工具结果，
-# 投递本身不进 buffer。
-invoke_interval_seconds = 30.0
-invoke_timeout_seconds = 5.0
-# 请求一个进程退出后等多久，超过了就终止它。
-shutdown_timeout_seconds = 5.0
+invoke_interval_seconds = 30
+
+[secrets]
+vault_url = "http://127.0.0.1:8200"
+role_id_file = "./data/private/vault-role-id"
+secret_id_file = "./data/private/vault-secret-id"

@@ -41,11 +41,11 @@ COMMAND_SOURCE = """
 from typing import Final
 
 from core.protocol.datatype import CliCommand
-from core.protocol.datatype.scope import Scope
+from core.protocol.datatype.user import User
 from core.utils.encoding import JsonObject, JsonValue
 
 
-def shout(text: str, *, scope: Scope, user_context: JsonObject) -> JsonValue:
+def shout(text: str, *, user: User, user_context: JsonObject) -> JsonValue:
     return {"text": text.upper()}
 
 
@@ -225,7 +225,7 @@ def test_a_declared_command_is_collected(tmp_path: Path) -> None:
     [command] = load_extensions([directory]).commands
 
     assert command.name == "shout"
-    assert command.handler(text="hi", scope=None, user_context={}) == {"text": "HI"}
+    assert command.handler(text="hi", user=None, user_context={}) == {"text": "HI"}
 
 
 def test_a_command_with_a_name_the_shell_could_misread_is_refused(tmp_path: Path) -> None:

@@ -33,7 +33,7 @@ class DeltaChannel:
     REASONING: Final = "reasoning"
 
 
-#: 收到一段增量文本。`(channel, text)` —— 没有 scope：调用方闭包里已经绑好了。
+#: 收到一段增量文本。`(channel, text)` —— 没有 user：调用方闭包里已经绑好了。
 DeltaSink = Callable[[str, str], None]
 
 

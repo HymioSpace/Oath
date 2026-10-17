@@ -1,6 +1,6 @@
 # Feature — Compaction：工具结果截断与历史压缩
 
-状态：Implemented（单进程 JSONL）。
+状态：历史设计（模块思路保留；当前部署、身份与存储以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准）。
 
 ## 总览
 

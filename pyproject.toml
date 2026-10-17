@@ -3,17 +3,11 @@ name = "oath-core"
 version = "0.1.0"
 description = "A durable, event-driven agent runtime."
 requires-python = ">=3.11"
-# 用到第三方库时在这里加，用哪个加哪个。journal 只需要标准库；工具系统用
-# jsonschema 校验入参 —— 同一份 JSON Schema 既给模型看结构，又做服务端校验；
-# LLM 调用与 WebSocket server 用 httpx / websockets；biz 的只读查询走 HTTP，
-# 用 starlette 路由、uvicorn 监听；待认领输入的持久 buffer 用 diskcache（本地文件，
-# 重启能恢复）；队列用 redis。
 dependencies = [
-    "diskcache>=5.6",
+    "pika>=1.3.2,<2",
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyyaml>=6.0.3",
-    "redis>=5.2",
     "starlette>=0.41",
     "uvicorn>=0.32",
     "websockets>=12.0",
@@ -27,7 +21,7 @@ dev = [
     "mypy>=1.13",
     "types-jsonschema>=4.23",
     "types-pyyaml>=6.0.12.20260906",
-    "fakeredis>=2.40.0",
+    "types-pika>=1.2.0b1",
 ]
 
 [build-system]
@@ -35,7 +29,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["core"]
+packages = ["core", "bootstrap", "biz", "extensions"]
 
 [[tool.uv.index]]
 url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
@@ -75,8 +69,3 @@ ignore = [
 python_version = "3.11"
 strict = true
 files = ["core"]
-
-[[tool.mypy.overrides]]
-# diskcache 没有类型标注，也没有 py.typed。
-module = ["diskcache.*"]
-ignore_missing_imports = true

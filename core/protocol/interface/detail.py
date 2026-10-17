@@ -8,14 +8,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.protocol.datatype import Scope
+from core.protocol.datatype import User
 
 
 class DetailStore(ABC):
-    """按 scope 隔离的全文存储。"""
+    """按 user 隔离的全文存储。"""
 
     @abstractmethod
-    def put(self, scope: Scope, key: str, content: str) -> None:
+    def put(self, user: User, key: str, content: str) -> None:
         """写入全文。同 key 覆盖；成功返回后文件内容与目录项均须持久化。
 
         写失败抛异常：调用方据此降级成「不截断」，而不是留下一条指向空内容的记录。
@@ -23,8 +23,8 @@ class DetailStore(ABC):
         ...
 
     @abstractmethod
-    def get(self, scope: Scope, key: str) -> str | None:
-        """取全文。取不到返回 `None` —— 包括 key 不存在和 scope 不匹配，两者不可区分。"""
+    def get(self, user: User, key: str) -> str | None:
+        """取全文。取不到返回 `None` —— 包括 key 不存在和 user 不匹配，两者不可区分。"""
         ...
 
 

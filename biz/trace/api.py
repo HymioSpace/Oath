@@ -10,22 +10,22 @@ runtime 装配变了就把这里一起拖下水。
 
 from __future__ import annotations
 
-from core.protocol.datatype.scope import Scope
 from core.protocol.datatype.trace import Span
+from core.protocol.datatype.user import User
 from core.protocol.interface.trace import TraceStore
 from core.utils.encoding import JsonObject, JsonValue
 
 
-def list_traces(traces: TraceStore, scope: Scope, *, limit: int, offset: int) -> JsonObject:
-    """这个 scope 的 trace 列表的一页，每条带 span 数、step 数与累计耗时。
+def list_traces(traces: TraceStore, user: User, *, limit: int, offset: int) -> JsonObject:
+    """这个 user 的 trace 列表的一页，每条带 span 数、step 数与累计耗时。
 
     排序按最近写入，页内是 `offset` 起的一截。`total` 是全部条数，客户端靠它判断还有
     没有下一页。分页只切列表 —— 一条 trace 的 span 数、耗时都是整条读的，不跨页。
     """
-    trace_ids = traces.trace_ids(scope)
+    trace_ids = traces.trace_ids(user)
     listed: list[JsonValue] = []
     for trace_id in trace_ids[offset : offset + limit]:
-        spans = traces.spans(scope, trace_id)
+        spans = traces.spans(user, trace_id)
         listed.append(
             {
                 "trace_id": trace_id,
@@ -37,9 +37,9 @@ def list_traces(traces: TraceStore, scope: Scope, *, limit: int, offset: int) ->
     return {"trace_ids": listed, "total": len(trace_ids), "limit": limit, "offset": offset}
 
 
-def query_trace(traces: TraceStore, scope: Scope, trace_id: str) -> JsonObject:
+def query_trace(traces: TraceStore, user: User, trace_id: str) -> JsonObject:
     """按 trace_id 取一条 trace 的全部 span。找不到就是空列表 —— 与「无权查看」不可区分。"""
-    spans = traces.spans(scope, trace_id)
+    spans = traces.spans(user, trace_id)
     return {
         "trace_id": trace_id,
         "duration_ms": _elapsed(spans),

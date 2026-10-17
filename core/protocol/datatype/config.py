@@ -3,8 +3,7 @@
 一份配置管三块：模型、server、路径。全部 frozen dataclass，由 `bootstrap` 从
 `oath.toml` 读出来（读法是装配层的事，core 只声明形状）。
 
-**凭证只走环境变量。** 配置里只有 `api_key_env`（环境变量名），没有 `api_key` ——
-配置文件会进 git，写死 key 等于公开它。
+模型凭据用 Vault 别名引用；本地 oath.toml 不进 Git。
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 from core.utils.encoding import JsonObject
@@ -31,7 +29,8 @@ class ModelProviderConfig:
 
     model: str = ""
     api_base: str = ""
-    api_key_env: str = ""
+    credential: str = ""
+    import_env: str = ""
     timeout_seconds: float = 60.0
     extra_params: JsonObject = field(default_factory=dict)
 
@@ -122,194 +121,67 @@ class AgentConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class ServerConfig:
-    """监听参数。biz 的 HTTP 端口固定；每个 scope 的 agent 端口由 manager 现分配。"""
-
-    host: str = "127.0.0.1"
-    #: biz server 的端口。整个 biz 一个端口，每条查询是其中一个 path。与 agent 的
-    #: WebSocket 分开：查询不是 command，不该占会话连接。
-    http_port: int = 8766
-    #: 每条连接的发送队列长度。满了就断开那条连接，不拖住 core。
-    send_queue_size: int = 256
-    #: 一条连接多久没有任何 command 就断开。
-    idle_timeout_seconds: float = 300.0
-    #: 一个 scope 的 agent 同时接受多少条连接。
-    max_connections: int = 32
-
-
-@dataclass(frozen=True, slots=True)
-class MiddlewareConfig:
-    """进程外中间件。queue 与 buffer 的具体实现由这两项决定。"""
-
-    #: 队列：Redis Streams。三条队列的 key 都带 scope，中间件自己分不开也不需要分。
-    redis_url: str = "redis://127.0.0.1:6379/0"
-    #: 单次队列操作的超时。取不到就是取不到，不阻塞到天荒地老。
-    redis_timeout_seconds: float = 5.0
+class ServicesConfig:
+    broker_url: str = ""
+    rabbitmq_user: str = "oath"
+    rabbitmq_password: str = ""
+    bind_host: str = "127.0.0.1"
+    storage_url: str = "http://127.0.0.1:8770"
+    queue_url: str = "http://127.0.0.1:8771"
+    manager_url: str = "http://127.0.0.1:8772"
+    tools_url: str = "http://127.0.0.1:8773"
+    gateway_host: str = "127.0.0.1"
+    gateway_port: int = 8765
+    biz_url: str = "http://127.0.0.1:8766"
+    biz_host: str = "127.0.0.1"
+    biz_port: int = 8766
+    internal_token: str = ""
+    users: dict[str, str] = field(default_factory=dict)
+    request_timeout: float = 10.0
+    poll_seconds: float = 0.25
+    lease_seconds: float = 60.0
+    workers: int = 4
+    max_connections: int = 512
 
     def __post_init__(self) -> None:
-        url = urlsplit(self.redis_url)
-        if url.scheme not in {"redis", "rediss", "unix"} or not url.hostname:
-            raise ValueError("redis_url must be a redis://, rediss:// or unix:// URL")
-        for value, name in ((self.redis_timeout_seconds, "redis_timeout_seconds"),):
-            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+        for name in ("request_timeout", "poll_seconds", "lease_seconds"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
-
-
-@dataclass(frozen=True, slots=True)
-class ManagerConfig:
-    """scope 的增删。manager 维护 session 表，按连接数回收。"""
-
-    #: 同时存在多少个 scope。满了 `create_session` 直接报失败，不排队。
-    max_sessions: int = 64
-    #: 分配给 agent 进程的端口区间。闭区间，撞上就换一个。
-    port_range_start: int = 8800
-    port_range_end: int = 8899
-    #: 轮询连接数的间隔。
-    reap_interval_seconds: float = 5.0
-    #: 单次连接数探测最多等多久。**短于间隔** —— 慢探测不能连着慢两轮。
-    probe_timeout_seconds: float = 3.0
-    #: 连接数连续为 0 多久之后回收这个 scope。给重连留一段冷却。
-    idle_grace_seconds: float = 60.0
-    #: 拉起 agent 之后等它接受连接等多久。**`create_session` 要等这个过了才返回** ——
-    #: 返回一个还连不上的 ws_url 等于把重连的活推给调用方。
-    launch_timeout_seconds: float = 15.0
-
-    def __post_init__(self) -> None:
-        for name in ("max_sessions",):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} 必须是正整数")
-        for name in (
-            "reap_interval_seconds",
-            "idle_grace_seconds",
-            "launch_timeout_seconds",
-            "probe_timeout_seconds",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} 必须是有限正数")
-        if self.probe_timeout_seconds >= self.reap_interval_seconds:
-            raise ValueError("probe_timeout_seconds 必须小于 reap_interval_seconds")
-        for value, name in (
-            (self.port_range_start, "port_range_start"),
-            (self.port_range_end, "port_range_end"),
-        ):
-            if isinstance(value, bool) or not isinstance(value, int) or not 1024 < value < 65536:
-                raise ValueError(f"{name} 不是可用端口")
-        if self.port_range_end < self.port_range_start:
-            raise ValueError("port_range_end 不能小于 port_range_start")
+        if self.lease_seconds < self.request_timeout * 3:
+            raise ValueError("lease_seconds must be at least 3 * request_timeout")
+        if self.workers < 1 or self.max_connections < 1:
+            raise ValueError("workers and max_connections must be positive")
+        for name in ("storage_url", "queue_url", "manager_url", "tools_url"):
+            url = urlsplit(getattr(self, name))
+            if url.scheme not in {"http", "https"} or not url.hostname or not url.port:
+                raise ValueError(f"invalid {name}")
 
 
 @dataclass(frozen=True, slots=True)
 class SupervisorConfig:
-    """每个 scope 的 supervisor：定时投一次强制唤醒。"""
-
-    #: 往 system 队列投 `system.invoke` 的间隔。**强制唤醒**：让 idle 的模型再看一眼
-    #: 攒着的输入与工具结果，投递本身不进 buffer。
     invoke_interval_seconds: float = 30.0
-    #: 单次投递最多等多久。**短于间隔** —— 慢投递不能连着慢两轮。
-    invoke_timeout_seconds: float = 5.0
-    #: 请求一个进程退出后等多久，超过了就终止它。
-    shutdown_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
-        for name in (
-            "invoke_interval_seconds",
-            "invoke_timeout_seconds",
-            "shutdown_timeout_seconds",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-                raise ValueError(f"{name} 必须是有限正数")
-        if self.invoke_timeout_seconds >= self.invoke_interval_seconds:
-            raise ValueError("invoke_timeout_seconds 必须小于 invoke_interval_seconds")
+        if not math.isfinite(self.invoke_interval_seconds) or self.invoke_interval_seconds <= 0:
+            raise ValueError("invoke_interval_seconds must be finite and positive")
+
+
+@dataclass(frozen=True, slots=True)
+class SecretsConfig:
+    vault_url: str = "http://127.0.0.1:8200"
+    role_id_file: Path = Path("./data/private/vault-role-id")
+    secret_id_file: Path = Path("./data/private/vault-secret-id")
 
 
 @dataclass(frozen=True, slots=True)
 class OathConfig:
-    """一份完整配置。"""
-
     data_root: Path = field(default_factory=lambda: Path("./data"))
-    server: ServerConfig = field(default_factory=ServerConfig)
-    middleware: MiddlewareConfig = field(default_factory=MiddlewareConfig)
-    manager: ManagerConfig = field(default_factory=ManagerConfig)
+    services: ServicesConfig = field(default_factory=ServicesConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
-    #: 服务级凭证：能调 `create_session` 的那些。**不含任何 session 的凭证** ——
-    #: session token 由 manager 在创建时签发，只进那一个 scope 的 agent 进程。
-    service_credentials: tuple[str, ...] = ()
+    secrets: SecretsConfig = field(default_factory=SecretsConfig)
 
-    def service_authorised(self, token: str) -> bool:
-        return bool(token) and token in self.service_credentials
-
-    def to_json(self) -> dict[str, Any]:
-        """完整配置的 dict 形态。**不含凭证的值** —— 只有环境变量名。"""
-        return {
-            "data_root": str(self.data_root),
-            "middleware": {
-                "redis_url": self.middleware.redis_url,
-                "redis_timeout_seconds": self.middleware.redis_timeout_seconds,
-            },
-            "manager": {
-                "max_sessions": self.manager.max_sessions,
-                "port_range_start": self.manager.port_range_start,
-                "port_range_end": self.manager.port_range_end,
-                "reap_interval_seconds": self.manager.reap_interval_seconds,
-                "probe_timeout_seconds": self.manager.probe_timeout_seconds,
-                "idle_grace_seconds": self.manager.idle_grace_seconds,
-                "launch_timeout_seconds": self.manager.launch_timeout_seconds,
-            },
-            "server": {
-                "host": self.server.host,
-                "http_port": self.server.http_port,
-                "send_queue_size": self.server.send_queue_size,
-                "idle_timeout_seconds": self.server.idle_timeout_seconds,
-                "max_connections": self.server.max_connections,
-            },
-            "agent": {
-                "system_prompt": self.agent.system_prompt,
-                "provider": {
-                    "model": self.agent.provider.model,
-                    "api_base": self.agent.provider.api_base,
-                    "api_key_env": self.agent.provider.api_key_env,
-                    "timeout_seconds": self.agent.provider.timeout_seconds,
-                    "extra_params": dict(self.agent.provider.extra_params),
-                },
-                "max_output_tokens": self.agent.max_output_tokens,
-                "temperature": self.agent.temperature,
-                "context_window": self.agent.context_window,
-                "tool_result_detail_chars": self.agent.tool_result_detail_chars,
-                "compress_async_at_ratio": self.agent.compress_async_at_ratio,
-                "compress_sync_at_ratio": self.agent.compress_sync_at_ratio,
-                "compress_keep_recent": self.agent.compress_keep_recent,
-                "compress_summary_tokens": self.agent.compress_summary_tokens,
-                "extension_dirs": [str(path) for path in self.agent.extension_dirs],
-                "skill_dir": str(self.agent.skill_dir),
-                "skill_index_tokens": self.agent.skill_index_tokens,
-                "skill_scan_dirs": [str(path) for path in self.agent.skill_scan_dirs],
-                "workspace_root": str(self.agent.workspace_root),
-                "cli_bin_dir": str(self.agent.cli_bin_dir),
-                "tool_timeout_seconds": self.agent.tool_timeout_seconds,
-                "tool_round_timeout_seconds": self.agent.tool_round_timeout_seconds,
-                "max_run_steps": self.agent.max_run_steps,
-                "max_run_seconds": self.agent.max_run_seconds,
-                "llm_max_attempts": self.agent.llm_max_attempts,
-                "llm_retry_delay": self.agent.llm_retry_delay,
-            },
-            "supervisor": {
-                "invoke_interval_seconds": self.supervisor.invoke_interval_seconds,
-                "invoke_timeout_seconds": self.supervisor.invoke_timeout_seconds,
-                "shutdown_timeout_seconds": self.supervisor.shutdown_timeout_seconds,
-            },
-        }
-
-
-__all__ = [
-    "AgentConfig",
-    "ManagerConfig",
-    "MiddlewareConfig",
-    "ModelProviderConfig",
-    "OathConfig",
-    "ServerConfig",
-    "SupervisorConfig",
-]
+    @property
+    def database_path(self) -> Path:
+        return self.data_root / "oath.sqlite3"

@@ -5,7 +5,7 @@ biz 只负责把 runtime 手里的数据取出来给上层用，当前是 trace 
 
 ```
 biz/
-├── session_scope.py  从请求认出 scope、认证与参数错误的回法
+├── session_scope.py  从请求认出 user、认证与参数错误的回法
 ├── trace/            按 trace_id 取回一条 trace
 └── cli/              业务 CLI 的命令表与路由
 ```

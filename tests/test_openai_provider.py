@@ -290,25 +290,60 @@ def test_a_null_content_is_an_empty_string() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_missing_api_key_is_refused_before_any_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    """没有 key 就不该发请求 —— 发了也只是换一个报错。"""
-    monkeypatch.delenv("OATH_TEST_KEY", raising=False)
-    provider = OpenAICompatibleProvider(
-        ModelProviderConfig(model="m", api_base="http://x", api_key_env="OATH_TEST_KEY")
-    )
+class _Secrets:
+    """Vault 读的替身。密钥按别名取，别名不对就是取不到。"""
 
-    with pytest.raises(LlmError, match="OATH_TEST_KEY"):
+    def __init__(self, value: str | None) -> None:
+        self.value = value
+        self.asked: list[str] = []
+
+    def get(self, alias: str) -> str:
+        self.asked.append(alias)
+        if self.value is None:
+            raise ValueError(f"Vault 里没有 {alias}")
+        return self.value
+
+
+def test_a_missing_credential_is_refused_before_any_request() -> None:
+    """没有密钥别名就不该发请求 —— 发了也只是换一个报错。"""
+    provider = OpenAICompatibleProvider(ModelProviderConfig(model="m", api_base="http://x"))
+
+    with pytest.raises(LlmError, match="credential"):
         provider.complete(_request())
 
 
-def test_an_empty_api_base_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OATH_TEST_KEY", "k")
+def test_a_vault_that_cannot_hand_over_the_key_is_refused() -> None:
+    """别名有、但 Vault 取不到：仍然是发请求之前就停。"""
     provider = OpenAICompatibleProvider(
-        ModelProviderConfig(model="m", api_base="", api_key_env="OATH_TEST_KEY")
+        ModelProviderConfig(model="m", api_base="http://x", credential="provider/model"),
+        secrets=_Secrets(None),
+    )
+
+    with pytest.raises(LlmError, match="Vault"):
+        provider.complete(_request())
+
+
+def test_an_empty_api_base_is_refused() -> None:
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig(model="m", api_base="", credential="provider/model"),
+        secrets=_Secrets("k"),
     )
 
     with pytest.raises(LlmError, match="api_base"):
         provider.complete(_request())
+
+
+def test_the_key_is_read_by_alias_not_from_the_environment() -> None:
+    """`credential` 是 Vault 里的别名。环境变量里那个同名的东西不参与。"""
+    secrets = _Secrets("k")
+    provider = OpenAICompatibleProvider(
+        ModelProviderConfig(model="m", api_base="", credential="provider/model"), secrets=secrets
+    )
+
+    with pytest.raises(LlmError):
+        provider.complete(_request())
+
+    assert secrets.asked == ["provider/model"]
 
 
 def test_wants_tools_reads_the_finish_reason() -> None:

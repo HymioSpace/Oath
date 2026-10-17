@@ -1,105 +1,70 @@
-"""Scope 内的原子提交。模块共用一份 store，事务里只改数据，不做外部 I/O。
-
-一条 runtime.commit 同时提交所有表的变化；append 成功之后才发布内存状态。
-Journal 是唯一持久化来源。这里只提供事务，不决定消费、唤醒或执行策略。
-"""
+"""版本化状态提交。回调只能变换数据；跨进程冲突重读后重算。"""
 
 from __future__ import annotations
 
 import copy
-import threading
+import time
+import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, TypeVar, cast
 
-from core.protocol.datatype import Cursor, CursorKind, EventType, Scope
-from core.protocol.interface.journal import Journal
-from core.utils.encoding import JsonObject
+from core.protocol.datatype.user import User
+from core.protocol.interface.storage import StorageConflict, StoragePort
 
 State = dict[str, Any]
 T = TypeVar("T")
 TABLES = ("inputs", "batches", "calls", "steps", "meta", "conversation", "controls", "compactions")
 
 
-def initial_state() -> State:
+def initial_state():
     return {name: {} for name in TABLES}
 
 
-def fold_commit(state: State, payload: State) -> None:
+def fold_commit(state, payload):
     for table, changes in payload["changes"].items():
-        for key, value in changes.items():
-            state[table][key] = value
+        state[table].update(changes)
 
 
 class RuntimeStore:
-    """单进程事务层；共享 Journal 实例与 store，不能同 scope 装配多个 writer。"""
+    def __init__(self, storage: StoragePort, *, fence=None):
+        self.storage = storage
+        self.fence = fence
+        self._context_fence = ContextVar("transaction_fence", default=None)
 
-    def __init__(self, journal: Journal) -> None:
-        self.journal = journal
-        self._guard = threading.Lock()
-        self._locks: dict[Scope, threading.RLock] = {}
-        self._states: dict[Scope, State] = {}
-        self._versions: dict[Scope, int] = {}
+    @contextmanager
+    def fenced(self, fence):
+        token = self._context_fence.set(fence)
+        try:
+            yield
+        finally:
+            self._context_fence.reset(token)
 
-    def _lock(self, scope: Scope) -> threading.RLock:
-        with self._guard:
-            return self._locks.setdefault(scope, threading.RLock())
+    def read(self, user: User) -> State:
+        return cast(State, self.storage.call("state.read", user_id=user.user_id)["state"])
 
-    def _load(self, scope: Scope) -> State:
-        if scope not in self._states:
-            state = initial_state()
-            version = 0
-            for record in self.journal.read_range(scope, Cursor(CursorKind.LINE, 0)):
-                if record.type == EventType.RUNTIME_COMMIT:
-                    if record.payload["version"] != version + 1:
-                        raise ValueError("runtime.commit version 不连续，停止恢复")
-                    fold_commit(state, record.payload)
-                    version += 1
-            self._states[scope] = state
-            self._versions[scope] = version
-        return self._states[scope]
-
-    def read(self, scope: Scope) -> State:
-        with self._lock(scope):
-            return copy.deepcopy(self._load(scope))
-
-    def transact(self, scope: Scope, reason: str, change: Callable[[State], T]) -> T:
-        with self._lock(scope):
-            before = self._load(scope)
-            after = copy.deepcopy(before)
+    def transact(self, user: User, reason: str, change: Callable[[State], T]) -> T:
+        for attempt in range(16):
+            snapshot = self.storage.call("state.read", user_id=user.user_id)
+            after = copy.deepcopy(snapshot["state"])
             result = change(after)
-            if set(after) != set(TABLES) or any(
-                not isinstance(after[t], dict) or not before[t].keys() <= after[t].keys()
-                for t in TABLES
-            ):
-                raise ValueError("事务不可删除 table / key；用状态标记完成")
-            changes = {
-                table: {
-                    k: v
-                    for k, v in after[table].items()
-                    if k not in before[table] or before[table][k] != v
-                }
-                for table in TABLES
-            }
-            changes = {table: values for table, values in changes.items() if values}
-            if changes:
-                version = self._versions[scope] + 1
-                try:
-                    self.journal.append(
-                        scope,
-                        EventType.RUNTIME_COMMIT,
-                        cast(
-                            JsonObject, {"version": version, "reason": reason, "changes": changes}
-                        ),
-                        payload_schema_version=1,
-                        idempotency_key=f"runtime:{version}",
-                    )
-                except BaseException:
-                    # append 可能在 fsync 后失败；下一次重新读取，不能沿用猜测的旧版本。
-                    self._states.pop(scope, None)
-                    raise
-                self._states[scope] = after
-                self._versions[scope] = version
-            return copy.deepcopy(result)
+            if after == snapshot["state"]:
+                return copy.deepcopy(result)
+            try:
+                self.storage.call(
+                    "state.commit",
+                    user_id=user.user_id,
+                    expected=snapshot["version"],
+                    state=after,
+                    reason=reason,
+                    commit_id=uuid.uuid4().hex,
+                    fence=self._context_fence.get() or self.fence,
+                )
+                return copy.deepcopy(result)
+            except StorageConflict:
+                time.sleep(min(0.005 * (attempt + 1), 0.05))
+        raise StorageConflict("State remained contended; retry the durable work item")
 
-    def scopes(self) -> tuple[Scope, ...]:
-        return self.journal.scopes()
+    def users(self):
+        return tuple(User(uid) for uid in self.storage.call("users.list"))
