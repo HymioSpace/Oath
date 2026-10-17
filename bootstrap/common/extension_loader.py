@@ -12,8 +12,8 @@
   skills/       目录，交给 SkillSystem
 ```
 
-**目录不存在不是错误** —— 刚 clone 的仓库没有 `extensions-local/`，仓库里也还没有
-`extensions/skills/`。反过来，一个坏文件在启动时就炸，不降级成「少了一个工具」：
+**目录不存在不是错误** —— 可选的扩展子目录可以为空。坏文件在启动时就炸，
+不降级成「少了一个工具」：
 模型看不到它会以另一种样子回来（编一个不存在的工具名），比启动失败难查得多。
 技能是唯一的例外，它本来就是文件，读坏了只丢这一个。
 """
@@ -38,7 +38,7 @@ from core.protocol.interface import Tool
 
 _log = logging.getLogger("oath.extensions")
 
-#: 合成包名前缀。**目录名不能直接当包名**：`extensions-local` 里有 `-`，不是合法标识符，
+#: 合成包名前缀。**目录名不能直接当包名**：外部目录可能含 `-`，不是合法标识符，
 #: 所以每个扩展目录映射成一个合成包名。两个目录下的同名模块才不会互相顶掉 —— 后缀是路径
 #: 哈希，所以不同位置下的同名目录也顶不掉。
 _PACKAGE_PREFIX: Final = "oath_ext"
@@ -67,23 +67,36 @@ class Extensions:
 
 
 def load_extensions(
-    extension_dirs: Sequence[Path], *, kinds: frozenset[str] = frozenset({_TOOLS, _CLI, _SKILLS})
+    extension_dirs: Sequence[Path],
+    *,
+    kinds: frozenset[str] = frozenset({_TOOLS, _CLI, _SKILLS}),
+    tool_dirs: Sequence[Path] = (),
+    cli_dirs: Sequence[Path] = (),
+    skill_dirs: Sequence[Path] = (),
 ) -> Extensions:
     """按给定顺序扫每个扩展目录。"""
     tools: list[tuple[Path, Tool]] = []
     commands: list[tuple[Path, CliCommand]] = []
-    skill_dirs: list[Path] = []
+    found_skill_dirs: list[Path] = []
     for root in extension_dirs:
         if _TOOLS in kinds:
-            tools.extend(_tools(root))
+            tools.extend(_tools_in(root / _TOOLS, package_root=root))
         if _CLI in kinds:
-            commands.extend(_commands(root))
+            commands.extend(_commands_in(root / _CLI, package_root=root))
         if _SKILLS in kinds and (root / _SKILLS).is_dir():
-            skill_dirs.append(root / _SKILLS)
+            found_skill_dirs.append(root / _SKILLS)
+    if _TOOLS in kinds:
+        for directory in tool_dirs:
+            tools.extend(_tools_in(directory))
+    if _CLI in kinds:
+        for directory in cli_dirs:
+            commands.extend(_commands_in(directory))
+    if _SKILLS in kinds:
+        found_skill_dirs.extend(skill_dirs)
     return Extensions(
         tools=_unique_tools(tools),
         commands=_unique_commands(commands),
-        skill_dirs=tuple(skill_dirs),
+        skill_dirs=tuple(found_skill_dirs),
     )
 
 
@@ -104,26 +117,6 @@ def _package_name(root: Path) -> str:
     return f"{_PACKAGE_PREFIX}_{re.sub(r'[^0-9a-zA-Z]', '_', root.name)}_{digest}"
 
 
-def _subpackage(root: Path, kind: str) -> str:
-    """把 `<root>/<kind>` 注册成带 `__path__` 的包，返回它的名字。
-
-    这是同级模块能被 import 的前提：模块里写 `from oath_ext_ext.tools.shared import X`
-    走的就是这里挂上去的搜索路径。有 `__init__.py` 就执行它 —— 它是包里唯一一处能放
-    共享装配代码的地方。没有也照样能用，只是没有共享代码可放。
-    """
-    directory = root / kind
-    name = f"{_package_name(root)}.{kind}"
-    if name in sys.modules:
-        return name
-    init = directory / "__init__.py"
-    if init.is_file():
-        # `_exec` 已经把它注册进去了。
-        _exec(_spec(name, init, [str(directory)]), name, init)
-        return name
-    sys.modules[name] = _package(directory, name)
-    return name
-
-
 def _package(directory: Path, name: str) -> types.ModuleType:
     """一个只有搜索路径的空包。"""
     module = types.ModuleType(name)
@@ -132,17 +125,19 @@ def _package(directory: Path, name: str) -> types.ModuleType:
     return module
 
 
-def _modules(root: Path, kind: str) -> Iterator[tuple[Path, types.ModuleType]]:
-    """逐个装 `<root>/<kind>` 下的文件，按文件名排序。
-
-    装过的不再装：一个进程里同一段代码只该有一个类对象 —— 测试里起多个 Runtime 就是
-    这个场景，第二次装出另一个类，`isinstance` 就对不上了。重新启动进程自然重新装，
-    改配置不需要额外的重载机制。
-    """
-    directory = root / kind
-    package = _subpackage(root, kind)
+def _modules_in(
+    directory: Path, kind: str, *, package_root: Path | None = None
+) -> Iterator[tuple[Path, types.ModuleType]]:
+    """按文件名扫描一类扩展；同进程内不重复导入。"""
     if not directory.is_dir():
         return
+    package = f"{_package_name(package_root or directory)}.{kind}"
+    if package not in sys.modules:
+        init = directory / "__init__.py"
+        if init.is_file():
+            _exec(_spec(package, init, [str(directory)]), package, init)
+        else:
+            sys.modules[package] = _package(directory, package)
     for path in sorted(directory.glob("*.py"), key=lambda item: item.name):
         if path.stem.startswith("_"):
             # `_` 前缀不参与发现（`__init__` 也在这一档），但仍能被同级 import ——
@@ -183,16 +178,16 @@ def _exec(spec: importlib.machinery.ModuleSpec, name: str, path: Path) -> types.
 # --------------------------------------------------------------------------
 
 
-def _tools(root: Path) -> list[tuple[Path, Tool]]:
+def _tools_in(directory: Path, *, package_root: Path | None = None) -> list[tuple[Path, Tool]]:
     found: list[tuple[Path, Tool]] = []
-    for path, module in _modules(root, _TOOLS):
+    for path, module in _modules_in(directory, _TOOLS, package_root=package_root):
         for cls in _declared_tools(module):
             try:
                 found.append((path, cls()))
             except TypeError as error:
                 raise ExtensionError(
                     f"{path} 里的 {cls.__name__} 构造要参数。扩展目录里的工具只能零参构造 —— "
-                    f"需要依赖的工具由装配层用 Runtime(tools=...) 显式注册。"
+                    "需要依赖的工具应通过自定义装配代码注册。"
                 ) from error
     return found
 
@@ -215,9 +210,11 @@ def _declared_tools(module: types.ModuleType) -> list[type[Tool]]:
     ]
 
 
-def _commands(root: Path) -> list[tuple[Path, CliCommand]]:
+def _commands_in(
+    directory: Path, *, package_root: Path | None = None
+) -> list[tuple[Path, CliCommand]]:
     found: list[tuple[Path, CliCommand]] = []
-    for path, module in _modules(root, _CLI):
+    for path, module in _modules_in(directory, _CLI, package_root=package_root):
         for command in getattr(module, "COMMANDS", ()):
             if not isinstance(command, CliCommand):
                 raise ExtensionError(f"{path} 的 COMMANDS 元素必须是 CliCommand: {type(command)!r}")

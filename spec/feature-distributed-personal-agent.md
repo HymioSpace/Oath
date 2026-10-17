@@ -190,7 +190,7 @@ H 之后的新 event（在线流）
 
 启动器初始化 / 解封 Vault 后，Compose 启动全部服务；Gateway 8765、Biz 8766、Vault 管理端点 8200 默认绑定宿主机 loopback。内部服务和 RabbitMQ 无公开端口。
 Storage、RabbitMQ、workspace 分别使用独立 volume。服务有独立 restart policy，Supervisor 不内存干涉其他服务。
-本地无 Docker 时 `scripts/oath-up` 做进程启动 / 重启，RabbitMQ 另行提供。
+单独部署服务时由部署平台负责进程启动与重启，并提供 RabbitMQ 和 Vault。
 
 这版实现分布式服务协议和故障恢复，不等于已经完成多机数据高可用：
 

@@ -1,7 +1,7 @@
 """业务 CLI 命令。
 
 一个命令一个文件，模块级 `COMMANDS` 声明它叫什么、要什么参数、谁来跑。启动时扫出来，
-规则见 `spec/feature-extensions.md`。
+规则见 `spec/feature-oath-command.md`。
 
 **这里刻意不 import 子模块。** 文件顶部写一个 import 会让整个目录在包初始化时被导一遍，
 产生第二份类对象 —— 那份不会被注册，因为装配器只认「模块里自己定义的东西」，但它是

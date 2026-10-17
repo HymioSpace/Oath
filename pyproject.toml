@@ -13,6 +13,9 @@ dependencies = [
     "websockets>=12.0",
 ]
 
+[project.scripts]
+oath = "bootstrap.command:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",

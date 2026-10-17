@@ -119,7 +119,7 @@ def main():
         legacy.rename(archived)
         archived.chmod(0o600)
         print(f"Old .env archived to {archived}; it is no longer loaded")
-    print("Ready. Edit oath.toml, then run scripts/oath-docker up")
+    print("Ready. Edit oath.toml, then run oath start --config oath.toml")
 
 
 if __name__ == "__main__":

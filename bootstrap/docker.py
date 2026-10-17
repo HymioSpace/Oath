@@ -139,10 +139,12 @@ def main():
     parser.add_argument("action", choices=("up", "down", "set-secret", "status", "logs"))
     parser.add_argument("--config", default="oath.toml")
     parser.add_argument("--compose", default="compose.yaml")
+    parser.add_argument("--overlay")
     parser.add_argument("--project")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--volumes", action="store_true")
     parser.add_argument("--follow", action="store_true")
+    parser.add_argument("--recreate", action="store_true")
     args = parser.parse_args()
     config = load_config(args.config)
     if not config.services.rabbitmq_password or len(config.services.internal_token) < 32:
@@ -160,6 +162,8 @@ def main():
         "OATH_SECRET_ID_PATH": str(config.secrets.secret_id_file.resolve()),
     }
     cmd = ["docker", "compose", "-f", str(Path(args.compose).resolve())]
+    if args.overlay:
+        cmd.extend(("-f", str(Path(args.overlay).resolve())))
     if args.project:
         cmd.extend(("-p", args.project))
     if args.action == "down":
@@ -189,11 +193,31 @@ def main():
                 *cmd,
                 "up",
                 "-d",
+                "--wait",
+                "--wait-timeout",
+                "120",
                 *(["--no-build", "--pull", "never"] if args.no_build else ["--build"]),
             ],
             env=env,
             check=True,
         )
+        if args.recreate:
+            subprocess.run(
+                [
+                    *cmd,
+                    "up",
+                    "-d",
+                    "--no-deps",
+                    "--force-recreate",
+                    "storage", "queue", "manager", "tools", "consumer", "worker",
+                    "supervisor", "gateway", "biz",
+                ],
+                env=env,
+                check=True,
+            )
+            subprocess.run(
+                [*cmd, "up", "-d", "--wait", "--wait-timeout", "120"], env=env, check=True
+            )
 
 
 if __name__ == "__main__":

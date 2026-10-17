@@ -123,7 +123,7 @@ query 按空白切成若干词，**每个词都要出现**在同一个技能的 
 技能分两类来源，区别只在**谁来列举目录**：
 
 - **注入目录** —— 每个扩展目录的 `skills/`，加上配置里的 `skill_dir`。由
-  [扩展目录](feature-extensions.md)的扫描决定，没有就是没有。这些是项目自己的技能，
+  [扩展目录](feature-oath-command.md)的扫描决定，没有就是没有。这些是项目自己的技能，
   进 system prompt 索引。
 - **发现目录** —— `skill_scan_dirs`，默认由装配层按 `Path.home()` 展开成别的 agent 也在用的
   位置。它们只能被 `find` / `search` 搜到，不进索引。

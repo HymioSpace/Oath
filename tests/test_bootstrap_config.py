@@ -225,13 +225,13 @@ def test_a_directory_given_as_absolute_is_left_alone() -> None:
     )
 
 
-def test_the_extension_directories_default_to_the_committed_one_and_the_local_one(
+def test_the_extension_directories_default_to_oath_extensions(
     tmp_path: Path,
 ) -> None:
-    """两个目录用同一套规则；本地那个只是不进版本库。"""
+    """外部扩展通过 oath start 显式追加。"""
     config = load_config(_write(tmp_path, MINIMAL))
 
-    assert config.agent.extension_dirs == (tmp_path / "extensions", tmp_path / "extensions-local")
+    assert config.agent.extension_dirs == (tmp_path / "extensions",)
 
 
 def test_the_extension_directories_are_made_absolute_against_the_process(

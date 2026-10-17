@@ -18,7 +18,8 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 | biz | trace、CLI 等 HTTP 业务能力 |
 | Vault | 模型密钥存储；Worker 按 `oath.toml` 中的别名读取 |
 | bootstrap | 配置、依赖装配、进程入口和部署生命周期 |
-| extensions、extensions-local | 公开 / 私有工具、技能和 CLI；私有目录不进 Git |
+| oath 命令 | 安装后启动 / 管理 Docker，并装配外部 skill、tool、CLI 目录 |
+| extensions 与外部目录 | 内置及应用自定义的工具、技能和 CLI；按类型只读挂载 |
 
 数据协议在 core/protocol；数据库、消息中间件、模型、工具执行环境通过接口隔离。
 历史 feature 文档保留设计背景，其中的 session、scope、文件 store、Redis 和每用户进程方案不再是当前实现。

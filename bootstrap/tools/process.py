@@ -57,7 +57,12 @@ def run(config):
     token = service_token(config)
     storage = ServiceClient(config.services.storage_url, token, config.services.request_timeout)
     queue = ServiceClient(config.services.queue_url, token, config.services.request_timeout)
-    extensions = load_extensions(config.agent.extension_dirs)
+    extensions = load_extensions(
+        config.agent.extension_dirs,
+        kinds=frozenset({"tools", "skills"}),
+        tool_dirs=config.agent.tool_dirs,
+        skill_dirs=config.agent.skill_dirs,
+    )
     registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
     details = StoredDetails(storage)
     registry.register(DetailReadTool(details))

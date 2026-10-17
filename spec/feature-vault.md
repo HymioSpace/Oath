@@ -19,7 +19,7 @@ flowchart LR
 
 ## 启动与恢复
 
-`scripts/oath-docker up` 启动文件存储的 Vault。首次运行初始化一个 unseal key 与 root token，保存在宿主机 `data/private/vault-bootstrap.json`（0600）；后续启动用它解封。启动器配置 KV v2、只读 policy 和 Worker AppRole，把 role ID 与 secret ID 写入只挂载给 Worker 的文件。它检查别名是否已有值：有则不覆盖，没有才从 `import_env` 或终端输入获取并写入。`set-secret` 才显式覆盖。
+`oath start` 启动文件存储的 Vault。首次运行初始化一个 unseal key 与 root token，保存在宿主机 `data/private/vault-bootstrap.json`（0600）；后续启动用它解封。启动器配置 KV v2、只读 policy 和 Worker AppRole，把 role ID 与 secret ID 写入只挂载给 Worker 的文件。它检查别名是否已有值：有则不覆盖，没有才从 `import_env` 或终端输入获取并写入。密钥轮换仍由运维入口 `python -m bootstrap.docker set-secret --config oath.toml` 显式覆盖。
 
 Worker 每次模型请求通过 Vault 读取 Key，认证 token 失效时重新 AppRole 登录。取不到密钥则调用失败，不降级读取进程环境变量。工具系统只收到调用意图与结果；模型 Key 不进 Journal、Trace、模型 context 和 Bash 环境。
 

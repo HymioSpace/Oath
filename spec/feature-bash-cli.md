@@ -143,7 +143,7 @@ body：缺失、拼错、类型换不过去一律 400。
 命令在 `<扩展目录>/cli/<名字>.py` 里声明，biz 装配期扫出来进 `BizApplication.commands`；路由在
 `biz/cli/cli_server.py`，那张表从 biz 本进程读取。**声明与路由分开**：路由是框架的事，所有命令
 一条路；声明是业务的事，放在业务自己的目录里。加命令不用改框架。
-细节见[扩展目录](feature-extensions.md)。
+细节见[扩展目录](feature-oath-command.md)。
 
 `description` 与 `parameters` 用英文（随请求发给调用方的字面量），注释与文档用中文。
 

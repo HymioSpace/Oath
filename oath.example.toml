@@ -28,15 +28,8 @@ system_prompt = """
 max_output_tokens = 2048
 temperature = 0.7
 
-# 扩展目录。每个目录下按同一套规则扫 tools/、cli/、skills/，顺序即优先级。
-# extensions-local/ 不进版本库 —— 把自己的工具、命令和技能放在那里，agent 照常
-# 扫到，不用改任何代码。目录不存在不是错误；配成 [] 就是彻底关掉扩展扫描。
-extension_dirs = ["./extensions", "./extensions-local"]
-
-# 项目自己的技能目录。每个技能是里面的一个子目录，含 SKILL.md（YAML frontmatter
-# 加 markdown 正文）。frontmatter 里的 priority 越大越晚被丢掉；没写的按 0 算。
-# 各扩展目录下的 skills/ 也进索引，排在这个目录之后。
-skill_dir = "./extensions/skills"
+# 内置扩展默认加载；外部目录用 oath start 的 --skill、--tool、--cli 追加。
+# 技能目录包含多个带 SKILL.md 的子目录。
 # 技能索引进 system prompt 的 token 预算。装不下就按优先级丢，丢掉的仍然能被
 # skill 工具搜到。
 skill_index_tokens = 1024

@@ -5,7 +5,7 @@
 ```bash
 scripts/oath-install
 # 编辑 oath.toml：[agent.provider] 的 model、api_base、credential、import_env。
-scripts/oath-docker up
+oath start --config ./oath.toml
 .venv/bin/python scripts/terminal_client.py
 ```
 
@@ -15,23 +15,20 @@ scripts/oath-docker up
 模型 Key 不写入 TOML，也不进入 Agent 服务环境。旧 `.env` 若存在，安装器会归档为 `data/private/legacy-environment.backup`。
 
 ```bash
-scripts/oath-docker status
-scripts/oath-docker logs --follow
-scripts/oath-docker set-secret   # 显式轮换当前模型 Key
-scripts/oath-docker down         # 保留数据和 Vault volume
+oath status
+oath restart
+oath stop                      # 保留数据和 Vault volume
 ```
+
+外部扩展可在 `oath start` 时追加：`--skill DIR` 包含多个技能子目录，`--tool DIR` 与
+`--cli DIR` 直接包含 `.py` 模块。相同选项可重复传入。命令保存有效配置，后续
+`restart` 不需要重复输入目录。目录在容器中只读挂载；详见 [命令与扩展设计](feature-oath-command.md)。
 
 默认只在本机发布 WS `8765`、Biz `8766` 与 Vault 管理端点 `8200`。
 Compose 服务读取同一份 `oath.toml`；Docker profile 只映射地址和目录。
 容器内 RabbitMQ、Storage 等不发布到宿主机。再次启动会解封 Vault；
 `data/private/vault-bootstrap.json` 是恢复所必需的本机文件，应与 Vault volume 一起备份。
 首版的运维边界见 [Vault 设计](feature-vault.md)。
-
-## 非 Docker
-
-`scripts/oath-up` 使用 `oath.toml`，需要另行提供 RabbitMQ 和可访问的 Vault，
-并用同一套 Worker AppRole 身份文件。`scripts/oath-down` 停止服务。
-单独进程：`.venv/bin/python -m bootstrap worker --config oath.toml`。
 
 ## WS v2
 
