@@ -49,12 +49,26 @@ def _table(raw, header, additions):
 
 
 def main():
-    config = Path("oath.toml")
+    root = Path(__file__).resolve().parents[1]
+    config = Path.home() / ".oath" / "oath.toml"
+    config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    config.parent.chmod(0o700)
+    legacy_config = root / "oath.toml"
+    migrating = not config.exists() and legacy_config.exists()
     if not config.exists():
-        shutil.copyfile("oath.example.toml", config)
+        shutil.copyfile(legacy_config if migrating else root / "oath.example.toml", config)
+        config.chmod(0o600)
+    if migrating:
+        source_private = load_config(legacy_config).data_root / "private"
+        target_private = load_config(config).data_root / "private"
+        if source_private.is_dir() and source_private.resolve() != target_private.resolve():
+            if target_private.exists():
+                raise SystemExit(f"Refusing to overwrite existing private data: {target_private}")
+            shutil.copytree(source_private, target_private)
+            target_private.chmod(0o700)
     raw = config.read_text()
     data = tomllib.loads(raw)
-    legacy = Path(".env")
+    legacy = root / ".env"
     legacy_values = {}
     if legacy.exists():
         legacy_values = dict(
@@ -101,7 +115,7 @@ def main():
     )
     tomllib.loads(raw)
     if raw != config.read_text():
-        backup = Path("oath.toml.pre-vault.local")
+        backup = config.with_name("oath.toml.pre-vault.local")
         if backup.exists():
             raise SystemExit(f"Refusing to overwrite {backup}")
         shutil.copyfile(config, backup)
@@ -119,7 +133,8 @@ def main():
         legacy.rename(archived)
         archived.chmod(0o600)
         print(f"Old .env archived to {archived}; it is no longer loaded")
-    print("Ready. Edit oath.toml, then run oath start --config oath.toml")
+    config.chmod(0o600)
+    print(f"Ready. Edit {config}, then run oath start")
 
 
 if __name__ == "__main__":

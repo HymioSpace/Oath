@@ -19,6 +19,7 @@ from bootstrap.common.config import load_config
 _ROOT = Path(__file__).resolve().parents[1]
 _COMPOSE = _ROOT / "compose.yaml"
 _KINDS = ("skill", "tool", "cli")
+_DEFAULT_CONFIG = Path.home() / ".oath" / "oath.toml"
 
 
 def _state_dir() -> Path:
@@ -138,7 +139,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="oath")
     commands = parser.add_subparsers(dest="action", required=True)
     start = commands.add_parser("start", help="Build and start Oath in Docker")
-    start.add_argument("--config", required=True, help="Path to oath.toml")
+    start.add_argument("--config", default=str(_DEFAULT_CONFIG), help="Path to oath.toml")
     start.add_argument("--name", default="oath", help="Local deployment name")
     for kind in _KINDS:
         start.add_argument(f"--{kind}", action="append", default=[], metavar="DIR")

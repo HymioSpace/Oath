@@ -39,13 +39,13 @@ Requires Docker Compose, Python 3.11+ and [uv](https://docs.astral.sh/uv/getting
 git clone https://github.com/HymioSpace/Oath.git
 cd Oath
 scripts/oath-install
-# Set model, api_base, credential and import_env in oath.toml.
+# Set model, api_base, credential and import_env in ~/.oath/oath.toml.
 # On first start, the launcher prompts for the model API key if import_env is unset.
-oath start --config ./oath.toml
+oath start
 .venv/bin/python scripts/terminal_client.py
 ```
 
-The installer registers the `oath` command and creates a private `oath.toml` with local service credentials. Keep the source checkout: this installation builds its Docker image from it. The model API key is stored in Vault under the configured alias; only the Worker has a Vault identity. The launcher imports the key once, without an `.env` file. Compose runs Vault, RabbitMQ and each Oath service independently. Three ports are published, bound to localhost by default:
+The installer registers the `oath` command and creates a private `~/.oath/oath.toml` with local service credentials. If it already exists, it is reused; an older checkout's `oath.toml` is migrated on first install. Keep the source checkout: this installation builds its Docker image from it. The model API key is stored in Vault under the configured alias; only the Worker has a Vault identity. The launcher imports the key once, without an `.env` file. Compose runs Vault, RabbitMQ and each Oath service independently. Three ports are published, bound to localhost by default:
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -61,7 +61,7 @@ oath restart
 oath stop  # preserves data volumes
 ```
 
-Pass `--skill DIR`, `--tool DIR`, or `--cli DIR` to `oath start` to add external directories; each option can be repeated. Oath's own extensions load by default. `restart` reuses the saved paths. The [command and extension design](spec/feature-oath-command.md) describes the directory formats and container mounts.
+Pass `--config PATH` to use a different TOML, or `--skill DIR`, `--tool DIR`, or `--cli DIR` to add external directories; each extension option can be repeated. Oath's own extensions load by default. `restart` reuses the saved paths. The [command and extension design](spec/feature-oath-command.md) describes the directory formats and container mounts.
 
 The terminal supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`. Use `--json` for raw protocol frames.
 

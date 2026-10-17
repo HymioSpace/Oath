@@ -7,7 +7,7 @@
 安装后由 `oath` 管理本机 Docker 部署。Oath 自带 `extensions/` 始终加载；调用方可按类型追加外部 skill、tool、CLI 目录。`start` 等待服务健康并输出 WS、Biz 端口；`restart` 复用上次启动记录，`status` 查看服务与扩展，`stop` 停止服务但保留数据。
 
 ```text
-oath start --config ./oath.toml --skill ./skills --tool ./tools --cli ./cli
+oath start --skill ./skills --tool ./tools --cli ./cli
 oath status
 oath restart
 oath stop
@@ -28,7 +28,7 @@ flowchart LR
 
 ## 命令契约
 
-`start` 的 `--config` 必须指向已有 TOML。`--skill`、`--tool`、`--cli` 可重复；每项必须是已有目录。skill 目录包含若干带 `SKILL.md` 的子目录，tool/CLI 目录包含可扫描的 `.py` 模块。路径在启动时转为绝对路径。额外目录按命令行顺序追加，不替换 Oath 内置扩展；工具或命令重名导致对应服务启动失败，不静默覆盖。
+`start` 默认读取 `~/.oath/oath.toml`；`--config` 可指定另一份已有 TOML。安装器在默认文件已存在时复用它；首次安装若仓库有旧 `oath.toml` 则迁移配置和本机 Vault 恢复文件，否则复制模板。`--skill`、`--tool`、`--cli` 可重复；每项必须是已有目录。skill 目录包含若干带 `SKILL.md` 的子目录，tool/CLI 目录包含可扫描的 `.py` 模块。路径在启动时转为绝对路径。额外目录按命令行顺序追加，不替换 Oath 内置扩展；工具或命令重名导致对应服务启动失败，不静默覆盖。
 
 `--name` 可为同一宿主机上的独立部署指定名称，默认 `oath`；`restart`、`status`、`stop` 用相同名称选择实例。每个名称有独立 Compose project 与本机启动记录。
 

@@ -154,7 +154,7 @@ async def chat(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="ws://127.0.0.1:8765")
-    parser.add_argument("--config", default="oath.toml")
+    parser.add_argument("--config", default=str(Path.home() / ".oath" / "oath.toml"))
     parser.add_argument("--user-id", default="local")
     parser.add_argument("--client-id", default="terminal")
     parser.add_argument("--json", action="store_true")
