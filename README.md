@@ -87,7 +87,7 @@ The model key is stored in Vault. No `.env` file is needed. Keep the source chec
 | `ws://127.0.0.1:8765` | Messages, approvals, streaming events and offline replay |
 | `http://127.0.0.1:8766` | Trace queries and CLI business APIs |
 
-Both bind to localhost by default. Authenticate with the generated user credential; the debug client reads it from your config. One `user_id` has one ongoing conversation, with no session creation.
+Both bind to localhost by default. Default access is trusted: supply an external `user_id` (the debug client defaults to `local`). Keep these ports private unless authentication is enabled. One `user_id` has one ongoing conversation, with no session creation.
 
 ```bash
 oath status
@@ -133,3 +133,19 @@ Ideas, issues and contributions are welcome. Discuss substantial execution chang
 ## License
 
 [MIT](LICENSE). Part of [HymioSpace](https://github.com/HymioSpace). Named after MONO's *Oath*: a commitment to carry work through.
+
+## Application authentication
+
+Oath does not create application accounts. By default, `oath start` trusts a caller-provided identity: WS `agent.attach` supplies `user_id`, and Biz HTTP uses `X-Oath-User-Id`. Keep trusted endpoints on localhost or behind an authenticated gateway.
+
+Enable remote verification through startup arguments:
+
+```bash
+oath start --auth-mode remote \
+  --auth-url http://hymio-backend:8080/internal/auth/verify \
+  --auth-token-file /path/to/private/verifier-service-token
+```
+
+The verifier receives a service-authenticated POST with `{"credential": "USER_ACCESS_TOKEN"}` and returns `{"user_id": "external-user-id", "expires_at": 1792300000}`. Rejected, expired and unavailable verification all deny access. Gateway rechecks live WS connections within 30 seconds and at credential expiry; logout does not stop accepted Agent work. Biz verifies each request. Only Gateway/Biz mount the verifier credential; Bash and model context never receive it.
+
+`oath restart` retains the authentication arguments. `--auth-mode static` enables the manually configured `services.users` token table. Auth mode is not read from TOML. The internal CLI still requires its scoped capability in every mode. See [authentication design](spec/feature-authentication.md).

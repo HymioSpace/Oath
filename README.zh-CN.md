@@ -133,3 +133,15 @@ Oath 仍在早期演进。默认是单机 Compose，使用一个 SQLite owner、
 ## License
 
 [MIT](LICENSE)。[HymioSpace](https://github.com/HymioSpace) 的一部分。名字来自 MONO 的 *Oath*，也代表把工作持续推进下去的承诺。
+
+## 应用鉴权
+
+默认 `oath start` 不验证用户凭证：WS attach 提供外部 `user_id`，Biz HTTP 使用 `X-Oath-User-Id`。此模式只向本机或可信网关开放。
+
+```bash
+oath start --auth-mode remote \
+  --auth-url http://hymio-backend:8080/internal/auth/verify \
+  --auth-token-file /path/to/private/verifier-service-token
+```
+
+验证器接收服务凭据保护的 POST，body 为 credential，返回 user_id / expires_at。失败或不可用拒绝访问；WS 最迟每 30 秒复验且不越过过期时间，Biz 逐请求验证。退出只撤销访问，不取消已接纳任务。restart 保留启动参数。`--auth-mode static` 使用手工配置的 services.users；鉴权模式不写入 TOML。详见 [设计](spec/feature-authentication.md)。

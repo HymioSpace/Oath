@@ -82,9 +82,11 @@ class Console:
 async def chat(args):
     config = load_config(args.config)
     matches = [token for token, uid in config.services.users.items() if uid == args.user_id]
-    if len(matches) != 1:
-        raise SystemExit("Exactly one user credential is required for --user-id")
-    credential = matches[0]
+    credential = (
+        Path(args.credential_file).read_text().strip()
+        if args.credential_file
+        else (matches[0] if len(matches) == 1 else "")
+    )
     ui = Console(args.json)
     if not args.json:
         ui.line("OATH", f"{args.url}  ·  device={args.client_id}")
@@ -98,7 +100,10 @@ async def chat(args):
                 json.dumps({"v": 2, "id": uuid.uuid4().hex, "type": type_, "payload": payload})
             )
 
-        await send("agent.attach", {"credential": credential, "client_id": args.client_id})
+        await send(
+            "agent.attach",
+            {"credential": credential, "user_id": args.user_id, "client_id": args.client_id},
+        )
 
         async def read():
             async for raw in ws:
@@ -156,6 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--url", default="ws://127.0.0.1:8765")
     parser.add_argument("--config", default=str(Path.home() / ".oath" / "oath.toml"))
     parser.add_argument("--user-id", default="local")
+    parser.add_argument("--credential-file", help="Access token file for authenticated deployments")
     parser.add_argument("--client-id", default="terminal")
     parser.add_argument("--json", action="store_true")
     with contextlib.suppress(KeyboardInterrupt):

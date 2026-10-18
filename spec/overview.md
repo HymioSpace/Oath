@@ -24,3 +24,5 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 数据协议在 core/protocol；数据库、消息中间件、模型、工具执行环境通过接口隔离。
 历史 feature 文档保留设计背景，其中的 session、scope、文件 store、Redis 和每用户进程方案不再是当前实现。
 阅读实现或新增功能时，先以 [持续运行的 Personal Agent 基座](feature-distributed-personal-agent.md) 为准，再看对应模块的历史 feature。
+
+应用身份由外部创建；默认受信接入，可通过启动参数启用 remote/static 认证。Gateway 与 Biz 共用验证器，鉴权失效不取消后台执行。见 [鉴权](feature-authentication.md)。

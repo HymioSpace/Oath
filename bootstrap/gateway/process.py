@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 
 from websockets.asyncio.server import serve
 
@@ -11,6 +12,7 @@ from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.authentication import UserAuthenticator, service_token
 from core.outbound.delivery import Delivery
 from core.protocol.datatype.inbound import of_command
+from core.protocol.datatype.user import User
 from core.protocol.datatype.wire import Command, CommandType, ack, error_frame, pong
 
 _log = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ async def run_async(config):
         send_lock = asyncio.Lock()
         sender = None
         receiver = None
+        monitor = None
 
         async def send(frame):
             async with send_lock:
@@ -43,7 +46,30 @@ async def run_async(config):
             command = Command.parse(json.loads(await asyncio.wait_for(connection.recv(), 10)))
             if command.type != CommandType.AGENT_ATTACH:
                 raise ValueError("First command must be agent.attach")
-            user = auth.authenticate(command.payload.get("credential", ""))
+            credential = command.payload.get("credential", "")
+            supplied_user = command.payload.get("user_id")
+            identity = await asyncio.to_thread(auth.authenticate, credential, supplied_user)
+            user = User(identity.user_id)
+
+            async def verify():
+                current = await asyncio.to_thread(auth.authenticate, credential, supplied_user)
+                if current.user_id != user.user_id:
+                    raise ValueError("Connection identity changed")
+                return current
+
+            async def watch_identity():
+                current = identity
+                while True:
+                    delay = (
+                        30
+                        if current.expires_at is None
+                        else min(30, max(0, current.expires_at - time.time()))
+                    )
+                    await asyncio.sleep(delay)
+                    if current.expires_at is not None and time.time() >= current.expires_at:
+                        raise ValueError("Credential expired")
+                    current = await verify()
+
             delivery = Delivery(
                 storage,
                 user.user_id,
@@ -56,6 +82,7 @@ async def run_async(config):
 
             async def receive():
                 async for raw in connection:
+                    await verify()
                     command = None
                     try:
                         command = Command.parse(json.loads(raw))
@@ -87,9 +114,12 @@ async def run_async(config):
                             error_frame(command.id if command else None, "command_failed", str(exc))
                         )
 
+            monitor = asyncio.create_task(watch_identity())
             sender = asyncio.create_task(delivery.run(attached))
             receiver = asyncio.create_task(receive())
-            done, _ = await asyncio.wait({sender, receiver}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait(
+                {sender, receiver, monitor}, return_when=asyncio.FIRST_COMPLETED
+            )
             for task in done:
                 task.result()
         except Exception as exc:
@@ -97,7 +127,7 @@ async def run_async(config):
             with contextlib.suppress(Exception):
                 await send(error_frame(None, "connection_closed", str(exc)))
         finally:
-            tasks = [task for task in (sender, receiver) if task]
+            tasks = [task for task in (sender, receiver, monitor) if task]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)

@@ -14,6 +14,7 @@ from pathlib import Path
 import httpx
 import yaml
 
+from bootstrap.common.authentication import auth_arguments, auth_environment
 from bootstrap.common.config import load_config
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +126,7 @@ def _show(record: dict) -> None:
     ws, biz = _endpoints(record)
     print(f"WS:  {ws}")
     print(f"Biz: {biz}")
+    print(f"Auth: {record.get('auth_mode', 'none')}")
     for kind in _KINDS:
         for path in record["paths"][kind]:
             print(f"{kind}: {path}")
@@ -141,6 +143,7 @@ def main() -> None:
     start = commands.add_parser("start", help="Build and start Oath in Docker")
     start.add_argument("--config", default=str(_DEFAULT_CONFIG), help="Path to oath.toml")
     start.add_argument("--name", default="oath", help="Local deployment name")
+    auth_arguments(start)
     for kind in _KINDS:
         start.add_argument(f"--{kind}", action="append", default=[], metavar="DIR")
     for action, help_text in (
@@ -158,7 +161,31 @@ def main() -> None:
             config = Path(args.config).expanduser().resolve()
             load_config(config)
             paths = _paths(args)
-            overlay_text = yaml.safe_dump(_overlay(paths), sort_keys=False)
+            auth_file = (
+                str(Path(args.auth_token_file).expanduser().resolve())
+                if args.auth_token_file
+                else ""
+            )
+            environment = auth_environment(args.auth_mode, args.auth_url, auth_file)
+            overlay_data = _overlay(paths)
+            for service in ("gateway", "biz"):
+                target = overlay_data["services"].setdefault(
+                    service, {"environment": {}, "volumes": []}
+                )
+                target["environment"].update(environment)
+                if args.auth_mode == "remote":
+                    target["extra_hosts"] = ["host.docker.internal:host-gateway"]
+                if auth_file:
+                    target["environment"]["OATH_AUTH_TOKEN_FILE"] = "/run/oath/auth-token"
+                    target["volumes"].append(
+                        {
+                            "type": "bind",
+                            "source": auth_file,
+                            "target": "/run/oath/auth-token",
+                            "read_only": True,
+                        }
+                    )
+            overlay_text = yaml.safe_dump(overlay_data, sort_keys=False)
             digest = hashlib.sha256(overlay_text.encode()).hexdigest()[:12]
             overlay = _state_dir() / f"{args.name}.{digest}.compose.yaml"
             _write_private(overlay, overlay_text)
@@ -169,6 +196,7 @@ def main() -> None:
                 "compose": str(_COMPOSE),
                 "overlay": str(overlay),
                 "paths": paths,
+                "auth_mode": args.auth_mode,
             }
             _run_docker("up", record)
             _healthy(record)
