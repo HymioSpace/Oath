@@ -16,6 +16,7 @@ workers = 4
 lease_seconds = 60
 poll_seconds = 0.25
 internal_token = ""
+# Only used with --auth-mode static; default trusted mode accepts external user_id.
 users = {}
 rabbitmq_user = "oath"
 rabbitmq_password = ""

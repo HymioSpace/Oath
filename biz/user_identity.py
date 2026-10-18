@@ -1,7 +1,7 @@
 """从 HTTP 请求里认出这个请求属于哪个 user。
 
-biz 的几条 path 共用同一份 credential → 身份映射，也共用同一种回错方式。放在 biz
-而不是 server 里：认 credential 是业务侧的事，server 只负责起进程与挂路由。
+biz 的几条 path 共用同一份 外部身份验证，也共用同一种回错方式。放在 biz
+而不是 server 里：认证器由启动层注入，业务路由只消费已验证身份。
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from biz.service import BizService
 from core.protocol.datatype.user import User
 from core.protocol.error import PermissionDeniedError
 
-#: credential 从这个头里取。查表换身份，与 WebSocket 的 `session.open` 同一份映射。
+#: credential 从这个头里取。查表换身份，与 WebSocket 的 `agent.attach` 使用同一认证器。
 BEARER: Final = "Bearer "
 
 
@@ -36,7 +36,7 @@ def user_of(service: BizService, request: Request) -> User:
     header = request.headers.get("authorization", "")
     token = header[len(BEARER) :].strip() if header.startswith(BEARER) else ""
     try:
-        identity = service.authenticator.authenticate(token)
+        identity = service.authenticator.authenticate(token, request.headers.get("x-oath-user-id"))
     except PermissionDeniedError:
         # 错误正文不带 credential 本身：它多半是错的或过期的，抄进日志等于再泄一次。
         raise Unauthorized() from None
