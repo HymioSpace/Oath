@@ -22,6 +22,7 @@ GEN_AI_REQUEST_TEMPERATURE: Final = "gen_ai.request.temperature"
 GEN_AI_REQUEST_MAX_TOKENS: Final = "gen_ai.request.max_tokens"
 GEN_AI_USAGE_INPUT_TOKENS: Final = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS: Final = "gen_ai.usage.output_tokens"
+GEN_AI_USAGE_CACHE_READ_TOKENS: Final = "gen_ai.usage.cache_read.input_tokens"
 GEN_AI_RESPONSE_FINISH_REASONS: Final = "gen_ai.response.finish_reasons"
 
 OATH_STEP_ID: Final = "oath.step.id"
@@ -35,6 +36,7 @@ OATH_RUN_ID: Final = "oath.run.id"
 
 OATH_LLM_ATTEMPT: Final = "oath.llm.attempt"
 OATH_LLM_TTFT_MS: Final = "oath.llm.ttft_ms"
+OATH_LLM_FIRST_CONTENT_MS: Final = "oath.llm.first_content_ms"
 OATH_LLM_TPOT_MS: Final = "oath.llm.tpot_ms"
 OATH_LLM_DURATION_MS: Final = "oath.llm.duration_ms"
 
@@ -75,6 +77,7 @@ __all__ = [
     "GEN_AI_RESPONSE_FINISH_REASONS",
     "GEN_AI_USAGE_INPUT_TOKENS",
     "GEN_AI_USAGE_OUTPUT_TOKENS",
+    "GEN_AI_USAGE_CACHE_READ_TOKENS",
     "INPUT_EVENT",
     "OP_CHAT",
     "OP_INVOKE_AGENT",
@@ -82,6 +85,7 @@ __all__ = [
     "OATH_LLM_DURATION_MS",
     "OATH_LLM_TPOT_MS",
     "OATH_LLM_TTFT_MS",
+    "OATH_LLM_FIRST_CONTENT_MS",
     "OATH_RUN_ID",
     "OATH_STEP_DURATION_MS",
     "OATH_STEP_ID",

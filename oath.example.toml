@@ -54,6 +54,9 @@ api_base = "https://api.openai.com/v1"
 credential = "model/openai"
 import_env = "OPENAI_API_KEY"
 timeout_seconds = 60
+# Enable only when the OpenAI-compatible provider supports streamed usage.
+# [agent.provider.extra_params]
+# stream_options = { include_usage = true }
 
 [supervisor]
 invoke_interval_seconds = 30
