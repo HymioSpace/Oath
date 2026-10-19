@@ -27,6 +27,11 @@ _DEFAULT_TIMEOUT_SECONDS: Final = 30.0
 _SCHEMA: Final[JsonObject] = {
     "type": "object",
     "properties": {
+        "device_id": {
+            "type": "string",
+            "enum": ["oath_host"],
+            "description": "Oath host execution target",
+        },
         "command": {"type": "string", "description": "要执行的命令，按 shell 语法解析"},
         "cwd": {"type": "string", "description": "工作目录；不传就是工作区"},
     },
@@ -40,7 +45,10 @@ def workspace_note(root: Path) -> str:
 
     写在 prompt 里是为了让模型知道默认在哪 —— 它不靠 bash 的参数说明去猜当前目录。
     """
-    return f"## 工作区\n命令默认在 {root} 下执行。要去别处，给 bash 传 cwd。"
+    return (
+        f"## 工作区\nBash 执行设备是 oath_host。命令默认在 {root} 下执行。"
+        "要去别处，给 bash 传 cwd。"
+    )
 
 
 class BashTool(Tool):
@@ -92,6 +100,7 @@ class BashTool(Tool):
         return ToolResult(
             canonical_json(
                 {
+                    "device_id": "oath_host",
                     "command": command,
                     "cwd": str(cwd or self._root),
                     "exit_code": result.exit_code,

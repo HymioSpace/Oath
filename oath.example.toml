@@ -41,6 +41,8 @@ skill_scan_dirs = []
 # bash 工具的默认工作目录，也就是 system prompt 里那段工作区说明说的地方。
 # 命令默认在它下面跑；模型要访问别处就给 bash 传 cwd，不受这里限制。
 workspace_root = "./workspace"
+# Disable host execution when supplying a device-aware bash through --tool.
+builtin_bash = true
 # oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli echo ...`。
 # 与 workspace_root 一样在装配期解析成绝对路径，相对路径按配置文件目录算，
 # 不是按命令的 cwd（命令默认在 workspace 下）。
