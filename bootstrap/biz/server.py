@@ -29,12 +29,29 @@ def build_app(service, cli_service):
         except (Unauthorized, BadQuery) as exc:
             return error_response(exc)
 
+    def history(request):
+        try:
+            user = user_of(service, request)
+            before = request.query_params.get("before")
+            return JSONResponse(
+                service.conversation_history(
+                    user,
+                    before=int(before) if before is not None else None,
+                    limit=int(request.query_params.get("limit", 10)),
+                )
+            )
+        except (Unauthorized, BadQuery) as exc:
+            return error_response(exc)
+        except ValueError:
+            return JSONResponse({"error": "bad_query"}, 400)
+
     def heartbeat(request):
         return JSONResponse({"status": "alive"})
 
     return Starlette(
         routes=[
             Route("/heartbeat", heartbeat),
+            Route("/conversation_history", history),
             Route("/list_traces", traces),
             Route("/query_trace", trace),
             *cli_routes(cli_service),

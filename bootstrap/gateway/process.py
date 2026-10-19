@@ -77,7 +77,7 @@ async def run_async(config):
                 send,
                 config.services.poll_seconds,
             )
-            attached = await delivery.attach()
+            attached = await delivery.attach(command.payload.get("history_limit"))
             await send(ack(command.id, user_id=user.user_id))
 
             async def receive():

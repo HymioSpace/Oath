@@ -3,6 +3,7 @@
 import json
 import uuid
 
+from core.storage import conversation_history
 from core.storage.database import encode
 from core.utils.encoding import utc_now_iso
 
@@ -20,10 +21,12 @@ def append(db, user_id, type_, payload, key=None, occur_dt=None):
         return known["seq"]
     db.execute("UPDATE users SET event_seq=event_seq+1 WHERE user_id=?", (user_id,))
     seq = db.execute("SELECT event_seq FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+    created_at = occur_dt or utc_now_iso()
     db.execute(
         "INSERT INTO outbox_events VALUES(?,?,?,?,?,?)",
-        (user_id, seq, key, type_, body, occur_dt or utc_now_iso()),
+        (user_id, seq, key, type_, body, created_at),
     )
+    conversation_history.update(db, user_id, seq, type_, payload, created_at)
     return seq
 
 

@@ -6,7 +6,7 @@ import json
 import time
 
 from core.protocol.datatype.inbound import Inbound
-from core.storage import outbox, scheduling
+from core.storage import conversation_history, outbox, scheduling
 from core.storage import runtime_transactions as runtime
 from core.storage.database import Database, encode
 
@@ -165,8 +165,18 @@ class StorageService:
                 )
             if operation == "outbox.read":
                 return outbox.read(db, uid, p["after"], p.get("through"), p.get("limit", 128))
+            if operation == "history.page":
+                return conversation_history.page(
+                    db, uid, before=p.get("before"), limit=p.get("limit", 10)
+                )
             if operation == "client.attach":
-                return outbox.attach(db, uid, p["client_id"])
+                attached = outbox.attach(db, uid, p["client_id"])
+                if p.get("history_limit") is not None:
+                    snapshot = conversation_history.page(db, uid, limit=p["history_limit"])
+                    attached["delivery_cursor"] = attached["after_cursor"]
+                    attached["after_cursor"] = snapshot["checkpoint"]
+                    attached["snapshot"] = snapshot
+                return attached
             if operation in {"client.ack", "client.delivered"}:
                 return outbox.cursor(
                     db,

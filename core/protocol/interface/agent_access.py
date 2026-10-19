@@ -15,5 +15,7 @@ class AgentUnavailable(Exception):
 class AgentAccess(Protocol):
     def user_context(self, user: User) -> JsonObject: ...
 
+    def conversation_history(self, user: User, *, before: int | None, limit: int) -> JsonObject: ...
+
 
 __all__ = ["AgentAccess", "AgentUnavailable"]
