@@ -26,6 +26,7 @@ OPERATIONS = {
     "supervisor.tick",
     "outbox.append",
     "outbox.read",
+    "history.page",
     "client.attach",
     "client.ack",
     "client.delivered",

@@ -84,7 +84,9 @@ class AgentBrain:
         """
         parts = [
             self._ctx.config.system_prompt,
-            workspace_note(self._ctx.config.workspace_root),
+            workspace_note(self._ctx.config.workspace_root)
+            if self._ctx.config.builtin_bash
+            else "",
             self._ctx.skills.list(self._ctx.config.skill_index_tokens),
         ]
         return "\n\n".join(part for part in parts if part)

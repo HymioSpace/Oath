@@ -72,6 +72,7 @@ class AgentConfig:
 
     #: 工作区根目录。bash 的默认 cwd，进 system prompt 的工作区段落。
     workspace_root: Path = Path("./workspace")
+    builtin_bash: bool = True
     #: 挂 `oath-cli` 的目录，前置到 bash 子进程的 PATH 上。
     cli_bin_dir: Path = Path("./scripts")
 
@@ -87,6 +88,8 @@ class AgentConfig:
     tool_round_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.builtin_bash, bool):
+            raise ValueError("builtin_bash must be boolean")
         for name in (
             "max_run_steps",
             "max_run_seconds",

@@ -16,10 +16,11 @@ class Delivery:
     async def call(self, operation, **params):
         return await asyncio.to_thread(self.storage.call, operation, user_id=self.user_id, **params)
 
-    async def attach(self):
-        attached = await self.call("client.attach", client_id=self.client_id)
+    async def attach(self, history_limit=None):
+        params = {} if history_limit is None else {"history_limit": history_limit}
+        attached = await self.call("client.attach", client_id=self.client_id, **params)
         self.generation = attached["generation"]
-        self.highest_sent = attached["after_cursor"]
+        self.highest_sent = attached.get("delivery_cursor", attached["after_cursor"])
         return attached
 
     async def confirm(self, cursor):
@@ -49,6 +50,16 @@ class Delivery:
     async def run(self, attached):
         after = attached["after_cursor"]
         high = attached["through_cursor"]
+        if "snapshot" in attached:
+            async with self.lock:
+                await self.call(
+                    "client.delivered",
+                    client_id=self.client_id,
+                    generation=self.generation,
+                    seq=high,
+                )
+                await self.send({"v": 2, "type": "conversation.snapshot", **attached["snapshot"]})
+                self.highest_sent = high
         await self.send(
             {"v": 2, "type": "offline.start", "after_cursor": after, "through_cursor": high}
         )

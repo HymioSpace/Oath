@@ -84,3 +84,17 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE TABLE IF NOT EXISTS relay_lease (
  id INTEGER PRIMARY KEY CHECK(id=1), owner TEXT NOT NULL, token INTEGER NOT NULL, expires REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS conversation_checkpoints (
+ user_id TEXT PRIMARY KEY REFERENCES users(user_id), seq INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS conversation_events (
+ user_id TEXT NOT NULL REFERENCES users(user_id), seq INTEGER NOT NULL,
+ type TEXT NOT NULL, entity TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(user_id,seq)
+);
+CREATE INDEX IF NOT EXISTS conversation_entities ON conversation_events(user_id,type,entity);
+CREATE TABLE IF NOT EXISTS conversation_streams (
+ user_id TEXT NOT NULL REFERENCES users(user_id), step_id TEXT NOT NULL, seq INTEGER NOT NULL,
+ attempt INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL,
+ PRIMARY KEY(user_id,step_id)
+);

@@ -55,6 +55,8 @@ def _overlay(paths: dict[str, list[str]]) -> dict:
         containers = [f"/app/oath-external/{kind}/{index}" for index in range(len(hosts))]
         for service in targets[kind]:
             target = services.setdefault(service, {"volumes": [], "environment": {}})
+            if kind == "tool":
+                target["extra_hosts"] = ["host.docker.internal:host-gateway"]
             target["volumes"].extend(
                 {"type": "bind", "source": host, "target": container, "read_only": True}
                 for host, container in zip(hosts, containers, strict=True)

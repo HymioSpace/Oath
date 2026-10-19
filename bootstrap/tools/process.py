@@ -78,7 +78,8 @@ def run(config):
             "OATH_CLI_TOKEN": cli_token(config, user),
         }
 
-    registry.register(BashTool(env, cli_env, root=config.agent.workspace_root))
+    if config.agent.builtin_bash:
+        registry.register(BashTool(env, cli_env, root=config.agent.workspace_root))
     for tool in extensions.tools:
         registry.register(tool)
     tools = ThreadedToolSystem(
