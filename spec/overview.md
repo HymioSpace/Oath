@@ -33,3 +33,5 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 轻量客户端状态与模型缓存指标见 [状态与性能观测](feature-runtime-status-metrics.md)。
 
 应用 Markdown 指令与持久工具续行预算见 [Prompt 与工具预算](feature-prompt-and-tool-budget.md)。
+
+See [model selection](feature-model-selection.md) for per-user model choice and immutable step requests.

@@ -104,6 +104,16 @@ async def run_async(config):
                             )
                         else:
                             validate(command)
+                            if (
+                                command.type == CommandType.USER_MESSAGE
+                                and "model" in command.payload
+                            ):
+                                model = command.payload["model"]
+                                if not isinstance(model, str) or model not in {
+                                    config.agent.provider.model,
+                                    *config.agent.selectable_models,
+                                }:
+                                    raise ValueError("Model is not available")
                             item = of_command(command)
                             await asyncio.to_thread(
                                 queue.call, "queue.add", user_id=user.user_id, item=item.to_dict()

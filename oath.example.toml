@@ -23,6 +23,8 @@ rabbitmq_password = ""
 broker_url = ""
 
 [agent]
+# Optional model IDs using this same provider endpoint and credential.
+selectable_models = []
 system_prompt = """
 # Assistant
 Help the user complete their request. Be concise, truthful and use the user's language.

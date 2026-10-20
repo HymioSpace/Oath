@@ -42,6 +42,7 @@ class AgentConfig:
     system_prompt: str = ""
     system_prompt_file: Path | None = None
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
+    selectable_models: tuple[str, ...] = ()
     max_output_tokens: int = 2048
     temperature: float | None = None
 
@@ -90,6 +91,11 @@ class AgentConfig:
     tool_round_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.selectable_models, (list, tuple)) or any(
+            not isinstance(m, str) or not m.strip() or len(m) > 128 for m in self.selectable_models
+        ):
+            raise ValueError("selectable_models must contain model identifiers")
+        object.__setattr__(self, "selectable_models", tuple(self.selectable_models))
         if not isinstance(self.builtin_bash, bool):
             raise ValueError("builtin_bash must be boolean")
         for name in (
