@@ -92,14 +92,14 @@ async def run_async(config):
                             await send(pong(command.id))
                         elif command.type == CommandType.AGENT_STATUS:
                             state = await asyncio.to_thread(
-                                storage.call, "state.read", user_id=user.user_id
+                                storage.call, "state.summary", user_id=user.user_id
                             )
                             await send(
                                 {
                                     "v": 2,
                                     "type": "agent.status",
                                     "id": command.id,
-                                    "payload": state["state"],
+                                    "payload": state,
                                 }
                             )
                         else:

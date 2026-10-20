@@ -6,7 +6,7 @@ import json
 import time
 
 from core.protocol.datatype.inbound import Inbound
-from core.storage import conversation_history, outbox, scheduling
+from core.storage import conversation_history, outbox, scheduling, status_summary
 from core.storage import runtime_transactions as runtime
 from core.storage.database import Database, encode
 
@@ -23,6 +23,8 @@ class StorageService:
             fence = p.get("fence")
             if fence:
                 scheduling.check(db, uid, fence)
+            if operation == "state.summary":
+                return status_summary.read(db, uid)
             if operation == "state.read":
                 row = db.execute(
                     "SELECT version,state_json FROM users WHERE user_id=?", (uid,)

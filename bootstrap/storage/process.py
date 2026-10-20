@@ -7,6 +7,7 @@ from core.storage.service import StorageService
 
 OPERATIONS = {
     "state.read",
+    "state.summary",
     "state.commit",
     "users.list",
     "tools.users",

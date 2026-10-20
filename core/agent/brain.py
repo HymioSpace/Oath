@@ -34,10 +34,12 @@ from core.trace.attributes import (
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_USAGE_CACHE_READ_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OATH_LLM_ATTEMPT,
     OATH_LLM_DURATION_MS,
+    OATH_LLM_FIRST_CONTENT_MS,
     OATH_LLM_TPOT_MS,
     OATH_LLM_TTFT_MS,
     OATH_RUN_ID,
@@ -144,11 +146,14 @@ class AgentBrain:
             emit = self._delta(user, step_id)
             # ttft = 第一段增量到达的时刻。计时用单调时钟：墙上时间会被 NTP 拨一下。
             timing: list[float] = []
+            content_timing: list[float] = []
             clock = time.monotonic()
 
             def on_delta(channel: str, text: str) -> None:
                 if not timing:
                     timing.append(time.monotonic())
+                if channel == "content" and not content_timing:
+                    content_timing.append(time.monotonic())
                 emit(channel, text)
 
             started_ns = time.time_ns()
@@ -161,7 +166,9 @@ class AgentBrain:
                 self._record_llm(user, step, attempt_no, started_ns, clock, timing, None, str(exc))
                 self._fail(user, step_id, str(exc))
                 return
-            self._record_llm(user, step, attempt_no, started_ns, clock, timing, response, None)
+            self._record_llm(
+                user, step, attempt_no, started_ns, clock, timing, response, None, content_timing
+            )
 
             def save(state: State) -> None:
                 state["steps"][step_id]["response"] = payload
@@ -331,6 +338,7 @@ class AgentBrain:
         first_delta: list[float],
         response: LlmResponse | None,
         error: str | None,
+        first_content: list[float] | None = None,
     ) -> None:
         """一次模型调用。请求与响应原样进 span event，耗时进 attribute。"""
         end = time.monotonic()
@@ -350,11 +358,19 @@ class AgentBrain:
         ttft_ms = (first_delta[0] - clock) * 1000 if first_delta else None
         if ttft_ms is not None:
             attributes[OATH_LLM_TTFT_MS] = round(ttft_ms, 3)
+        if first_content:
+            attributes[OATH_LLM_FIRST_CONTENT_MS] = round((first_content[0] - clock) * 1000, 3)
         output_tokens = _output_tokens(response)
         if ttft_ms is not None and output_tokens is not None and output_tokens > 1:
             attributes[OATH_LLM_TPOT_MS] = round((duration_ms - ttft_ms) / (output_tokens - 1), 4)
         if response is not None:
             attributes[GEN_AI_RESPONSE_FINISH_REASONS] = [response.finish_reason]
+            details = response.usage.get("prompt_tokens_details")
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if cached is None:
+                cached = response.usage.get("cache_read_input_tokens")
+            if type(cached) is int and cached >= 0:
+                attributes[GEN_AI_USAGE_CACHE_READ_TOKENS] = cached
             for key, name in (
                 ("prompt_tokens", GEN_AI_USAGE_INPUT_TOKENS),
                 ("completion_tokens", GEN_AI_USAGE_OUTPUT_TOKENS),
