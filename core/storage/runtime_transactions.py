@@ -196,4 +196,4 @@ def project(db, user_id, before, after, changes):
 
     from core.subagents.storage import project as project_subagent
 
-    project_subagent(db, user_id, changes)
+    project_subagent(db, user_id, changes, after)

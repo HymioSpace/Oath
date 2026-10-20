@@ -242,7 +242,7 @@ def call(db, uid, operation, p):
     raise ValueError("Unknown subagent operation")
 
 
-def project(db, uid, changes):
+def project(db, uid, changes, state=None):
     row = lookup(db, uid)
     if not row or row["status"] not in ACTIVE:
         return
@@ -253,6 +253,20 @@ def project(db, uid, changes):
         if step["status"] in {"failed", "paused", "cancelled"}:
             finish(db, row, "failed", step.get("error") or "Execution stopped")
         elif step["status"] == "completed" and not (step.get("response") or {}).get("tool_calls"):
+            if state is None:
+                state = json.loads(
+                    db.execute("SELECT state_json FROM users WHERE user_id=?", (uid,)).fetchone()[0]
+                )
+            seen = {
+                entry["item"].get("source_id")
+                for entry in state["inputs"].values()
+                if entry["queue"] == "tool" and entry["item"].get("source") == "tool.terminal"
+            }
+            if any(
+                not call.get("terminal") or call["terminal"]["event_id"] not in seen
+                for call in state["calls"].values()
+            ):
+                continue
             content = (step.get("response") or {}).get(
                 "content"
             ) or "Completed without a text result"

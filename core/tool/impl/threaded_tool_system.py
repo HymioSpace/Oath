@@ -226,6 +226,8 @@ class ThreadedToolSystem(ToolSystem):
             verdict = self.permissions.authorize(
                 user, call["tool"], copy.deepcopy(call["arguments"])
             )
+            if user.agent_id and verdict == "ask":
+                verdict = "deny"
             if verdict not in {"allow", "ask", "deny"}:
                 raise ValueError("未知权限判定")
             if verdict != "deny":

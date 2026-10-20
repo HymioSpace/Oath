@@ -63,3 +63,8 @@ Application extensions always receive the real owner user_id and optional agent_
 Extensions can declare `Tool.allow_subagent = False`. The registry filters child definitions and
 the tool admission path rejects the same tools even when a model fabricates their names.
 Application-specific tool names are not encoded in Oath core.
+
+A final response without new calls terminates only after every earlier tool result has entered
+the child's context. A batch-timeout reminder does not end a child that is still waiting for
+work. Late results resume it normally. Approval-requiring tools are denied for children;
+they cannot wait for user/system intervention. Deadline and budget remain the final bounds.
