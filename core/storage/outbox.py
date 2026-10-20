@@ -1,14 +1,23 @@
 """对外事件先持久化，WS 只读；每个客户端独立确认。"""
 
 import json
+import sqlite3
 import uuid
+from typing import Any
 
 from core.storage import conversation_history
 from core.storage.database import encode
 from core.utils.encoding import utc_now_iso
 
 
-def append(db, user_id, type_, payload, key=None, occur_dt=None):
+def append(
+    db: sqlite3.Connection,
+    user_id: str,
+    type_: str,
+    payload: dict[str, Any],
+    key: str | None = None,
+    occur_dt: str | None = None,
+) -> int:
     key = key or uuid.uuid4().hex
     known = db.execute(
         "SELECT seq,type,payload_json FROM outbox_events WHERE user_id=? AND idempotency_key=?",
@@ -18,9 +27,9 @@ def append(db, user_id, type_, payload, key=None, occur_dt=None):
     if known:
         if known["type"] != type_ or known["payload_json"] != body:
             raise ValueError("Outbox idempotency conflict")
-        return known["seq"]
+        return int(known["seq"])
     db.execute("UPDATE users SET event_seq=event_seq+1 WHERE user_id=?", (user_id,))
-    seq = db.execute("SELECT event_seq FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+    seq = int(db.execute("SELECT event_seq FROM users WHERE user_id=?", (user_id,)).fetchone()[0])
     created_at = occur_dt or utc_now_iso()
     db.execute(
         "INSERT INTO outbox_events VALUES(?,?,?,?,?,?)",

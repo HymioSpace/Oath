@@ -48,7 +48,7 @@ def _paths(args: argparse.Namespace) -> dict[str, list[str]]:
     }
 
 
-def _overlay(paths: dict[str, list[str]]) -> dict:
+def _overlay(paths: dict[str, list[str]], prompt_file: Path | None = None) -> dict:
     services: dict[str, dict] = {}
     targets = {"skill": ("worker", "tools"), "tool": ("tools",), "cli": ("biz",)}
     for kind, hosts in paths.items():
@@ -62,6 +62,28 @@ def _overlay(paths: dict[str, list[str]]) -> dict:
                 for host, container in zip(hosts, containers, strict=True)
             )
             target["environment"][f"OATH_{kind.upper()}_DIRS"] = json.dumps(containers)
+    if prompt_file:
+        for service in (
+            "storage",
+            "queue",
+            "manager",
+            "tools",
+            "consumer",
+            "worker",
+            "supervisor",
+            "gateway",
+            "biz",
+        ):
+            target = services.setdefault(service, {"volumes": [], "environment": {}})
+            target["volumes"].append(
+                {
+                    "type": "bind",
+                    "source": str(prompt_file),
+                    "target": "/run/oath/system-prompt.md",
+                    "read_only": True,
+                }
+            )
+            target["environment"]["OATH_SYSTEM_PROMPT_FILE"] = "/run/oath/system-prompt.md"
     return {"services": services}
 
 
@@ -109,7 +131,12 @@ def _run_docker(action: str, record: dict, *, recreate: bool = False) -> None:
 
 
 def _endpoints(record: dict) -> tuple[str, str]:
-    config = load_config(record["config"])
+    config = load_config(
+        record["config"],
+        system_prompt_file=Path(record["system_prompt_file"])
+        if record.get("system_prompt_file")
+        else None,
+    )
     return (
         f"ws://127.0.0.1:{config.services.gateway_port}",
         f"http://127.0.0.1:{config.services.biz_port}",
@@ -144,6 +171,9 @@ def main() -> None:
     commands = parser.add_subparsers(dest="action", required=True)
     start = commands.add_parser("start", help="Build and start Oath in Docker")
     start.add_argument("--config", default=str(_DEFAULT_CONFIG), help="Path to oath.toml")
+    start.add_argument(
+        "--system-prompt", type=Path, help="Replace application instructions with a Markdown file"
+    )
     start.add_argument("--name", default="oath", help="Local deployment name")
     auth_arguments(start)
     for kind in _KINDS:
@@ -161,7 +191,12 @@ def main() -> None:
             _source_tree()
             _state_path(args.name)
             config = Path(args.config).expanduser().resolve()
-            load_config(config)
+            loaded = load_config(
+                config,
+                system_prompt_file=args.system_prompt.expanduser().resolve()
+                if args.system_prompt
+                else None,
+            )
             paths = _paths(args)
             auth_file = (
                 str(Path(args.auth_token_file).expanduser().resolve())
@@ -169,7 +204,7 @@ def main() -> None:
                 else ""
             )
             environment = auth_environment(args.auth_mode, args.auth_url, auth_file)
-            overlay_data = _overlay(paths)
+            overlay_data = _overlay(paths, loaded.agent.system_prompt_file)
             for service in ("gateway", "biz"):
                 target = overlay_data["services"].setdefault(
                     service, {"environment": {}, "volumes": []}
@@ -199,6 +234,9 @@ def main() -> None:
                 "overlay": str(overlay),
                 "paths": paths,
                 "auth_mode": args.auth_mode,
+                "system_prompt_file": str(loaded.agent.system_prompt_file)
+                if loaded.agent.system_prompt_file
+                else None,
             }
             _run_docker("up", record)
             _healthy(record)
@@ -207,6 +245,8 @@ def main() -> None:
         elif args.action == "restart":
             record = _load(args.name)
             _source_tree()
+            if record.get("system_prompt_file"):
+                load_config(record["config"], system_prompt_file=Path(record["system_prompt_file"]))
             for kind, paths in record["paths"].items():
                 for path in paths:
                     _validate_directory(path, kind)
@@ -222,7 +262,7 @@ def main() -> None:
             record = _load(args.name)
             _run_docker("down", record)
             print("Oath stopped; volumes retained")
-    except (ValueError, FileNotFoundError, httpx.HTTPError, subprocess.CalledProcessError) as error:
+    except (ValueError, OSError, httpx.HTTPError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"oath: {error}\n")
 
 

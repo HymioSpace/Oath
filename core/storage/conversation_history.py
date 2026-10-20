@@ -1,6 +1,8 @@
 """Transactional conversation read model; raw Outbox remains untouched."""
 
 import json
+import sqlite3
+from typing import Any
 
 from core.storage.database import encode
 
@@ -12,11 +14,20 @@ KINDS = frozenset(
         "tool.terminal",
         "permission.requested",
         "permission.resolved",
+        "agent.paused",
+        "agent.resumed",
     }
 )
 
 
-def apply(db, user_id, seq, kind, payload, created_at):
+def apply(
+    db: sqlite3.Connection,
+    user_id: str,
+    seq: int,
+    kind: str,
+    payload: dict[str, Any],
+    created_at: str,
+) -> None:
     step = payload.get("step_id", "")
     if kind == "assistant.delta" and payload.get("channel") == "content" and step:
         if db.execute(
@@ -59,7 +70,14 @@ def apply(db, user_id, seq, kind, payload, created_at):
         )
 
 
-def update(db, user_id, seq, kind, payload, created_at):
+def update(
+    db: sqlite3.Connection,
+    user_id: str,
+    seq: int,
+    kind: str,
+    payload: dict[str, Any],
+    created_at: str,
+) -> None:
     if db.execute("SELECT 1 FROM conversation_checkpoints WHERE user_id=?", (user_id,)).fetchone():
         apply(db, user_id, seq, kind, payload, created_at)
         db.execute("UPDATE conversation_checkpoints SET seq=? WHERE user_id=?", (seq, user_id))

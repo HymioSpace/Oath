@@ -72,6 +72,16 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
             )
         elif entry["queue"] == "user":
             messages.append({"role": "user", "content": str(item.payload["content"])})
+        elif entry["queue"] == "system":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"<system_event type={quoteattr(item.source)}>"
+                        f"{escape(canonical_json(item.payload))}</system_event>"
+                    ),
+                }
+            )
     validate_messages(messages)
     return messages
 

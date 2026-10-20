@@ -97,6 +97,17 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None):
 
 
 def project(db, user_id, before, after, changes):
+    pause = after["meta"].get("tool_wake_pause")
+    if pause and pause != before["meta"].get("tool_wake_pause"):
+        outbox.append(db, user_id, "agent.paused", pause, f"tool-budget:{pause['epoch']}:paused")
+    elif before["meta"].get("tool_wake_pause") and not pause:
+        outbox.append(
+            db,
+            user_id,
+            "agent.resumed",
+            {"reason": "external_input"},
+            f"tool-budget:{after['meta'].get('tool_budget_epoch', 0)}:resumed",
+        )
     for step_id, step in changes.get("steps", {}).items():
         db.execute(
             "INSERT INTO steps VALUES(?,?,?,?,?) ON CONFLICT(user_id,step_id) DO UPDATE SET "

@@ -97,6 +97,14 @@ oath stop      # 保留数据卷
 
 `--config PATH` 可指定其他配置。调试客户端支持 `/status`、`/retry`、`/cancel`、`/approve ID`、`/deny ID` 和 `/quit`；`--json` 查看原始协议事件。
 
+应用指令可用 `oath start --system-prompt ./prompts/assistant.md` 替换，或在 TOML 设置
+`[agent].system_prompt_file` 并删除内联正文。文件按配置目录解析、只读挂载，重启生效。
+Oath 追加实际工作区和技能索引，动态状态不进入固定前缀。
+
+`[agent].max_tool_only_steps = 100` 限制连续纯工具续行。到限保留结果，等待用户输入或显式
+系统干预；Supervisor 周期唤醒不重置。原有 run 步数与时限独立生效，先达到哪个就停在哪个。
+见 [设计](spec/feature-prompt-and-tool-budget.md)。
+
 ## 接入自己的能力
 
 Core 负责执行语义与核心工具，应用能力交给扩展：**Python tools、HTTP CLI commands、Markdown skills**。这些目录可以在自己的仓库维护，启动时传入：

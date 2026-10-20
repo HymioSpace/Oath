@@ -1,9 +1,12 @@
 """Client liveness without prompts, tool results, or accumulated runtime state."""
 
+import json
+
 
 def read(db, user_id):
     row = db.execute(
-        "SELECT event_seq,json_extract(state_json,'$.meta.run_id') AS run_id "
+        "SELECT event_seq,json_extract(state_json,'$.meta.run_id') AS run_id, "
+        "json_extract(state_json,'$.meta.tool_wake_pause') AS tool_wake_pause "
         "FROM users WHERE user_id=?",
         (user_id,),
     ).fetchone()
@@ -51,7 +54,12 @@ def read(db, user_id):
     return {
         "user_id": user_id,
         "event_seq": row["event_seq"],
-        "meta": {"run_id": row["run_id"]},
+        "meta": {
+            "run_id": row["run_id"],
+            "tool_wake_pause": json.loads(row["tool_wake_pause"])
+            if row["tool_wake_pause"]
+            else None,
+        },
         "steps": steps,
         "calls": calls,
         "busy": any(step_counts.get(k, 0) for k in ("prepared", "running"))
