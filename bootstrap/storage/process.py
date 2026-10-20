@@ -6,6 +6,7 @@ from core.storage.database import Database
 from core.storage.service import StorageService
 
 OPERATIONS = {
+    "subagent.spawn", "subagent.list", "subagent.get", "subagent.cancel", "subagent.notify",
     "state.read",
     "state.summary",
     "state.commit",

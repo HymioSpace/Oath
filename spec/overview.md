@@ -6,12 +6,13 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 [可替换执行工具](feature-execution-targets.md)。
 
 当前架构与 schema 以 [持续运行的 Personal Agent 基座](feature-distributed-personal-agent.md) 为准。
-隔离身份仅 `user_id`；用户没有永久线程，WS 断线不终止 Agent。
+所有权归 `user_id`；主 Agent 与有界子 Agent 分别执行，见 [异步委派](feature-subagents.md)。
+用户没有永久线程，WS 断线不终止 Agent。
 
 | 模块 | 约束 |
 | --- | --- |
 | core/consumer.py、core/intake | 队列独立判断唤醒；持久 buffer 只由 Intake 认领 |
-| core/scheduling | 用户级调度、租约、有界 Worker 池；每用户最多一个有效 Brain 执行者 |
+| core/scheduling | 用户级调度、租约、有界 Worker 池；每个执行上下文最多一个有效 Brain 执行者 |
 | core/agent | 固定输入 → context → LLM → 后处理，不自行消费队列 |
 | core/tool | 幂等 batch / invocation、审批、超时与不可变终态 |
 | core/queue | RabbitMQ 交付、confirm、手动 ACK、事务 Outbox relay |

@@ -40,6 +40,11 @@ def acquire(db, user_id, lane, owner, ttl):
 
 
 def wake(db, user_id, delay=0):
+    from core.subagents.storage import lookup
+
+    child = lookup(db, user_id)
+    if child and child["status"] != "running":
+        return
     state = json.loads(
         db.execute("SELECT state_json FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
     )
@@ -61,14 +66,17 @@ def wake(db, user_id, delay=0):
     )
 
 
-def claim_brain(db, owner, ttl):
+def claim_brain(db, owner, ttl, *, allow_subagents=True):
     now = time.time()
     rows = db.execute(
         "SELECT s.user_id FROM scheduling s LEFT JOIN leases l "
         "ON l.user_id=s.user_id AND l.lane='brain' "
         "WHERE s.requested>s.completed AND s.ready_at<=? "
-        "AND (l.expires IS NULL OR l.expires<=?) ORDER BY s.ready_at LIMIT 1",
-        (now, now),
+        "AND (l.expires IS NULL OR l.expires<=?) "
+        "AND NOT EXISTS(SELECT 1 FROM subagents a WHERE a.storage_id=s.user_id "
+        "AND (a.status!='running' OR a.deadline<=? OR ?=0)) "
+        "ORDER BY s.ready_at LIMIT 1",
+        (now, now, now, int(allow_subagents)),
     ).fetchall()
     for row in rows:
         user_id = row["user_id"]

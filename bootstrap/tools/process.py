@@ -14,12 +14,22 @@ from core.protocol.interface.permission import PermissionPolicy
 from core.shell import BashTool, HostEnvironment
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.storage.adapters import DurableEventSink, StoredDetails, StoredQueue
+from core.subagents.tools import tools as subagent_tools
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 
 
 class AllowAllPolicy(PermissionPolicy):
+    def __init__(self, storage=None):
+        self.storage = storage
+
     def check(self, user, tool, arguments):
+        if user.agent_id and self.storage:
+            child = self.storage.call("subagent.get", user_id=user.user_id, agent_id=user.agent_id)
+            if child["status"] != "running":
+                return "deny"
+        if not user.agent_id and tool == "subagent_notify":
+            return "deny"
         return "allow"
 
 
@@ -29,8 +39,14 @@ class ToolService:
 
     def call(self, operation, **p):
         if operation == "tools.definitions":
-            return [d.to_dict() for d in self.tools.definitions()]
-        user = User(p["user_id"])
+            target = User.from_storage_id(p["user_id"]) if p.get("user_id") else None
+            definitions = (
+                self.tools.definitions(delegated=True)
+                if target and target.agent_id
+                else self.tools.definitions()
+            )
+            return [d.to_dict() for d in definitions]
+        user = User.from_storage_id(p["user_id"])
         if operation == "tools.submit":
             if not p.get("fence") or p["fence"]["lane"] != "brain":
                 raise ValueError("Submitting a batch requires the active Brain lease")
@@ -66,6 +82,8 @@ def run(config):
     registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
     details = StoredDetails(storage)
     registry.register(DetailReadTool(details))
+    for tool in subagent_tools(storage):
+        registry.register(tool)
     skills = SkillSystem(
         (config.agent.skill_dir, *extensions.skill_dirs), scan_dirs=config.agent.skill_scan_dirs
     )
@@ -85,7 +103,7 @@ def run(config):
     tools = ThreadedToolSystem(
         registry,
         DurableEventSink(storage),
-        AllowAllPolicy(),
+        AllowAllPolicy(storage),
         store=RuntimeStore(storage),
         queue=StoredQueue(queue),
         shrinker=ResultShrinker(

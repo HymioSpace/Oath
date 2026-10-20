@@ -55,7 +55,15 @@ class Database:
 
     @staticmethod
     def ensure(db, user_id):
-        User(user_id)
+        identity = User.from_storage_id(user_id)
+        if (
+            identity.agent_id
+            and not db.execute(
+                "SELECT 1 FROM subagents WHERE storage_id=? AND user_id=?",
+                (user_id, identity.user_id),
+            ).fetchone()
+        ):
+            raise ValueError("Unknown delegated execution")
         db.execute(
             "INSERT OR IGNORE INTO users(user_id,state_json) VALUES(?,?)",
             (user_id, encode({name: {} for name in TABLES})),

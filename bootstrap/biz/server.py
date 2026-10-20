@@ -1,11 +1,15 @@
 """Biz HTTP 路由；trace 与 CLI 不经过 WS。"""
 
+import asyncio
+import json
+
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from biz.cli import cli_routes
 from biz.user_identity import BadQuery, Unauthorized, error_response, user_of
+from core.protocol.datatype.inbound import Inbound
 
 
 def build_app(service, cli_service):
@@ -45,12 +49,59 @@ def build_app(service, cli_service):
         except ValueError:
             return JSONResponse({"error": "bad_query"}, 400)
 
+    async def agent_operation(request):
+        try:
+            user = await asyncio.to_thread(user_of, service, request)
+            raw = bytearray()
+            async for chunk in request.stream():
+                raw.extend(chunk)
+                if len(raw) > 65536:
+                    raise ValueError("Request too large")
+            data = json.loads(raw) if raw else {}
+            if not isinstance(data, dict):
+                raise ValueError("Expected object")
+            if request.url.path == "/events":
+                source = data["type"]
+                if (
+                    not isinstance(source, str)
+                    or not source.startswith("app.")
+                    or len(source) > 128
+                ):
+                    raise ValueError("Application event types must start with app.")
+                if (
+                    not isinstance(data.get("event_id"), str)
+                    or not 1 <= len(data["event_id"]) <= 256
+                ):
+                    raise ValueError("event_id required")
+                if not isinstance(data.get("payload", {}), dict):
+                    raise ValueError("Invalid payload")
+                item = Inbound("system", source, data.get("payload", {}), data["event_id"])
+                result = await asyncio.to_thread(
+                    service.agent_operation, user, "queue.add", item=item.to_dict()
+                )
+                return JSONResponse({"accepted": True, "id": result})
+            action = request.path_params["action"]
+            if action not in {"spawn", "list", "get", "cancel"}:
+                raise ValueError("Unknown action")
+            if "user_id" in data or "fence" in data:
+                raise ValueError("Identity is derived from credentials")
+            result = await asyncio.to_thread(
+                service.agent_operation, user, "subagent." + action, **data
+            )
+            return JSONResponse(result)
+        except (Unauthorized, BadQuery) as exc:
+            return error_response(exc)
+        except (ValueError, KeyError, TypeError):
+            return JSONResponse({"error": "bad_request"}, 400)
+
     def heartbeat(request):
         return JSONResponse({"status": "alive"})
 
     return Starlette(
         routes=[
             Route("/heartbeat", heartbeat),
+            Route("/events", agent_operation, methods=["POST"]),
+            Route("/subagents/{action}", agent_operation, methods=["POST"]),
             Route("/conversation_history", history),
             Route("/list_traces", traces),
             Route("/query_trace", trace),

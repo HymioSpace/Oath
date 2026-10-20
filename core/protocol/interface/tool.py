@@ -27,6 +27,8 @@ class Tool(ABC):
     实现只需提供定义和一个 `execute`。超时、权限、并发、事件投递都在 core 那一侧。
     """
 
+    allow_subagent: bool = True
+
     @property
     @abstractmethod
     def definition(self) -> ToolDefinition:

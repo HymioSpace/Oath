@@ -12,19 +12,24 @@ _log = logging.getLogger(__name__)
 
 
 def run_workers(stop, manager, context_factory, provider, compaction, *, ttl, poll, workers):
-    def work():
+    def work(index):
         owner = uuid.uuid4().hex
         while not stop.is_set():
             fence = None
             retry = False
             brain = None
             try:
-                fence = manager.call("brain.claim", owner=owner, ttl=ttl)
+                fence = manager.call(
+                    "brain.claim",
+                    owner=owner,
+                    ttl=ttl,
+                    allow_subagents=workers == 1 or index < workers - 1,
+                )
                 if not fence:
                     stop.wait(poll)
                     continue
                 with renewed(manager, fence, ttl) as lost:
-                    user = User(fence["user_id"])
+                    user = User.from_storage_id(fence["user_id"])
                     ctx = context_factory(fence)
                     brain = AgentBrain(ctx, provider, compaction)
                     step = brain.intake.claim(user)
@@ -48,7 +53,9 @@ def run_workers(stop, manager, context_factory, provider, compaction, *, ttl, po
                         _log.warning("Execution lease will expire; pending revision retained")
             stop.wait(poll)
 
-    threads = [threading.Thread(target=work, name=f"oath-brain-{i}") for i in range(workers)]
+    threads = [
+        threading.Thread(target=work, args=(i,), name=f"oath-brain-{i}") for i in range(workers)
+    ]
     for thread in threads:
         thread.start()
     stop.wait()

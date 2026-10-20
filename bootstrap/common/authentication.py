@@ -59,7 +59,8 @@ class UserAuthenticator(Authenticator):
 
     def authenticate(self, credential, user_id=None):
         if self.cli:
-            return UserIdentity(self._credential(credential).user_id)
+            target = self._credential(credential)
+            return UserIdentity(target.user_id, agent_id=target.agent_id)
         if self.mode == "none":
             try:
                 return UserIdentity(User(user_id).user_id)
@@ -104,7 +105,7 @@ class UserAuthenticator(Authenticator):
                 data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
                 if data["aud"] != "cli" or data["exp"] <= time.time():
                     raise ValueError()
-                return User(data["user_id"])
+                return User(data["user_id"], data.get("agent_id", ""))
             except (ValueError, KeyError, TypeError):
                 pass
         raise PermissionDeniedError("Unknown credential")
@@ -113,7 +114,14 @@ class UserAuthenticator(Authenticator):
 def cli_token(config, user):
     body = (
         base64.urlsafe_b64encode(
-            json.dumps({"user_id": user.user_id, "aud": "cli", "exp": time.time() + 3600}).encode()
+            json.dumps(
+                {
+                    "user_id": user.user_id,
+                    "agent_id": user.agent_id,
+                    "aud": "cli",
+                    "exp": time.time() + 3600,
+                }
+            ).encode()
         )
         .decode()
         .rstrip("=")

@@ -95,8 +95,8 @@ class ThreadedToolSystem(ToolSystem):
         )
         self._watchdog.start()
 
-    def definitions(self) -> tuple[ToolDefinition, ...]:
-        return self._registry.definitions()
+    def definitions(self, *, delegated=False) -> tuple[ToolDefinition, ...]:
+        return self._registry.definitions(delegated=delegated)
 
     # -- 终态发布 ------------------------------------------------------------
 
@@ -221,6 +221,8 @@ class ThreadedToolSystem(ToolSystem):
             registered = self._registry.get(call["tool"])
             if registered is None:
                 raise ValueError("工具未注册")
+            if user.agent_id and not registered.tool.allow_subagent:
+                raise ValueError("Tool is unavailable to delegated executions")
             verdict = self.permissions.authorize(
                 user, call["tool"], copy.deepcopy(call["arguments"])
             )
@@ -542,7 +544,9 @@ class ThreadedToolSystem(ToolSystem):
         failures: dict[User, tuple[int, float]] = {}
         while not self._stop.wait(0.5):
             try:
-                users = tuple(User(uid) for uid in self.store.storage.call("tools.users"))
+                users = tuple(
+                    User.from_storage_id(uid) for uid in self.store.storage.call("tools.users")
+                )
             except Exception:
                 _log.exception("工具状态扫描失败")
                 continue

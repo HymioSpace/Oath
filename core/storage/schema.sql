@@ -98,3 +98,18 @@ CREATE TABLE IF NOT EXISTS conversation_streams (
  attempt INTEGER NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL,
  PRIMARY KEY(user_id,step_id)
 );
+
+CREATE TABLE IF NOT EXISTS subagents (
+ agent_id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(user_id),
+ storage_id TEXT NOT NULL UNIQUE, request_id TEXT NOT NULL,
+ title TEXT NOT NULL, objective TEXT NOT NULL, success_criteria TEXT NOT NULL,
+ model TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '',
+ max_steps INTEGER NOT NULL, deadline REAL NOT NULL, created_at REAL NOT NULL,
+ finished_at REAL, UNIQUE(user_id,request_id)
+);
+CREATE INDEX IF NOT EXISTS subagents_owner ON subagents(user_id,created_at);
+CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status,deadline);
+CREATE TABLE IF NOT EXISTS subagent_notes (
+ agent_id TEXT NOT NULL REFERENCES subagents(agent_id), note_id TEXT NOT NULL,
+ content TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(agent_id,note_id)
+);

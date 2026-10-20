@@ -13,11 +13,16 @@ class StoredAgentAccess:
     def __init__(self, storage):
         self.storage = storage
 
+    def agent_operation(self, user, operation, **parameters):
+        return self.storage.call(operation, user_id=user.storage_id, **parameters)
+
     def conversation_history(self, user, *, before, limit):
-        return self.storage.call("history.page", user_id=user.user_id, before=before, limit=limit)
+        return self.storage.call(
+            "history.page", user_id=user.storage_id, before=before, limit=limit
+        )
 
     def user_context(self, user):
-        state = self.storage.call("state.read", user_id=user.user_id)["state"]
+        state = self.storage.call("state.read", user_id=user.storage_id)["state"]
         return current(table_of(state), now=time.time())
 
 

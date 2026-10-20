@@ -18,7 +18,7 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
     kind = consumer_type.queue_name
 
     def evaluate(fence, item=None):
-        user = User(fence["user_id"])
+        user = User.from_storage_id(fence["user_id"])
         try:
             with renewed(storage, fence, ttl):
                 consumer = consumer_type(context_factory(fence), DurableWake(manager))
@@ -26,7 +26,7 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
                     consumer.receive(user, item)
                 consumer.evaluate(user, item is not None)
         finally:
-            storage.call("lease.release", user_id=user.user_id, fence=fence)
+            storage.call("lease.release", user_id=user.storage_id, fence=fence)
 
     while not stop.is_set():
         connection = None
@@ -37,7 +37,7 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
             def delivered(ch, method, properties, body):
                 try:
                     envelope = json.loads(body)
-                    user = User(envelope["user_id"])
+                    user = User.from_storage_id(envelope["user_id"])
                     item = Inbound.from_dict(envelope["item"])
                     if item.kind != kind or not item.source_id:
                         raise ValueError("Invalid queue envelope")
@@ -47,7 +47,7 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
                     return
                 fence = storage.call(
                     "lease.acquire",
-                    user_id=user.user_id,
+                    user_id=user.storage_id,
                     lane="consumer:" + kind,
                     owner=owner,
                     ttl=ttl,

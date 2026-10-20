@@ -121,6 +121,19 @@ class IntakeCoordinator:
             state["meta"]["selected_model"] = selected_model
             messages = build_messages(state, entries, step_id)
             system = self.executor.system_prompt()
+            if user.agent_id:
+                system += (
+                    "\n\n## Delegated execution\nYou are a bounded subagent with an "
+                    "independent context. "
+                    "Work only on the delegated objective and success criteria. You "
+                    "cannot delegate or manage tasks. "
+                    "Only tool results can continue this execution. Use "
+                    "subagent_notify for significant findings. "
+                    "When complete or blocked, issue a final response without tools "
+                    "describing results and limitations; "
+                    "that ends this execution. Do not poll, wait with repeated "
+                    "commands, or retry a failing action indefinitely."
+                )
             request_messages = (
                 [{"role": "system", "content": system}] if system else []
             ) + messages

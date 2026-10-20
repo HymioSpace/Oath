@@ -23,6 +23,9 @@ class BizApplication:
         #: 只读：trace 由 agent 写，这里只调 `trace_ids` / `spans`。
         self._traces = traces
 
+    def agent_operation(self, user, operation, **parameters):
+        return self._access.agent_operation(user, operation, **parameters)
+
     def conversation_history(self, user: User, *, before: int | None, limit: int) -> JsonObject:
         return self._access.conversation_history(user, before=before, limit=limit)
 

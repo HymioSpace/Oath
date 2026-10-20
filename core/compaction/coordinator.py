@@ -160,7 +160,7 @@ class CompactionCoordinator:
         while not self._stop.is_set():
             fence = self._store.storage.call(
                 "lease.acquire",
-                user_id=user.user_id,
+                user_id=user.storage_id,
                 lane="compaction",
                 owner=owner,
                 ttl=self._lease_seconds,
@@ -180,7 +180,7 @@ class CompactionCoordinator:
                 self._compress_owned(user, applied=applied)
         finally:
             try:
-                self._store.storage.call("lease.release", user_id=user.user_id, fence=fence)
+                self._store.storage.call("lease.release", user_id=user.storage_id, fence=fence)
             except Exception:
                 _log.warning("Compaction lease released by expiry")
 
