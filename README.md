@@ -97,6 +97,22 @@ oath stop      # keeps data volumes
 
 Use `--config PATH` for a different TOML. The debug client supports `/status`, `/retry`, `/cancel`, `/approve ID`, `/deny ID` and `/quit`; `--json` shows raw protocol frames.
 
+### Your agent's instructions
+
+```bash
+oath start --system-prompt ./prompts/assistant.md
+```
+
+This replaces the application instructions with a UTF-8 Markdown file, mounted read-only.
+Alternatively set `[agent].system_prompt_file` relative to your TOML and remove the inline
+`system_prompt`. Oath appends its actual workspace and skill index; live state stays in later
+conversation inputs. Restart after editing the file; frozen requests remain unchanged.
+
+`[agent].max_tool_only_steps = 100` bounds consecutive tool-only steps. At the limit,
+results remain buffered until user input or an explicit system intervention arrives.
+Periodic Supervisor invokes do not reset it. Existing run step/time limits still apply;
+the first limit reached wins. See [the contract](spec/feature-prompt-and-tool-budget.md).
+
 ## Bring your own capabilities
 
 Core owns execution semantics and essential tools. Application capabilities live in extensions: **Python tools, HTTP-backed CLI commands and Markdown skills**. Keep them in your own repository and pass their directories at startup:

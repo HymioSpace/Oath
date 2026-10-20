@@ -13,6 +13,7 @@ from core.protocol.datatype.message import MessageEvent
 from core.protocol.datatype.queue import QueueName
 from core.protocol.interface.brain import WakeRequests
 from core.runtime import AgentContext
+from core.scheduling.tool_budget import exhausted, hold, reset
 from core.utils.encoding import utc_now_iso
 
 _log = logging.getLogger(__name__)
@@ -132,6 +133,13 @@ class ToolConsumer(QueueConsumer):
         """
         state = self.ctx.store.read(user)
         pending = self.ctx.buffer.peek(user, self.queue_name)
+        if pending and exhausted(state, self.ctx.config.max_tool_only_steps):
+            self.ctx.store.transact(
+                user,
+                "intake.tool_budget",
+                lambda current: hold(current, self.ctx.config.max_tool_only_steps),
+            )
+            return _LISTEN_SECONDS
         delay = _LISTEN_SECONDS
         for batch_id, batch in state["batches"].items():
             fresh = [
@@ -165,15 +173,21 @@ class SystemConsumer(QueueConsumer):
         self._forced = False
 
     def receive(self, user: User, item: Inbound) -> None:
-        """控制命令当场生效；`system.invoke` 只是强制唤醒。
-
-        两者都不进 buffer —— 没有模型要读它们，它们要的是立刻起作用。
-        """
+        """控制命令不入 buffer；语义干预缓冲，invoke 不重置续行预算。"""
         if item.source == "system.invoke":
             # Persist wake before acknowledging the control message.
             self.brain.wake(user)
         else:
             self.apply(user, item)
+            if item.source in {"permission.decide", "step.retry"}:
+                self.ctx.store.transact(
+                    user,
+                    "intake.external_intervention",
+                    lambda state: reset(state, input_key(item)),
+                )
+                self.brain.wake(user)
+            elif item.source not in {"permission.expire", "run.cancel"}:
+                super().receive(user, item)
 
     def apply(self, user: User, item: Inbound) -> None:
         if item.source in {"permission.decide", "permission.expire"}:
@@ -220,6 +234,8 @@ class SystemConsumer(QueueConsumer):
             self.brain.resume(user)
 
     def evaluate(self, user: User, delivered: bool) -> float:
+        if self._buffered or self.ctx.buffer.peek(user, self.queue_name):
+            self.brain.wake(user)
         if self._forced:
             self._forced = False
             self.brain.wake(user)

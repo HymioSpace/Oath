@@ -40,6 +40,7 @@ class AgentConfig:
     """agent 跑一轮要用的参数。"""
 
     system_prompt: str = ""
+    system_prompt_file: Path | None = None
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
     max_output_tokens: int = 2048
     temperature: float | None = None
@@ -79,6 +80,7 @@ class AgentConfig:
     #: 一次 run 的推理预算，工具返回触发的新 step 也计入。
     max_run_steps: int = 32
     max_run_seconds: float = 3600
+    max_tool_only_steps: int = 100
     llm_max_attempts: int = 3
     llm_retry_delay: float = 0.2
     #: 派给工具系统的单次执行超时。
@@ -92,6 +94,7 @@ class AgentConfig:
             raise ValueError("builtin_bash must be boolean")
         for name in (
             "max_run_steps",
+            "max_tool_only_steps",
             "max_run_seconds",
             "llm_max_attempts",
             "llm_retry_delay",
@@ -108,6 +111,7 @@ class AgentConfig:
                 raise ValueError(f"{name} 必须是有限正数")
         for name in (
             "max_run_steps",
+            "max_tool_only_steps",
             "llm_max_attempts",
             "context_window",
             "tool_result_detail_chars",

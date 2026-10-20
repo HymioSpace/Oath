@@ -14,6 +14,7 @@ from core.protocol.datatype import User
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.trace import SpanLink, new_trace_id
+from core.scheduling.tool_budget import exhausted, hold, reset
 from core.trace.links import source_links
 
 _log = logging.getLogger(__name__)
@@ -80,16 +81,25 @@ class IntakeCoordinator:
                 if key in state["inputs"]:
                     # 同一件事认领过两次。journal 是唯一事实来源，后来的那次不算新的。
                     continue
-                state["inputs"][key] = {
+                entry = {
                     "item": item.to_dict(),
                     "queue": queue,
                     "phase": "claimed",
                     "buffered_at": now,
                     "step_id": None,
                 }
-                entries.append((key, state["inputs"][key]))
+                entries.append((key, entry))
             if not entries:
                 return None
+            external = [key for key, entry in entries if entry["queue"] != QueueName.TOOL]
+            if external:
+                for key in external:
+                    reset(state, key)
+            elif exhausted(state, config.max_tool_only_steps):
+                hold(state, config.max_tool_only_steps)
+                return None
+            for key, entry in entries:
+                state["inputs"][key] = entry
             step_id = uuid.uuid4().hex
             new_user = any(entry["queue"] == QueueName.USER for _, entry in entries)
             new_run = new_user or not state["meta"].get("run_id")
@@ -104,7 +114,7 @@ class IntakeCoordinator:
             request_messages = (
                 [{"role": "system", "content": system}] if system else []
             ) + messages
-            exhausted = (
+            run_exhausted = (
                 state["meta"].get("run_steps", 0) >= config.max_run_steps
                 or now - state["meta"]["run_started"] >= config.max_run_seconds
             )
@@ -115,9 +125,9 @@ class IntakeCoordinator:
                 "trace_started": time.time_ns(),
                 "input_ids": [key for key, _ in entries],
                 "trigger": sorted({entry["queue"] for _, entry in entries}),
-                "status": "paused" if exhausted else "prepared",
+                "status": "paused" if run_exhausted else "prepared",
                 "attempts": 0,
-                "error": "run 预算已用尽，请显式继续" if exhausted else None,
+                "error": "run 预算已用尽，请显式继续" if run_exhausted else None,
                 "response": None,
                 "request": None,
                 "request_draft": {
@@ -130,6 +140,8 @@ class IntakeCoordinator:
                 },
             }
             state["steps"][step_id] = step
+            if not external and not run_exhausted:
+                state["meta"]["tool_only_steps"] = state["meta"].get("tool_only_steps", 0) + 1
             state["meta"]["active_step"] = step_id
             state["meta"]["trace_id"] = trace_id
             fresh = True

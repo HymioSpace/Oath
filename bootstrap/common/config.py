@@ -53,13 +53,21 @@ def _absolute_dirs(values: Any, default: tuple[Path, ...], base: Path) -> tuple[
     return tuple(path if path.is_absolute() else base / path for path in paths)
 
 
-def load_config(path: str | Path, *, profile: str = "local") -> OathConfig:
+def load_config(
+    path: str | Path, *, profile: str = "local", system_prompt_file: Path | None = None
+) -> OathConfig:
     """读一份配置。文件不存在直接报错 —— 起不来就说清楚为什么。"""
     file = Path(path)
     if not file.exists():
         raise FileNotFoundError(f"配置文件不存在: {file}")
     with file.open("rb") as handle:
         data = tomllib.load(handle)
+    if system_prompt_file is not None:
+        data["agent"] = {
+            **data.get("agent", {}),
+            "system_prompt": "",
+            "system_prompt_file": str(system_prompt_file),
+        }
     if profile == "docker":
         data = docker_profile(data)
     elif profile != "local":
@@ -88,6 +96,10 @@ def docker_profile(data: dict[str, Any]) -> dict[str, Any]:
         biz_port=8766,
     )
     data["agent"].update(workspace_root="/workspace", cli_bin_dir="/app/scripts")
+    if os.environ.get("OATH_SYSTEM_PROMPT_FILE"):
+        data["agent"].update(
+            system_prompt="", system_prompt_file=os.environ["OATH_SYSTEM_PROMPT_FILE"]
+        )
     for kind in ("tool", "cli", "skill"):
         raw = os.environ.get(f"OATH_{kind.upper()}_DIRS")
         if raw is not None:
@@ -134,6 +146,7 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
         if k
         not in (
             "system_prompt",
+            "system_prompt_file",
             "provider",
             "extension_dirs",
             "tool_dirs",
@@ -167,6 +180,22 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
         *(Path(path) for path in agent_raw.get("skill_scan_dirs", ())),
     )
 
+    prompt = agent_raw.get("system_prompt", "")
+    prompt_file = None
+    if agent_raw.get("system_prompt_file"):
+        if prompt:
+            raise ValueError("Use either system_prompt or system_prompt_file")
+        prompt_file = _absolute(agent_raw["system_prompt_file"], Path(), base).resolve()
+        with prompt_file.open("rb") as handle:
+            raw_prompt = handle.read(128 * 1024 + 1)
+        if len(raw_prompt) > 128 * 1024:
+            raise ValueError("system_prompt_file exceeds 128 KiB")
+        prompt = raw_prompt.decode("utf-8").strip()
+        if not prompt:
+            raise ValueError("system_prompt_file must not be empty")
+    if not isinstance(prompt, str):
+        raise ValueError("system_prompt must be text")
+
     return OathConfig(
         data_root=_absolute(data.get("data_root"), Path("./data"), base),
         services=ServicesConfig(**data.get("services", {})),
@@ -185,7 +214,8 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
             ),
         ),
         agent=AgentConfig(
-            system_prompt=agent_raw.get("system_prompt", ""),
+            system_prompt=prompt,
+            system_prompt_file=prompt_file,
             provider=ModelProviderConfig(**provider_raw),
             **agent_fields,
         ),

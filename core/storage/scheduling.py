@@ -44,6 +44,14 @@ def wake(db, user_id, delay=0):
         db.execute("SELECT state_json FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
     )
     active = state["meta"].get("active_step")
+    if (
+        state["meta"].get("tool_wake_pause")
+        and not db.execute(
+            "SELECT 1 FROM inbox_events WHERE user_id=? AND kind IN ('user','system') LIMIT 1",
+            (user_id,),
+        ).fetchone()
+    ):
+        return
     if active and state["steps"][active]["status"] in {"failed", "paused"}:
         return
     db.execute(

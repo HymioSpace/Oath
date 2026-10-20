@@ -162,6 +162,8 @@ class StorageService:
                     )
                 return len(rows)
             if operation == "outbox.append":
+                if not isinstance(uid, str) or not uid:
+                    raise ValueError("user_id is required")
                 return outbox.append(
                     db, uid, p["type"], p["payload"], p.get("key"), p.get("occur_dt")
                 )
