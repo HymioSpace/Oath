@@ -165,3 +165,7 @@ oath start --auth-mode remote \
 The verifier receives a service-authenticated POST with `{"credential": "USER_ACCESS_TOKEN"}` and returns `{"user_id": "external-user-id", "expires_at": 1792300000}`. Rejected, expired and unavailable verification all deny access. Gateway rechecks live WS connections within 30 seconds and at credential expiry; logout does not stop accepted Agent work. Biz verifies each request. Only Gateway/Biz mount the verifier credential; Bash and model context never receive it.
 
 `oath restart` retains the authentication arguments. `--auth-mode static` enables the manually configured `services.users` token table. Auth mode is not read from TOML. The internal CLI still requires its scoped capability in every mode. See [authentication design](spec/feature-authentication.md).
+
+### Model selection
+
+Set `agent.selectable_models` to additional model IDs supported by the configured provider. A `user.message` may include `model`; Oath rejects IDs outside this allowlist plus the default provider model. The selected model is persisted per user and frozen in each step, including retries and tool continuations. All choices share the configured endpoint and Vault credential.

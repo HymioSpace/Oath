@@ -386,7 +386,9 @@ class OpenAICompatibleProvider(ModelProvider):
         if not base:
             raise LlmError("api_base 为空")
 
-        payload = build_payload(request, self._config.model, stream=on_delta is not None)
+        payload = build_payload(
+            request, request.model or self._config.model, stream=on_delta is not None
+        )
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         timeout = httpx.Timeout(self._config.timeout_seconds, connect=10.0)
         if on_delta is None:

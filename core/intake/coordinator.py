@@ -109,6 +109,16 @@ class IntakeCoordinator:
             # 调用。新 run 必开新 trace —— 工具还在跑时插进来的那句话属于新意图。
             continuing = not new_run and state["meta"].get("trace_step")
             trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
+            selected_model = state["meta"].get("selected_model", config.provider.model)
+            allowed = {config.provider.model, *config.selectable_models}
+            for _, entry in entries:
+                if entry["queue"] == QueueName.USER:
+                    candidate = entry["item"]["payload"].get("model")
+                    if isinstance(candidate, str) and candidate in allowed:
+                        selected_model = candidate
+            if selected_model not in allowed:
+                selected_model = config.provider.model
+            state["meta"]["selected_model"] = selected_model
             messages = build_messages(state, entries, step_id)
             system = self.executor.system_prompt()
             request_messages = (
@@ -133,7 +143,7 @@ class IntakeCoordinator:
                 "request_draft": {
                     "messages": request_messages,
                     "tools": definitions,
-                    "model": config.provider.model,
+                    "model": selected_model,
                     "max_output_tokens": config.max_output_tokens,
                     "temperature": config.temperature,
                     "extra_params": config.provider.extra_params,
