@@ -79,9 +79,15 @@ class VaultAdmin:
             self.call("PUT", "sys/unseal", payload={"key": saved["unseal_key"]})
 
     def configure(self):
-        alias = self.config.agent.provider.credential
-        if not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", alias):
-            raise ValueError("agent.provider.credential must be a safe Vault alias")
+        aliases = {
+            provider.credential
+            for provider in [
+                self.config.agent.provider,
+                *self.config.agent.model_providers.values(),
+            ]
+        }
+        if any(not re.fullmatch(r"[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*", alias) for alias in aliases):
+            raise ValueError("Provider credentials must be safe Vault aliases")
         mounts = self.call("GET", "sys/mounts", authorized=True)
         if "oath/" not in mounts:
             self.call(
@@ -93,7 +99,9 @@ class VaultAdmin:
         auth = self.call("GET", "sys/auth", authorized=True)
         if "approle/" not in auth:
             self.call("POST", "sys/auth/approle", payload={"type": "approle"}, authorized=True)
-        policy = f'path "oath/data/{alias}" {{ capabilities = ["read"] }}'
+        policy = "\n".join(
+            f'path "oath/data/{alias}" {{ capabilities = ["read"] }}' for alias in sorted(aliases)
+        )
         self.call(
             "PUT", "sys/policies/acl/oath-worker", payload={"policy": policy}, authorized=True
         )
@@ -114,7 +122,13 @@ class VaultAdmin:
         _save(self.config.secrets.secret_id_file, secret["data"]["secret_id"])
 
     def seed(self, *, replace=False):
-        provider = self.config.agent.provider
+        seen = set()
+        for provider in [self.config.agent.provider, *self.config.agent.model_providers.values()]:
+            if provider.credential not in seen:
+                self._seed_provider(provider, replace=replace)
+                seen.add(provider.credential)
+
+    def _seed_provider(self, provider, *, replace=False):
         path = "oath/data/" + quote(provider.credential, safe="/")
         if not replace and self.call("GET", path, authorized=True, missing=True):
             return
@@ -209,8 +223,15 @@ def main():
                     "-d",
                     "--no-deps",
                     "--force-recreate",
-                    "storage", "queue", "manager", "tools", "consumer", "worker",
-                    "supervisor", "gateway", "biz",
+                    "storage",
+                    "queue",
+                    "manager",
+                    "tools",
+                    "consumer",
+                    "worker",
+                    "supervisor",
+                    "gateway",
+                    "biz",
                 ],
                 env=env,
                 check=True,

@@ -9,7 +9,7 @@ from bootstrap.common.signals import shutdown_event
 from bootstrap.common.vault import VaultSecrets
 from core.compaction import CompactionCoordinator, LlmCompactor
 from core.journal.runtime_store import RuntimeStore
-from core.llm import OpenAICompatibleProvider
+from core.llm.configured_provider import ConfiguredProvider
 from core.scheduling.worker import run_workers
 from core.storage.adapters import DurableEventSink
 
@@ -29,7 +29,7 @@ def run(config):
         config.secrets.role_id_file,
         config.secrets.secret_id_file,
     )
-    provider = OpenAICompatibleProvider(config.agent.provider, secrets)
+    provider = ConfiguredProvider(config.agent, secrets)
     compaction = CompactionCoordinator(
         RuntimeStore(storage),
         LlmCompactor(

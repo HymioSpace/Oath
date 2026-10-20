@@ -80,3 +80,13 @@ invoke_interval_seconds = 30
 vault_url = "http://127.0.0.1:8200"
 role_id_file = "./data/private/vault-role-id"
 secret_id_file = "./data/private/vault-secret-id"
+
+# Optional independent provider. API key is imported to Vault, never stored here.
+# [agent.model_providers.deepseek-flash]
+# model = "deepseek-flash"
+# api_base = "https://api.deepseek.com/v1"
+# credential = "model/deepseek"
+# import_env = "DEEPSEEK_API_KEY"
+# timeout_seconds = 120
+# [agent.model_providers.deepseek-flash.extra_params]
+# thinking = { type = "disabled" }

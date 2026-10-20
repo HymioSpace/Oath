@@ -110,7 +110,7 @@ class IntakeCoordinator:
             continuing = not new_run and state["meta"].get("trace_step")
             trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
             selected_model = state["meta"].get("selected_model", config.provider.model)
-            allowed = {config.provider.model, *config.selectable_models}
+            allowed = {config.provider.model, *config.selectable_models, *config.model_providers}
             for _, entry in entries:
                 if entry["queue"] == QueueName.USER:
                     candidate = entry["item"]["payload"].get("model")
@@ -146,7 +146,9 @@ class IntakeCoordinator:
                     "model": selected_model,
                     "max_output_tokens": config.max_output_tokens,
                     "temperature": config.temperature,
-                    "extra_params": config.provider.extra_params,
+                    "extra_params": config.model_providers.get(
+                        selected_model, config.provider
+                    ).extra_params,
                 },
             }
             state["steps"][step_id] = step

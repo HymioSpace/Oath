@@ -7,8 +7,7 @@ core 只知道两件事：发出去一个 `LlmRequest`，拿回来一个 `LlmRes
 `AgentBrain` 拿到 `LlmResponse` 之后做什么，跟它无关。换一家 provider 时
 `AgentBrain` 一行不用改。
 
-v1 只有一个实现（`core/llm/openai_provider.py`，OpenAI 兼容接口），所以没有注册表、
-没有插件加载器。
+OpenAI 兼容协议由 `core/llm/openai_provider.py` 实现；配置路由器按模型选择对应端点与凭据。
 """
 
 from __future__ import annotations

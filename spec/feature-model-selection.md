@@ -4,7 +4,7 @@ Status: Implemented
 
 ## Overview
 
-A user message may select a model from `agent.selectable_models` plus the default provider model. All choices use the configured provider endpoint and Vault credential. Oath never accepts an arbitrary endpoint or credential from a client.
+A user message may select a model from `agent.selectable_models`, `agent.model_providers` keys and the default provider model. Choices in `selectable_models` use the default endpoint and credential. `agent.model_providers.<choice>` defines an independent model ID, API endpoint, Vault credential alias, timeout and provider parameters. Worker routes the frozen choice through this registry; unknown choices fail without calling a fallback endpoint. Oath never accepts an arbitrary endpoint or credential from a client.
 
 ```mermaid
 flowchart LR
