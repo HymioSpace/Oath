@@ -68,3 +68,7 @@ A final response without new calls terminates only after every earlier tool resu
 the child's context. A batch-timeout reminder does not end a child that is still waiting for
 work. Late results resume it normally. Approval-requiring tools are denied for children;
 they cannot wait for user/system intervention. Deadline and budget remain the final bounds.
+
+Application `app.*` events admit a new bounded main-Agent run, just like a new user intent.
+A previously failed or budget-paused step stays recorded but does not block new work.
+Derived `subagent.*` notifications continue the parent's run instead of resetting its run budget.

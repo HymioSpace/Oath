@@ -58,7 +58,14 @@ def wake(db, user_id, delay=0):
     ):
         return
     if active and state["steps"][active]["status"] in {"failed", "paused"}:
-        return
+        fresh = db.execute(
+            "SELECT 1 FROM inbox_events WHERE user_id=? AND "
+            "(kind='user' OR (kind='system' AND json_extract(item_json,'$.source') LIKE 'app.%')) "
+            "LIMIT 1",
+            (user_id,),
+        ).fetchone()
+        if not fresh:
+            return
     db.execute(
         "UPDATE scheduling SET ready_at=CASE WHEN requested<=claimed THEN ? ELSE ready_at END, "
         "requested=MAX(requested,claimed+1) WHERE user_id=?",
