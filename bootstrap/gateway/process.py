@@ -18,6 +18,22 @@ from core.protocol.datatype.wire import Command, CommandType, ack, error_frame, 
 _log = logging.getLogger(__name__)
 
 
+def validate_model(config, command: Command) -> None:
+    """模型 ID 只能取自运维给的清单。
+
+    客户端可以挑模型，但挑不了端点和凭据 —— 超出清单的在这里挡掉，
+    别让它一路走到 provider 才炸。
+    """
+    if command.type != CommandType.USER_MESSAGE or "model" not in command.payload:
+        return
+    model = command.payload["model"]
+    if not isinstance(model, str) or model not in {
+        config.agent.provider.model,
+        *config.agent.selectable_models,
+    }:
+        raise ValueError("Model is not available")
+
+
 async def run_async(config):
     token = service_token(config)
     storage = ServiceClient(config.services.storage_url, token, config.services.request_timeout)
@@ -104,16 +120,7 @@ async def run_async(config):
                             )
                         else:
                             validate(command)
-                            if (
-                                command.type == CommandType.USER_MESSAGE
-                                and "model" in command.payload
-                            ):
-                                model = command.payload["model"]
-                                if not isinstance(model, str) or model not in {
-                                    config.agent.provider.model,
-                                    *config.agent.selectable_models,
-                                }:
-                                    raise ValueError("Model is not available")
+                            validate_model(config, command)
                             item = of_command(command)
                             await asyncio.to_thread(
                                 queue.call, "queue.add", user_id=user.user_id, item=item.to_dict()
