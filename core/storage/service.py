@@ -9,6 +9,7 @@ from core.protocol.datatype.inbound import Inbound
 from core.storage import conversation_history, outbox, scheduling, status_summary
 from core.storage import runtime_transactions as runtime
 from core.storage.database import Database, encode
+from core.subagents import storage as subagents
 
 
 class StorageService:
@@ -23,6 +24,8 @@ class StorageService:
             fence = p.get("fence")
             if fence:
                 scheduling.check(db, uid, fence)
+            if operation.startswith("subagent."):
+                return subagents.call(db, uid, operation, p)
             if operation == "state.summary":
                 return status_summary.read(db, uid)
             if operation == "state.read":
@@ -81,6 +84,9 @@ class StorageService:
             if operation == "buffer.add":
                 scheduling.check(db, uid, fence, required=True)
                 item = Inbound.from_dict(p["item"])
+                child = subagents.lookup(db, uid)
+                if child and (item.kind != "tool" or child["status"] != "running"):
+                    return None
                 # Already claimed messages cannot re-enter the inbox on redelivery.
                 state = json.loads(
                     db.execute("SELECT state_json FROM users WHERE user_id=?", (uid,)).fetchone()[0]
@@ -120,7 +126,9 @@ class StorageService:
                     scheduling.wake(db, uid)
                 return None
             if operation == "brain.claim":
-                return scheduling.claim_brain(db, p["owner"], p["ttl"])
+                return scheduling.claim_brain(
+                    db, p["owner"], p["ttl"], allow_subagents=p.get("allow_subagents", True)
+                )
             if operation == "brain.finish":
                 return scheduling.finish_brain(db, uid, fence, p.get("retry", False))
             if operation == "lease.acquire":
@@ -141,9 +149,11 @@ class StorageService:
                 )
                 return None
             if operation == "supervisor.tick":
+                subagents.expire(db)
                 now = time.time()
                 rows = db.execute(
                     "SELECT u.user_id,u.next_invoke FROM users u WHERE next_invoke<=? "
+                    "AND NOT EXISTS(SELECT 1 FROM subagents a WHERE a.storage_id=u.user_id) "
                     "AND EXISTS(SELECT 1 FROM inbox_events i WHERE i.user_id=u.user_id) "
                     "ORDER BY next_invoke LIMIT 128",
                     (now,),

@@ -40,7 +40,7 @@ def user_of(service: BizService, request: Request) -> User:
     except PermissionDeniedError:
         # 错误正文不带 credential 本身：它多半是错的或过期的，抄进日志等于再泄一次。
         raise Unauthorized() from None
-    return User(identity.user_id)
+    return User(identity.user_id, identity.agent_id)
 
 
 def error_response(exc: Exception) -> JSONResponse:

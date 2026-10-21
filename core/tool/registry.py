@@ -83,6 +83,8 @@ class ToolRegistry:
         同一份工具集必须在不同进程里产出相同的汇总，所以重复注册只能是 bug。
         """
         definition = tool.definition
+        if not isinstance(tool.allow_subagent, bool):
+            raise ToolRegistrationError("allow_subagent must be boolean")
         _validate(definition)
         timeout = self._default_timeout if timeout_seconds is None else timeout_seconds
         if timeout <= 0:
@@ -109,7 +111,7 @@ class ToolRegistry:
         with self._lock:
             return tuple(sorted(self._entries))
 
-    def definitions(self) -> tuple[ToolDefinition, ...]:
+    def definitions(self, *, delegated=False) -> tuple[ToolDefinition, ...]:
         """汇总给 context 的定义，按名字排序。
 
         排序不是美观问题：同一份工具集在不同进程、不同注册顺序下必须序列化成
@@ -117,7 +119,9 @@ class ToolRegistry:
         """
         with self._lock:
             entries = [self._entries[name] for name in sorted(self._entries)]
-        return tuple(entry.definition for entry in entries)
+        return tuple(
+            entry.definition for entry in entries if not delegated or entry.tool.allow_subagent
+        )
 
     def __contains__(self, name: object) -> bool:
         if not isinstance(name, str):

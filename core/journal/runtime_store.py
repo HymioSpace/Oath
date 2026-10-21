@@ -42,11 +42,11 @@ class RuntimeStore:
             self._context_fence.reset(token)
 
     def read(self, user: User) -> State:
-        return cast(State, self.storage.call("state.read", user_id=user.user_id)["state"])
+        return cast(State, self.storage.call("state.read", user_id=user.storage_id)["state"])
 
     def transact(self, user: User, reason: str, change: Callable[[State], T]) -> T:
         for attempt in range(16):
-            snapshot = self.storage.call("state.read", user_id=user.user_id)
+            snapshot = self.storage.call("state.read", user_id=user.storage_id)
             after = copy.deepcopy(snapshot["state"])
             result = change(after)
             if after == snapshot["state"]:
@@ -54,7 +54,7 @@ class RuntimeStore:
             try:
                 self.storage.call(
                     "state.commit",
-                    user_id=user.user_id,
+                    user_id=user.storage_id,
                     expected=snapshot["version"],
                     state=after,
                     reason=reason,
@@ -67,4 +67,4 @@ class RuntimeStore:
         raise StorageConflict("State remained contended; retry the durable work item")
 
     def users(self):
-        return tuple(User(uid) for uid in self.storage.call("users.list"))
+        return tuple(User.from_storage_id(uid) for uid in self.storage.call("users.list"))

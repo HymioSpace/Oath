@@ -30,6 +30,7 @@ def validate_model(config, command: Command) -> None:
     if not isinstance(model, str) or model not in {
         config.agent.provider.model,
         *config.agent.selectable_models,
+        *config.agent.model_providers,
     }:
         raise ValueError("Model is not available")
 

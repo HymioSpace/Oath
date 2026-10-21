@@ -148,6 +148,7 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
             "system_prompt",
             "system_prompt_file",
             "provider",
+            "model_providers",
             "extension_dirs",
             "tool_dirs",
             "cli_dirs",
@@ -217,6 +218,10 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
             system_prompt=prompt,
             system_prompt_file=prompt_file,
             provider=ModelProviderConfig(**provider_raw),
+            model_providers={
+                name: ModelProviderConfig(**value)
+                for name, value in agent_raw.get("model_providers", {}).items()
+            },
             **agent_fields,
         ),
     )

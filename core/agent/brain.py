@@ -84,8 +84,10 @@ class AgentBrain:
 
         两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
         """
+        from core.agent.runtime_prompt import RUNTIME_PROMPT
         parts = [
             self._ctx.config.system_prompt,
+            RUNTIME_PROMPT,
             workspace_note(self._ctx.config.workspace_root)
             if self._ctx.config.builtin_bash
             else "",

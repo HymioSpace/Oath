@@ -8,6 +8,7 @@ from dataclasses import dataclass
 class UserIdentity:
     user_id: str
     expires_at: float | None = None
+    agent_id: str = ""
 
 
 class UserAuthenticator(ABC):

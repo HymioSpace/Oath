@@ -43,6 +43,7 @@ class AgentConfig:
     system_prompt_file: Path | None = None
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
     selectable_models: tuple[str, ...] = ()
+    model_providers: dict[str, ModelProviderConfig] = field(default_factory=dict)
     max_output_tokens: int = 2048
     temperature: float | None = None
 
@@ -96,6 +97,19 @@ class AgentConfig:
         ):
             raise ValueError("selectable_models must contain model identifiers")
         object.__setattr__(self, "selectable_models", tuple(self.selectable_models))
+        if any(
+            not isinstance(name, str)
+            or not name.strip()
+            or len(name) > 128
+            or not isinstance(provider, ModelProviderConfig)
+            or not provider.model
+            or not provider.api_base
+            or not provider.credential
+            for name, provider in self.model_providers.items()
+        ):
+            raise ValueError("model_providers requires named, configured providers")
+        if self.provider.model in self.model_providers:
+            raise ValueError("model_providers must not replace the default provider")
         if not isinstance(self.builtin_bash, bool):
             raise ValueError("builtin_bash must be boolean")
         for name in (

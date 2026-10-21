@@ -20,6 +20,10 @@ from core.trace.links import source_links
 _log = logging.getLogger(__name__)
 
 
+def new_intent(queue, item):
+    return queue == QueueName.USER or (queue == QueueName.SYSTEM and item.source.startswith("app."))
+
+
 class StepExecutor(Protocol):
     def system_prompt(self) -> str: ...
     def execute(self, user: User, step: State) -> None: ...
@@ -53,12 +57,18 @@ class IntakeCoordinator:
             return None
         state = self._store.read(user)
         active = state["meta"].get("active_step")
-        if active:
-            # 有在飞的 step 先把它跑完；buffer 里的输入等下一轮。落在终态上的不返回 ——
-            # 返回它等于让这一轮再跑一遍已经结束的事。
-            step = cast(State, state["steps"][active])
-            return step if step["status"] == "prepared" else None
         items = self._peek(user)
+        if active:
+            step = cast(State, state["steps"][active])
+            if step["status"] == "prepared":
+                return step
+            if step["status"] not in {"failed", "paused"} or not any(
+                new_intent(queue, item) for queue, item in items
+            ):
+                return None
+            self._store.transact(
+                user, "intake.new_intent", lambda current: current["meta"].update(active_step=None)
+            )
         if not items:
             return None
         definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
@@ -102,7 +112,15 @@ class IntakeCoordinator:
                 state["inputs"][key] = entry
             step_id = uuid.uuid4().hex
             new_user = any(entry["queue"] == QueueName.USER for _, entry in entries)
-            new_run = new_user or not state["meta"].get("run_id")
+            new_run = (
+                new_user
+                or any(
+                    entry["queue"] == QueueName.SYSTEM
+                    and entry["item"]["source"].startswith("app.")
+                    for _, entry in entries
+                )
+                or not state["meta"].get("run_id")
+            )
             if new_run:
                 state["meta"].update(run_id=uuid.uuid4().hex, run_steps=0, run_started=now)
             # 续不续上一条 trace 只看两件事：是不是新 run，上一个 step 有没有产出工具
@@ -110,7 +128,7 @@ class IntakeCoordinator:
             continuing = not new_run and state["meta"].get("trace_step")
             trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
             selected_model = state["meta"].get("selected_model", config.provider.model)
-            allowed = {config.provider.model, *config.selectable_models}
+            allowed = {config.provider.model, *config.selectable_models, *config.model_providers}
             for _, entry in entries:
                 if entry["queue"] == QueueName.USER:
                     candidate = entry["item"]["payload"].get("model")
@@ -121,6 +139,19 @@ class IntakeCoordinator:
             state["meta"]["selected_model"] = selected_model
             messages = build_messages(state, entries, step_id)
             system = self.executor.system_prompt()
+            if user.agent_id:
+                system += (
+                    "\n\n## Delegated execution\nYou are a bounded subagent with an "
+                    "independent context. "
+                    "Work only on the delegated objective and success criteria. You "
+                    "cannot delegate or manage tasks. "
+                    "Only tool results can continue this execution. Use "
+                    "subagent_notify for significant findings. "
+                    "When complete or blocked, issue a final response without tools "
+                    "describing results and limitations; "
+                    "that ends this execution. Do not poll, wait with repeated "
+                    "commands, or retry a failing action indefinitely."
+                )
             request_messages = (
                 [{"role": "system", "content": system}] if system else []
             ) + messages
@@ -146,7 +177,9 @@ class IntakeCoordinator:
                     "model": selected_model,
                     "max_output_tokens": config.max_output_tokens,
                     "temperature": config.temperature,
-                    "extra_params": config.provider.extra_params,
+                    "extra_params": config.model_providers.get(
+                        selected_model, config.provider
+                    ).extra_params,
                 },
             }
             state["steps"][step_id] = step

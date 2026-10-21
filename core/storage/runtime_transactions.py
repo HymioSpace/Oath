@@ -14,6 +14,11 @@ def enqueue(db, user_id, item):
     inbound = Inbound.from_dict(item)
     if inbound.kind not in {"user", "tool", "system"} or not inbound.source_id:
         raise ValueError("queue event needs kind and source_id")
+    from core.subagents.storage import lookup
+
+    child = lookup(db, user_id)
+    if child and inbound.kind != "tool":
+        raise ValueError("Subagents accept only tool results")
     # occur_dt is metadata, not the identity of a retried command.
     fingerprint = encode({k: v for k, v in item.items() if k != "occur_dt"})
     known = db.execute(
@@ -188,3 +193,7 @@ def project(db, user_id, before, after, changes):
             )
             enqueue(db, user_id, item.to_dict())
             outbox.append(db, user_id, "tool.terminal", payload, payload["event_id"])
+
+    from core.subagents.storage import project as project_subagent
+
+    project_subagent(db, user_id, changes, after)

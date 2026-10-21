@@ -21,7 +21,7 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
     selected = {
         e["item"]["payload"]["invocation_id"]: (key, e["item"]["payload"])
         for key, e in entries
-        if e["queue"] == "tool"
+        if e["queue"] == "tool" and e["item"]["source"] != "subagent.start"
     }
     used: set[str] = set()
     for batch_id, batch in state["batches"].items():
@@ -58,7 +58,9 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
         batch["delivered"] = all(call["invocation_id"] in selected for call in calls)
     for key, entry in entries:
         item = Inbound.from_dict(entry["item"])
-        if entry["queue"] == "tool" and key not in used:
+        if item.source == "subagent.start":
+            messages.append({"role": "user", "content": item.payload["content"]})
+        elif entry["queue"] == "tool" and key not in used:
             p = item.payload
             attrs = " ".join(
                 f"{name}={quoteattr(str(p.get(name, '')))}"

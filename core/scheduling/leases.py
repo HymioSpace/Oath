@@ -35,7 +35,7 @@ class DurableWake:
         self.manager = manager
 
     def wake(self, user):
-        self.manager.call("wake", user_id=user.user_id)
+        self.manager.call("wake", user_id=user.storage_id)
 
     def resume(self, user):
-        self.manager.call("wake", user_id=user.user_id, force=True)
+        self.manager.call("wake", user_id=user.storage_id, force=True)

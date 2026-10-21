@@ -168,4 +168,11 @@ The verifier receives a service-authenticated POST with `{"credential": "USER_AC
 
 ### Model selection
 
-Set `agent.selectable_models` to additional model IDs supported by the configured provider. A `user.message` may include `model`; Oath rejects IDs outside this allowlist plus the default provider model. The selected model is persisted per user and frozen in each step, including retries and tool continuations. All choices share the configured endpoint and Vault credential.
+Set `agent.selectable_models` to additional model IDs supported by the configured provider. A `user.message` may include `model`; Oath rejects IDs outside this allowlist plus the default provider model. The selected model is persisted per user and frozen in each step, including retries and tool continuations. Choices in `selectable_models` share the default provider. Configure `agent.model_providers.<choice>` for a separate API endpoint, model ID, Vault credential and parameters; see the commented DeepSeek example in `oath.example.toml`.
+
+### Bounded delegation
+
+The main agent can spawn independent subagents, inspect their state and cancel them. Each has its own
+context, step budget and deadline. Children cannot delegate again. Intermediate findings and completion
+return as durable events, while the main agent remains available for new input.
+See [delegation and application events](spec/feature-subagents.md).
