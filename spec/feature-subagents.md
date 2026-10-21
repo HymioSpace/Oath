@@ -72,3 +72,8 @@ they cannot wait for user/system intervention. Deadline and budget remain the fi
 Application `app.*` events admit a new bounded main-Agent run, just like a new user intent.
 A previously failed or budget-paused step stays recorded but does not block new work.
 Derived `subagent.*` notifications continue the parent's run instead of resetting its run budget.
+
+Applications can reconcile a main-agent continuation with authenticated `POST /executions/get`
+using a tool invocation ID. The response exposes only owner-scoped status, trace ID and final
+content from durable state. A completed tool call alone does not complete its continuation;
+the first tool-free completed response closes it. No task business state lives in Oath.

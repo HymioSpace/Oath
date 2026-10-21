@@ -8,6 +8,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from biz.cli import cli_routes
+from biz.execution_status import execution_status
 from biz.user_identity import BadQuery, Unauthorized, error_response, user_of
 from core.protocol.datatype.inbound import Inbound
 
@@ -60,6 +61,12 @@ def build_app(service, cli_service):
             data = json.loads(raw) if raw else {}
             if not isinstance(data, dict):
                 raise ValueError("Expected object")
+            if request.url.path == "/executions/get":
+                invocation_id = data.get("invocation_id")
+                if not isinstance(invocation_id, str) or not 1 <= len(invocation_id) <= 256:
+                    raise ValueError("Invalid invocation")
+                snapshot = await asyncio.to_thread(service.agent_operation, user, "state.read")
+                return JSONResponse(execution_status(snapshot["state"], invocation_id))
             if request.url.path == "/events":
                 source = data["type"]
                 if (
@@ -101,6 +108,7 @@ def build_app(service, cli_service):
         routes=[
             Route("/heartbeat", heartbeat),
             Route("/events", agent_operation, methods=["POST"]),
+            Route("/executions/get", agent_operation, methods=["POST"]),
             Route("/subagents/{action}", agent_operation, methods=["POST"]),
             Route("/conversation_history", history),
             Route("/list_traces", traces),
