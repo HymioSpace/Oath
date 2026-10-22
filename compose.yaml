@@ -138,6 +138,7 @@ services:
     volumes:
       - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${OATH_HYMIO_METRICS_TARGETS:-./deploy/observability/hymio-targets.json}:/etc/prometheus/hymio-targets.json:ro
       - prometheus-data:/prometheus
     ports: ["${OATH_BIND_HOST:-127.0.0.1}:${OATH_PROMETHEUS_PORT:-19090}:9090"]
     extra_hosts: ["host.docker.internal:host-gateway"]

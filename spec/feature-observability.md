@@ -114,6 +114,10 @@ tool_success = |{tool_call and s.oath.tool.outcome=succeeded}| / tool_calls
 
 ## 查询与部署
 
+Hymio 抓取目标由单独的 Prometheus file discovery 文件提供；
+`OATH_HYMIO_METRICS_TARGETS` 可指定宿主机私有目标文件。默认抓取宿主机的 8080，
+云端共享网络可改为 Backend 的服务名，不暴露额外端口或混入重复目标。
+
 Prometheus 默认抓取 Oath 全部服务与 RabbitMQ；Grafana 使用 OpenTelemetry/Prometheus
 兼容数据源展示 p50、p95、p99、错误率和吞吐。Grafana 面板是运行观测入口，Hymio 管理台
 保留面向产品与 trace 的聚合视图。
