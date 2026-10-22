@@ -86,8 +86,14 @@ The model key is stored in Vault. No `.env` file is needed. Keep the source chec
 | --- | --- |
 | `ws://127.0.0.1:8765` | Messages, approvals, streaming events and offline replay |
 | `http://127.0.0.1:8766` | Trace queries and CLI business APIs |
+| `http://127.0.0.1:19090` | Prometheus metrics and query UI |
+| `http://127.0.0.1:13000` | Grafana dashboard |
 
 Both bind to localhost by default. Default access is trusted: supply an external `user_id` (the debug client defaults to `local`). Keep these ports private unless authentication is enabled. One `user_id` has one ongoing conversation, with no session creation.
+
+Each service exposes Prometheus metrics at `/metrics`. Prometheus also scrapes RabbitMQ;
+Grafana includes a provisioned Oath dashboard for RPC, queue-to-wake, model TTFT, tools and
+delivery latency.
 
 ```bash
 oath status

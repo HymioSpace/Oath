@@ -1,7 +1,11 @@
 """有界的服务调用；事务冲突与租约失效保持独立语义。"""
 
+import time
+from urllib.parse import urlsplit
+
 import httpx
 
+from core.observability import RPC_CLIENT_DURATION
 from core.protocol.interface.storage import LeaseLost, StorageConflict
 
 
@@ -13,15 +17,24 @@ class ServiceClient:
         )
 
     def call(self, operation, **params):
-        response = self.http.post(f"{self.url}/v1/{operation}", json=params)
-        if response.status_code == 409:
-            raise StorageConflict(response.json().get("error", "conflict"))
-        if response.status_code == 412:
-            raise LeaseLost(response.json().get("error", "lease_lost"))
-        if response.status_code == 400:
-            raise ValueError(response.json().get("error", "bad_request"))
-        response.raise_for_status()
-        return response.json()["result"]
+        started = time.monotonic()
+        status = 500
+        try:
+            response = self.http.post(f"{self.url}/v1/{operation}", json=params)
+            status = response.status_code
+            if response.status_code == 409:
+                raise StorageConflict(response.json().get("error", "conflict"))
+            if response.status_code == 412:
+                raise LeaseLost(response.json().get("error", "lease_lost"))
+            if response.status_code == 400:
+                raise ValueError(response.json().get("error", "bad_request"))
+            response.raise_for_status()
+            return response.json()["result"]
+        finally:
+            target = urlsplit(self.url).hostname or "unknown"
+            RPC_CLIENT_DURATION.labels(target, operation, str(status)).observe(
+                time.monotonic() - started
+            )
 
     def close(self):
         self.http.close()

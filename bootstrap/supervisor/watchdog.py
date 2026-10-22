@@ -5,10 +5,12 @@ import logging
 from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.authentication import service_token
 from bootstrap.common.signals import shutdown_event
+from core.observability import start_metrics_server
 from core.supervisor.supervisor import Supervisor
 
 
 def run(config):
+    start_metrics_server()
     stop = shutdown_event()
     storage = ServiceClient(
         config.services.storage_url, service_token(config), config.services.request_timeout

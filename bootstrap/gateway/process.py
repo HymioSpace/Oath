@@ -5,15 +5,25 @@ import contextlib
 import json
 import logging
 import time
+from dataclasses import replace
 
 from websockets.asyncio.server import serve
 
 from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.authentication import UserAuthenticator, service_token
+from core.observability import (
+    GATEWAY_COMMANDS,
+    GATEWAY_CONNECTIONS,
+    GATEWAY_DURATION,
+    metrics_response,
+)
+from core.observability.spans import append_span
 from core.outbound.delivery import Delivery
 from core.protocol.datatype.inbound import of_command
+from core.protocol.datatype.trace import new_trace_id
 from core.protocol.datatype.user import User
 from core.protocol.datatype.wire import Command, CommandType, ack, error_frame, pong
+from core.trace.attributes import OATH_CHANNEL
 
 _log = logging.getLogger(__name__)
 
@@ -48,10 +58,12 @@ async def run_async(config):
             await connection.close(code=1013, reason="capacity")
             return
         active += 1
+        GATEWAY_CONNECTIONS.inc()
         send_lock = asyncio.Lock()
         sender = None
         receiver = None
         monitor = None
+        channel = "unknown"
 
         async def send(frame):
             async with send_lock:
@@ -65,6 +77,9 @@ async def run_async(config):
                 raise ValueError("First command must be agent.attach")
             credential = command.payload.get("credential", "")
             supplied_user = command.payload.get("user_id")
+            candidate = command.payload.get("channel_kind")
+            if isinstance(candidate, str) and 0 < len(candidate) <= 32:
+                channel = candidate
             identity = await asyncio.to_thread(auth.authenticate, credential, supplied_user)
             user = User(identity.user_id)
 
@@ -101,6 +116,8 @@ async def run_async(config):
                 async for raw in connection:
                     await verify()
                     command = None
+                    started = time.monotonic()
+                    status = "error"
                     try:
                         command = Command.parse(json.loads(raw))
                         if command.type == CommandType.EVENT_ACK:
@@ -123,13 +140,47 @@ async def run_async(config):
                             validate(command)
                             validate_model(config, command)
                             item = of_command(command)
+                            trace_id = None
+                            if item is not None and command.type == CommandType.USER_MESSAGE:
+                                trace_id = new_trace_id()
+                                item = replace(
+                                    item,
+                                    telemetry={
+                                        "trace_id": trace_id,
+                                        "channel": channel,
+                                        "received_at_unix_ms": round(time.time() * 1000),
+                                    },
+                                )
+                            queued_at = time.time_ns()
                             await asyncio.to_thread(
                                 queue.call, "queue.add", user_id=user.user_id, item=item.to_dict()
                             )
-                            await send(ack(command.id))
+                            await send(
+                                ack(command.id, **({"trace_id": trace_id} if trace_id else {}))
+                            )
+                            if trace_id:
+                                append_span(
+                                    storage,
+                                    user_id=user.user_id,
+                                    trace_id=trace_id,
+                                    name="gateway.accept",
+                                    started_ns=queued_at,
+                                    ended_ns=time.time_ns(),
+                                    attributes={
+                                        OATH_CHANNEL: channel,
+                                        "oath.command.type": command.type,
+                                    },
+                                )
+                        status = "ok"
                     except Exception as exc:
                         await send(
                             error_frame(command.id if command else None, "command_failed", str(exc))
+                        )
+                    finally:
+                        type_ = command.type if command else "unknown"
+                        GATEWAY_COMMANDS.labels(type_, channel, status).inc()
+                        GATEWAY_DURATION.labels(type_, channel, status).observe(
+                            time.monotonic() - started
                         )
 
             monitor = asyncio.create_task(watch_identity())
@@ -151,10 +202,14 @@ async def run_async(config):
             await asyncio.gather(*tasks, return_exceptions=True)
             await connection.close()
             active -= 1
+            GATEWAY_CONNECTIONS.dec()
 
     def health(connection, request):
         if request.path == "/heartbeat":
             return connection.respond(200, '{"alive":true}\n')
+        if request.path == "/metrics":
+            body, _ = metrics_response()
+            return connection.respond(200, body.decode())
         return None
 
     try:

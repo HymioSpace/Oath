@@ -1,0 +1,109 @@
+groups:
+  - name: oath-runtime
+    rules:
+      - alert: OathHostMemoryLow
+        expr: node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes < 0.1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Host available memory is below 10%
+
+      - alert: OathHostIoWaitHigh
+        expr: avg(rate(node_cpu_seconds_total{mode="iowait"}[5m])) > 0.3
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Host CPU spends over 30% of time waiting for disk
+
+      - alert: OathHostDiskLow
+        expr: node_filesystem_avail_bytes{mountpoint="/",fstype!="rootfs"} / node_filesystem_size_bytes{mountpoint="/",fstype!="rootfs"} < 0.15
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Host root filesystem has less than 15% free space
+
+      - alert: OathStorageLockTimeouts
+        expr: increase(oath_storage_transaction_seconds_count{outcome="busy"}[5m]) > 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: Storage transactions are failing to acquire SQLite locks
+
+      - alert: OathStorageLockWaitHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, mode) (rate(oath_storage_lock_wait_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Storage {{ $labels.mode }} lock wait p95 exceeds one second"
+
+      - alert: OathServiceDown
+        expr: up{job="oath"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Oath target {{ $labels.instance }} is down"
+
+      - alert: OathRpcErrors
+        expr: |
+          sum(rate(oath_rpc_requests_total{status=~"5..|413"}[5m]))
+          / clamp_min(sum(rate(oath_rpc_requests_total[5m])), 0.000001) > 0.05
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Oath internal RPC errors exceed 5%
+
+      - alert: OathQueueWaitHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(oath_buffer_wake_delay_seconds_bucket[5m]))) > 10
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Queue-to-claim p95 exceeds 10 seconds
+
+      - alert: OathModelTtftHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(oath_llm_ttft_seconds_bucket[5m]))) > 8
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: Model TTFT p95 exceeds 8 seconds
+
+      - alert: OathToolSuccessLow
+        expr: |
+          sum(rate(oath_tool_terminals_total{outcome="succeeded"}[10m]))
+          / clamp_min(sum(rate(oath_tool_terminals_total[10m])), 0.000001) < 0.9
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Tool success rate is below 90%
+
+      - alert: HymioClientFirstResponseHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (channel, le) (rate(hymio_client_turn_seconds_bucket{stage="first_response"}[10m]))) > 15
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.channel }} first response p95 exceeds 15 seconds"
+
+      - alert: HymioClientFailureRateHigh
+        expr: |
+          sum(rate(hymio_client_turns_total{outcome="failed"}[10m]))
+          / clamp_min(sum(rate(hymio_client_turns_total[10m])), 0.000001) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Client turn failure rate exceeds 5%
+
+      - alert: HymioClientNoResponseHigh
+        expr: |
+          sum(rate(hymio_client_turns_total{outcome="stalled"}[10m]))
+          / clamp_min(sum(rate(hymio_client_turns_total[10m])), 0.000001) > 0.05
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: Client turns without a first model delta exceed 5%

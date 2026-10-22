@@ -33,12 +33,20 @@ OATH_STEP_LLM_CALLS: Final = "oath.step.llm_calls"
 OATH_STEP_TOOL_CALLS: Final = "oath.step.tool_calls"
 OATH_STEP_DURATION_MS: Final = "oath.step.duration_ms"
 OATH_RUN_ID: Final = "oath.run.id"
+OATH_CHANNEL: Final = "oath.client.channel"
+OATH_ACCEPTED_AT_UNIX_MS: Final = "oath.input.accepted_at_unix_ms"
+OATH_INPUT_DELAY_MS: Final = "oath.input.queue_to_claim_ms"
 
 OATH_LLM_ATTEMPT: Final = "oath.llm.attempt"
 OATH_LLM_TTFT_MS: Final = "oath.llm.ttft_ms"
 OATH_LLM_FIRST_CONTENT_MS: Final = "oath.llm.first_content_ms"
 OATH_LLM_TPOT_MS: Final = "oath.llm.tpot_ms"
 OATH_LLM_DURATION_MS: Final = "oath.llm.duration_ms"
+
+OATH_TOOL_NAME: Final = "oath.tool.name"
+OATH_TOOL_OUTCOME: Final = "oath.tool.outcome"
+OATH_TOOL_DURATION_MS: Final = "oath.tool.duration_ms"
+OATH_TOOL_QUEUE_MS: Final = "oath.tool.queue_ms"
 
 # -- 事件 ---------------------------------------------------------------------
 
@@ -86,6 +94,9 @@ __all__ = [
     "OATH_LLM_TPOT_MS",
     "OATH_LLM_TTFT_MS",
     "OATH_LLM_FIRST_CONTENT_MS",
+    "OATH_ACCEPTED_AT_UNIX_MS",
+    "OATH_CHANNEL",
+    "OATH_INPUT_DELAY_MS",
     "OATH_RUN_ID",
     "OATH_STEP_DURATION_MS",
     "OATH_STEP_ID",
@@ -94,6 +105,10 @@ __all__ = [
     "OATH_STEP_TOOL_CALLS",
     "OATH_STEP_STATUS",
     "OATH_STEP_TRIGGERS",
+    "OATH_TOOL_DURATION_MS",
+    "OATH_TOOL_NAME",
+    "OATH_TOOL_OUTCOME",
+    "OATH_TOOL_QUEUE_MS",
     "REQUEST_EVENT",
     "RESPONSE_EVENT",
     "STAGE_COMPLETED",

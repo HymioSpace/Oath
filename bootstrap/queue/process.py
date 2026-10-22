@@ -21,6 +21,7 @@ def run(config):
             {"queue.add"},
             config.services.queue_url,
             bind_host=config.services.bind_host,
+            service_name="queue",
         )
     finally:
         stop.set()

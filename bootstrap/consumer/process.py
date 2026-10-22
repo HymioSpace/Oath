@@ -8,9 +8,11 @@ from bootstrap.common.authentication import service_token
 from bootstrap.common.signals import shutdown_event
 from core.consumer import SystemConsumer, ToolConsumer, UserConsumer
 from core.intake.service import consume
+from core.observability import start_metrics_server
 
 
 def run(config):
+    start_metrics_server()
     stop = shutdown_event()
     token = service_token(config)
     storage, queue, manager, tools = [

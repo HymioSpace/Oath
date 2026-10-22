@@ -6,7 +6,11 @@ from core.storage.database import Database
 from core.storage.service import StorageService
 
 OPERATIONS = {
-    "subagent.spawn", "subagent.list", "subagent.get", "subagent.cancel", "subagent.notify",
+    "subagent.spawn",
+    "subagent.list",
+    "subagent.get",
+    "subagent.cancel",
+    "subagent.notify",
     "state.read",
     "state.summary",
     "state.commit",
@@ -51,4 +55,5 @@ def run(config):
         OPERATIONS,
         config.services.storage_url,
         bind_host=config.services.bind_host,
+        service_name="storage",
     )

@@ -14,6 +14,11 @@ CREATE TABLE IF NOT EXISTS commits (
  user_id TEXT NOT NULL REFERENCES users(user_id), commit_id TEXT NOT NULL,
  fingerprint TEXT NOT NULL, PRIMARY KEY(user_id,commit_id)
 );
+CREATE TABLE IF NOT EXISTS request_archives (
+ user_id TEXT NOT NULL REFERENCES users(user_id), digest TEXT NOT NULL,
+ body BLOB NOT NULL, raw_bytes INTEGER NOT NULL,
+ PRIMARY KEY(user_id,digest)
+);
 CREATE TABLE IF NOT EXISTS broker_outbox (
  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL REFERENCES users(user_id),
  kind TEXT NOT NULL CHECK(kind IN ('user','tool','system')), identity TEXT NOT NULL,

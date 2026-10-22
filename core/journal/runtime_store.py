@@ -42,11 +42,13 @@ class RuntimeStore:
             self._context_fence.reset(token)
 
     def read(self, user: User) -> State:
-        return cast(State, self.storage.call("state.read", user_id=user.storage_id)["state"])
+        return cast(
+            State, self.storage.call("state.read", user_id=user.storage_id, compact=True)["state"]
+        )
 
     def transact(self, user: User, reason: str, change: Callable[[State], T]) -> T:
         for attempt in range(16):
-            snapshot = self.storage.call("state.read", user_id=user.storage_id)
+            snapshot = self.storage.call("state.read", user_id=user.storage_id, compact=True)
             after = copy.deepcopy(snapshot["state"])
             result = change(after)
             if after == snapshot["state"]:

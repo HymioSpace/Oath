@@ -14,6 +14,7 @@ def run(config):
             {"wake", "brain.claim", "brain.finish", "lease.renew", "lease.release"},
             config.services.manager_url,
             bind_host=config.services.bind_host,
+            service_name="manager",
         )
     finally:
         client.close()

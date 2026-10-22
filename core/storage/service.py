@@ -6,20 +6,68 @@ import json
 import time
 
 from core.protocol.datatype.inbound import Inbound
-from core.storage import conversation_history, outbox, scheduling, status_summary
+from core.storage import conversation_history, outbox, request_archives, scheduling, status_summary
 from core.storage import runtime_transactions as runtime
 from core.storage.database import Database, encode
 from core.subagents import storage as subagents
+
+READ_OPERATIONS = frozenset(
+    {
+        "state.read",
+        "state.summary",
+        "users.list",
+        "tools.users",
+        "buffer.peek",
+        "outbox.read",
+        "history.page",
+        "detail.get",
+        "trace.list",
+        "trace.get",
+        "journal.read",
+        "snapshot.get",
+        "subagent.list",
+        "subagent.get",
+    }
+)
 
 
 class StorageService:
     def __init__(self, database: Database):
         self.database = database
+        self._metrics_at = 0.0
+
+    def refresh_metrics(self):
+        from core.observability.metrics import STORAGE_BYTES
+
+        if time.monotonic() - self._metrics_at < 60:
+            return
+        with self.database.transaction(readonly=True) as db:
+            hot = db.execute(
+                "SELECT COALESCE(SUM(length(CAST(state_json AS BLOB))),0) FROM users"
+            ).fetchone()[0]
+            archive = db.execute(
+                "SELECT COALESCE(SUM(length(body)),0),"
+                "COALESCE(SUM(raw_bytes),0) FROM request_archives"
+            ).fetchone()
+        for kind, size in (
+            ("hot", hot),
+            ("archive_compressed", archive[0]),
+            ("archive_raw", archive[1]),
+        ):
+            STORAGE_BYTES.labels(kind).set(size)
+        for kind, path in (
+            ("database", self.database.path),
+            ("wal", self.database.path.with_name(self.database.path.name + "-wal")),
+        ):
+            STORAGE_BYTES.labels(kind).set(path.stat().st_size if path.exists() else 0)
+        self._metrics_at = time.monotonic()
 
     def call(self, operation, **p):
-        with self.database.transaction() as db:
-            uid = p.get("user_id")
-            if uid is not None:
+        uid = p.get("user_id")
+        readonly = operation in READ_OPERATIONS
+        transaction = self.database.reader(uid) if readonly else self.database.transaction()
+        with transaction as db:
+            if uid is not None and not readonly:
                 self.database.ensure(db, uid)
             fence = p.get("fence")
             if fence:
@@ -32,7 +80,10 @@ class StorageService:
                 row = db.execute(
                     "SELECT version,state_json FROM users WHERE user_id=?", (uid,)
                 ).fetchone()
-                return {"version": row["version"], "state": json.loads(row["state_json"])}
+                state = json.loads(row["state_json"])
+                if not p.get("compact", False):
+                    request_archives.hydrate(db, uid, state)
+                return {"version": row["version"], "state": state}
             if operation == "state.commit":
                 return runtime.commit(
                     db, uid, p["expected"], p["state"], p["reason"], p["commit_id"], fence

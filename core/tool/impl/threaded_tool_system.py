@@ -14,12 +14,14 @@ import threading
 import time
 import uuid
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Any, cast
 
 from jsonschema import validate
 
 from core.detail.shrink import ResultShrinker
 from core.journal.runtime_store import RuntimeStore, State
+from core.observability import TOOL_DURATION, TOOL_TERMINALS
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.tool import (
@@ -34,13 +36,23 @@ from core.protocol.datatype.tool import (
     ToolResult,
     is_valid_invocation_id,
 )
+from core.protocol.datatype.trace import Span, SpanKind, SpanStatus
 from core.protocol.datatype.user import User
 from core.protocol.error import ToolExecutionError, ToolRequestError
 from core.protocol.interface import AgentEventSink, EventQueue, PermissionPolicy, ToolSystem
+from core.protocol.interface.trace import TraceStore
 from core.tool.lifecycle import TERMINAL
 from core.tool.lifecycle import terminal as _terminal
 from core.tool.permission import PermissionManager
 from core.tool.registry import ToolRegistry
+from core.trace.attributes import (
+    OATH_CHANNEL,
+    OATH_STEP_ID,
+    OATH_TOOL_DURATION_MS,
+    OATH_TOOL_NAME,
+    OATH_TOOL_OUTCOME,
+    OATH_TOOL_QUEUE_MS,
+)
 from core.utils.deadlines import Deadlines
 from core.utils.encoding import canonical_json, utc_now_iso
 
@@ -48,6 +60,16 @@ _log = logging.getLogger(__name__)
 DEFAULT_MAX_CONCURRENCY = 8
 DEFAULT_MAX_PENDING = 32
 MAX_ERROR_MESSAGE_LENGTH = 500
+
+
+def _elapsed_ms(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        started = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return round(max(0, (time.time() - started) * 1000), 3)
 
 
 class ThreadedToolSystem(ToolSystem):
@@ -59,6 +81,7 @@ class ThreadedToolSystem(ToolSystem):
         *,
         store: RuntimeStore,
         queue: EventQueue,
+        traces: TraceStore,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
         max_pending: int = DEFAULT_MAX_PENDING,
         approval_ttl: float = 300,
@@ -75,7 +98,7 @@ class ThreadedToolSystem(ToolSystem):
                 raise ValueError(f"{name} 必须是有限正数")
         if not isinstance(max_concurrency, int) or not isinstance(max_pending, int):
             raise ValueError("执行和接纳容量必须是正整数")
-        self.store, self._queue = store, queue
+        self.store, self._queue, self._traces = store, queue, traces
         self._registry, self._sink = registry, sink
         self._shrinker = shrinker
         self._max_pending, self._ttl, self._admission_timeout = (
@@ -107,6 +130,7 @@ class ThreadedToolSystem(ToolSystem):
         item = _terminal(state, call, outcome, **kw)
         if item is not None:
             out.append(item)
+            TOOL_TERMINALS.labels(call["tool"], outcome).inc()
 
     def _publish(self, user: User, items: list[Inbound]) -> None:
         # Tool terminals and their outbound events are committed by Storage atomically.
@@ -437,6 +461,8 @@ class ThreadedToolSystem(ToolSystem):
 
     def _run(self, user: User, invocation_id: str) -> None:
         out: list[Inbound] = []
+        observed: dict[str, Any] = {}
+        started_ns = time.time_ns()
         try:
 
             def start(state: State) -> State | None:
@@ -457,6 +483,13 @@ class ThreadedToolSystem(ToolSystem):
                     self._collect(out, state, call, "timeout", error="排队超时，工具未执行")
                     return None
                 call.update(status="running", started_dt=utc_now_iso())
+                step = state["steps"].get(call["batch_id"], {})
+                observed.update(
+                    trace_id=step.get("trace_id", ""),
+                    step_id=step.get("step_id", call["batch_id"]),
+                    channel=step.get("channel", "unknown"),
+                    queue_ms=_elapsed_ms(call.get("submitted_dt")),
+                )
                 return cast(State, call)
 
             call = self.store.transact(user, "tool.started", start)
@@ -465,6 +498,7 @@ class ThreadedToolSystem(ToolSystem):
             if call is None:
                 return
             registered = self._registry.get(call["tool"])
+            outcome = "failed"
             try:
                 if (
                     registered is None
@@ -497,6 +531,7 @@ class ThreadedToolSystem(ToolSystem):
                 )
 
                 def finish(state: State) -> None:
+                    nonlocal outcome
                     current = state["calls"][invocation_id]
                     if (
                         self._deadlines.remaining(
@@ -506,10 +541,12 @@ class ThreadedToolSystem(ToolSystem):
                         )
                         <= 0
                     ):
+                        outcome = "timeout"
                         self._collect(
                             out, state, current, "timeout", error="执行期限已到，结果迟到"
                         )
                     else:
+                        outcome = "succeeded"
                         self._collect(
                             out, state, current, "succeeded", content=content, detail=detail
                         )
@@ -520,6 +557,8 @@ class ThreadedToolSystem(ToolSystem):
                     return
                 error = str(exc)
                 error_kind = "tool_error" if isinstance(exc, ToolExecutionError) else "unexpected"
+
+                outcome = "failed"
 
                 def failed(state: State, error: str = error, kind: str = error_kind) -> None:
                     self._collect(
@@ -534,6 +573,17 @@ class ThreadedToolSystem(ToolSystem):
                 self.store.transact(user, "tool.terminal", failed)
             finally:
                 self._publish(user, out)
+                self._trace_tool(
+                    user,
+                    invocation_id,
+                    call["tool"],
+                    outcome,
+                    started_ns,
+                    observed,
+                )
+                TOOL_DURATION.labels(call["tool"], outcome).observe(
+                    max(0, (time.time_ns() - started_ns) / 1_000_000_000)
+                )
         except Exception:
             _log.exception("工具 worker 故障；deadline / 恢复负责收尾")
         finally:
@@ -541,6 +591,44 @@ class ThreadedToolSystem(ToolSystem):
                 self._scheduled.discard((user, invocation_id))
             self._slots.release()
             self.maintain(user)
+
+    def _trace_tool(
+        self,
+        user: User,
+        invocation_id: str,
+        tool: str,
+        outcome: str,
+        started_ns: int,
+        observed: dict[str, Any],
+    ) -> None:
+        trace_id = observed.get("trace_id")
+        if not isinstance(trace_id, str) or len(trace_id) != 32:
+            return
+        step_id = str(observed.get("step_id", ""))
+        try:
+            self._traces.append(
+                user,
+                Span(
+                    trace_id=trace_id,
+                    span_id=hashlib.sha256(invocation_id.encode()).hexdigest()[:16],
+                    parent_span_id=step_id[:16] if len(step_id) >= 16 else None,
+                    name=f"execute_tool {tool}",
+                    kind=SpanKind.INTERNAL,
+                    start_unix_nano=started_ns,
+                    end_unix_nano=time.time_ns(),
+                    status=SpanStatus.OK if outcome == "succeeded" else SpanStatus.ERROR,
+                    attributes={
+                        OATH_STEP_ID: step_id,
+                        OATH_CHANNEL: observed.get("channel", "unknown"),
+                        OATH_TOOL_NAME: tool,
+                        OATH_TOOL_OUTCOME: outcome,
+                        OATH_TOOL_DURATION_MS: round((time.time_ns() - started_ns) / 1_000_000, 3),
+                        OATH_TOOL_QUEUE_MS: observed.get("queue_ms"),
+                    },
+                ),
+            )
+        except Exception:
+            _log.warning("Tool trace write failed for %s", invocation_id)
 
     def _watch(self) -> None:
         failures: dict[User, tuple[int, float]] = {}

@@ -1,20 +1,26 @@
 """Biz HTTP 路由；trace 与 CLI 不经过 WS。"""
 
 import asyncio
+import hmac
 import json
+import time
 
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from biz.cli import cli_routes
 from biz.execution_status import execution_status
 from biz.user_identity import BadQuery, Unauthorized, error_response, user_of
+from core.observability import TRACE_API_DURATION, metrics_response
 from core.protocol.datatype.inbound import Inbound
+from core.protocol.datatype.user import User, is_valid_user_id
 
 
-def build_app(service, cli_service):
+def build_app(service, cli_service, admin_token=""):
     def traces(request):
+        started = time.monotonic()
+        status = "ok"
         try:
             user = user_of(service, request)
             limit = int(request.query_params.get("limit", 50))
@@ -23,16 +29,62 @@ def build_app(service, cli_service):
                 raise BadQuery("Invalid pagination")
             return JSONResponse(service.list_traces(user, limit=limit, offset=offset))
         except (Unauthorized, BadQuery) as exc:
+            status = "error"
             return error_response(exc)
         except ValueError:
+            status = "error"
             return JSONResponse({"error": "bad_query"}, 400)
+        finally:
+            TRACE_API_DURATION.labels("list", status).observe(time.monotonic() - started)
 
     def trace(request):
+        started = time.monotonic()
+        status = "ok"
         try:
             user = user_of(service, request)
             return JSONResponse(service.query_trace(user, request.query_params.get("trace_id", "")))
         except (Unauthorized, BadQuery) as exc:
+            status = "error"
             return error_response(exc)
+        finally:
+            TRACE_API_DURATION.labels("query", status).observe(time.monotonic() - started)
+
+    def admin_user(request):
+        supplied = request.headers.get("authorization", "")
+        if not admin_token or not hmac.compare_digest(supplied, f"Bearer {admin_token}"):
+            raise Unauthorized()
+        value = request.query_params.get("user_id", "")
+        if not is_valid_user_id(value):
+            raise Unauthorized()
+        return User(value)
+
+    def admin_traces(request):
+        started = time.monotonic()
+        status = "ok"
+        try:
+            user = admin_user(request)
+            limit = int(request.query_params.get("limit", 30))
+            offset = int(request.query_params.get("offset", 0))
+            if not 0 <= limit <= 200 or offset < 0:
+                raise BadQuery("Invalid pagination")
+            return JSONResponse(service.list_traces(user, limit=limit, offset=offset))
+        except (Unauthorized, BadQuery, ValueError):
+            status = "error"
+            return JSONResponse({"error": "unauthorized"}, 401)
+        finally:
+            TRACE_API_DURATION.labels("admin_list", status).observe(time.monotonic() - started)
+
+    def admin_trace(request):
+        started = time.monotonic()
+        status = "ok"
+        try:
+            user = admin_user(request)
+            return JSONResponse(service.query_trace(user, request.query_params.get("trace_id", "")))
+        except (Unauthorized, BadQuery, ValueError):
+            status = "error"
+            return JSONResponse({"error": "unauthorized"}, 401)
+        finally:
+            TRACE_API_DURATION.labels("admin_query", status).observe(time.monotonic() - started)
 
     def history(request):
         try:
@@ -104,9 +156,16 @@ def build_app(service, cli_service):
     def heartbeat(request):
         return JSONResponse({"status": "alive"})
 
+    def metrics(request):
+        body, content_type = metrics_response()
+        return Response(body, media_type=content_type)
+
     return Starlette(
         routes=[
             Route("/heartbeat", heartbeat),
+            Route("/metrics", metrics),
+            Route("/admin/traces", admin_traces),
+            Route("/admin/trace", admin_trace),
             Route("/events", agent_operation, methods=["POST"]),
             Route("/executions/get", agent_operation, methods=["POST"]),
             Route("/subagents/{action}", agent_operation, methods=["POST"]),

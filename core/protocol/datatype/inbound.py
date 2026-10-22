@@ -7,6 +7,7 @@ producer 只管投进队列，不落盘。consumer 收下之后它住在持久 b
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from core.protocol.datatype.queue import QueueName
 from core.protocol.datatype.wire import Command, CommandType
@@ -34,6 +35,8 @@ class Inbound:
     #: command 的 `id` / 工具调用的 `invocation_id`。幂等键的原料。
     source_id: str = ""
     occur_dt: str = ""
+    #: Internal causal metadata. It never enters model messages or user-visible events.
+    telemetry: dict[str, Any] = field(default_factory=dict)
 
     @property
     def identity(self) -> str:
@@ -50,17 +53,20 @@ class Inbound:
             "payload": dict(self.payload),
             "source_id": self.source_id,
             "occur_dt": self.occur_dt,
+            "telemetry": dict(self.telemetry),
         }
 
     @classmethod
     def from_dict(cls, obj: JsonObject) -> Inbound:
         payload = obj.get("payload")
+        telemetry = obj.get("telemetry")
         return cls(
             kind=str(obj.get("kind", "")),
             source=str(obj.get("source", "")),
             payload=dict(payload) if isinstance(payload, dict) else {},
             source_id=str(obj.get("source_id", "")),
             occur_dt=str(obj.get("occur_dt", "")),
+            telemetry=dict(telemetry) if isinstance(telemetry, dict) else {},
         )
 
 
