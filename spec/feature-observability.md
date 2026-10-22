@@ -126,6 +126,9 @@ OpenTelemetry span 模型保持不变；OTLP 热导出是可替换的传输适�
 
 - Storage 的读操作使用只读 WAL snapshot；写操作保留 `BEGIN IMMEDIATE` 和同事务
   fence 校验。首次访问才在独立写事务创建用户，不因查询历史或状态争抢写锁。
+- `history.page` 是只读服务操作，不得创建或更新 checkpoint。新用户在 `Database.ensure`
+  建立 checkpoint；旧用户在 Storage 启动的写事务中从 Outbox 一次性回填 conversation
+  projection，之后读页只查询 `users.event_seq` 与已投影事件。
 - RPC 的 JSON 解析与编码在工作线程执行；请求体在接收过程中限制大小。心跳存活不等于
   存储可用，需要同时观察 RPC 错误、锁等待、事务 busy 次数和进程内存。
 - 完整执行状态仍随历史增长。锁隔离不能消除全量状态读写的开销，长期运行需继续拆分

@@ -36,6 +36,7 @@ class Database:
             db.executescript(Path(__file__).with_name("schema.sql").read_text())
             if [r[0] for r in db.execute("SELECT version FROM schema_version")] != [1]:
                 raise RuntimeError("Unsupported database schema")
+        from core.storage import conversation_history
         from core.storage.request_archives import compact_existing
 
         with self.transaction(readonly=True) as db:
@@ -43,6 +44,7 @@ class Database:
         for user_id in users:
             with self.transaction() as db:
                 compact_existing(db, user_id)
+                conversation_history.ensure(db, user_id)
 
     @contextmanager
     def transaction(self, *, readonly=False):
@@ -116,5 +118,9 @@ class Database:
         db.execute(
             "INSERT OR IGNORE INTO users(user_id,state_json) VALUES(?,?)",
             (user_id, encode({name: {} for name in TABLES})),
+        )
+        db.execute(
+            "INSERT OR IGNORE INTO conversation_checkpoints(user_id,seq) VALUES(?,0)",
+            (user_id,),
         )
         db.execute("INSERT OR IGNORE INTO scheduling(user_id) VALUES(?)", (user_id,))
