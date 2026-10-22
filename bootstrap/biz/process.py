@@ -12,7 +12,9 @@ def run(config):
     )
     try:
         app = build_app(
-            build_application(config, storage), build_application(config, storage, cli=True)
+            build_application(config, storage),
+            build_application(config, storage, cli=True),
+            service_token(config),
         )
         uvicorn.run(
             app, host=config.services.biz_host, port=config.services.biz_port, access_log=False

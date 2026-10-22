@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import datetime
 from typing import Protocol, cast
 
 from core.consumer import input_key
 from core.context.intake import build_messages
 from core.journal.runtime_store import State
+from core.observability import BUFFER_WAKE_DELAY
 from core.protocol.datatype import User
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.queue import QueueName
@@ -75,12 +77,15 @@ class IntakeCoordinator:
         config = self._ctx.config
         fresh = False
         claimed: list[tuple[str, float | None, State]] = []
+        claimed_items: list[Inbound] = []
         links: list[SpanLink] = []
+        items_by_key = {input_key(item): item for _, item in items}
 
         def claim(state: State) -> State | None:
             nonlocal fresh
             fresh = False
             claimed.clear()
+            claimed_items.clear()
             links.clear()
             if state["meta"].get("intake_error"):
                 return None
@@ -95,7 +100,7 @@ class IntakeCoordinator:
                     "item": item.to_dict(),
                     "queue": queue,
                     "phase": "claimed",
-                    "buffered_at": now,
+                    "buffered_at": _unix_seconds(item.occur_dt) or now,
                     "step_id": None,
                 }
                 entries.append((key, entry))
@@ -126,7 +131,26 @@ class IntakeCoordinator:
             # 续不续上一条 trace 只看两件事：是不是新 run，上一个 step 有没有产出工具
             # 调用。新 run 必开新 trace —— 工具还在跑时插进来的那句话属于新意图。
             continuing = not new_run and state["meta"].get("trace_step")
-            trace_id = state["meta"]["trace_id"] if continuing else new_trace_id()
+            telemetry: dict[str, object] = next(
+                (
+                    items_by_key[key].telemetry
+                    for key, _ in entries
+                    if items_by_key[key].kind == QueueName.USER and items_by_key[key].telemetry
+                ),
+                {},
+            )
+            incoming_trace = telemetry.get("trace_id")
+            trace_id = (
+                state["meta"]["trace_id"]
+                if continuing
+                else incoming_trace
+                if isinstance(incoming_trace, str) and len(incoming_trace) == 32
+                else new_trace_id()
+            )
+            channel = telemetry.get("channel")
+            if isinstance(channel, str) and 0 < len(channel) <= 32:
+                state["meta"]["client_channel"] = channel
+            channel = state["meta"].get("client_channel", "unknown")
             selected_model = state["meta"].get("selected_model", config.provider.model)
             allowed = {config.provider.model, *config.selectable_models, *config.model_providers}
             for _, entry in entries:
@@ -164,6 +188,8 @@ class IntakeCoordinator:
                 "run_id": state["meta"]["run_id"],
                 "trace_id": trace_id,
                 "trace_started": time.time_ns(),
+                "channel": channel,
+                "accepted_at_unix_ms": telemetry.get("received_at_unix_ms"),
                 "input_ids": [key for key, _ in entries],
                 "trigger": sorted({entry["queue"] for _, entry in entries}),
                 "status": "paused" if run_exhausted else "prepared",
@@ -191,6 +217,7 @@ class IntakeCoordinator:
             claimed.extend(
                 (entry["queue"], entry["buffered_at"], entry["item"]) for _, entry in entries
             )
+            claimed_items.extend(items_by_key[key] for key, _ in entries)
             links.extend(source_links(state, [entry for _, entry in entries]))
             state["conversation"]["messages"] = messages
             for _, entry in entries:
@@ -203,6 +230,11 @@ class IntakeCoordinator:
         if fresh:
             # 事务外写 span：文件 I/O 不能在 user 锁里做。
             self.executor.open_step(user, opened, claimed, tuple(links))
+            now = time.time()
+            for item in claimed_items:
+                at = _unix_seconds(item.occur_dt)
+                if at is not None:
+                    BUFFER_WAKE_DELAY.labels(item.kind).observe(max(0, now - at))
             if opened["status"] == "paused":
                 self.executor.emit(
                     user,
@@ -210,6 +242,15 @@ class IntakeCoordinator:
                     {"step_id": opened["step_id"], "status": "paused", "error": opened["error"]},
                 )
         return opened
+
+
+def _unix_seconds(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 __all__ = ["IntakeCoordinator"]

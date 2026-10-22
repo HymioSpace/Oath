@@ -4,7 +4,10 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime
 
+from core.observability import QUEUE_TO_BUFFER
+from core.observability.spans import append_span
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.user import User
 from core.queue.rabbitmq import connect
@@ -57,6 +60,20 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
                     ch.basic_nack(method.delivery_tag, requeue=True)
                     return
                 evaluate(fence, item)
+                received = _unix_seconds(item.occur_dt)
+                if received is not None:
+                    QUEUE_TO_BUFFER.labels(kind).observe(max(0, time.time() - received))
+                    trace_id = item.telemetry.get("trace_id")
+                    if isinstance(trace_id, str):
+                        append_span(
+                            storage,
+                            user_id=user.storage_id,
+                            trace_id=trace_id,
+                            name="queue.consume",
+                            started_ns=int(received * 1_000_000_000),
+                            ended_ns=time.time_ns(),
+                            attributes={"oath.queue.kind": kind},
+                        )
                 ch.basic_ack(method.delivery_tag)
 
             channel.basic_consume(f"oath.{kind}", delivered, auto_ack=False)
@@ -74,3 +91,12 @@ def consume(consumer_type, storage, manager, context_factory, broker_url, stop, 
         finally:
             if connection and connection.is_open:
                 connection.close()
+
+
+def _unix_seconds(value: str) -> float | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None

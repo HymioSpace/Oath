@@ -5,7 +5,7 @@ import json
 
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.interface.storage import StorageConflict
-from core.storage import outbox, scheduling
+from core.storage import outbox, request_archives, scheduling
 from core.storage.database import TABLES, encode
 from core.utils.encoding import utc_now_iso
 
@@ -62,22 +62,37 @@ def append_journal(db, user_id, type_, payload, key, occur_dt=None):
 
 def commit(db, user_id, expected, after, reason, commit_id, fence=None):
     scheduling.check(db, user_id, fence, required=reason.startswith("step."))
-    fingerprint = hashlib.sha256(encode([expected, after, reason]).encode()).hexdigest()
     known = db.execute(
         "SELECT fingerprint FROM commits WHERE user_id=? AND commit_id=?", (user_id, commit_id)
     ).fetchone()
+    row = None
+    if not known:
+        row = db.execute(
+            "SELECT version,state_json FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        if row["version"] != expected:
+            raise StorageConflict("state version changed")
+    request_archives.compact(db, user_id, after)
+    fingerprint = hashlib.sha256(encode([expected, after, reason]).encode()).hexdigest()
     if known:
         if known[0] != fingerprint:
             raise ValueError("Commit identity conflict")
         return True
-    row = db.execute("SELECT version,state_json FROM users WHERE user_id=?", (user_id,)).fetchone()
-    if row["version"] != expected:
-        raise StorageConflict("state version changed")
     before = json.loads(row["state_json"])
     if set(after) != set(TABLES) or any(
         not isinstance(after[t], dict) or not before[t].keys() <= after[t].keys() for t in TABLES
     ):
         raise ValueError("State tables and keys cannot be deleted")
+    for step_id, step in after["steps"].items():
+        digest = step.get("request_archive")
+        if (
+            digest
+            and digest != before["steps"].get(step_id, {}).get("request_archive")
+            and not db.execute(
+                "SELECT 1 FROM request_archives WHERE user_id=? AND digest=?", (user_id, digest)
+            ).fetchone()
+        ):
+            raise ValueError("Missing archived request")
     changes = {
         t: {k: v for k, v in after[t].items() if before[t].get(k) != v or k not in before[t]}
         for t in TABLES

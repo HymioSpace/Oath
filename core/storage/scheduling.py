@@ -3,6 +3,7 @@
 import json
 import time
 
+from core.observability import BRAIN_CLAIM_WAIT
 from core.protocol.interface.storage import LeaseLost
 
 __all__ = ["LeaseLost"]
@@ -89,6 +90,11 @@ def claim_brain(db, owner, ttl, *, allow_subagents=True):
         user_id = row["user_id"]
         fence = acquire(db, user_id, "brain", owner, ttl)
         if fence:
+            ready = db.execute(
+                "SELECT ready_at FROM scheduling WHERE user_id=?", (user_id,)
+            ).fetchone()[0]
+            if ready > 0:
+                BRAIN_CLAIM_WAIT.observe(max(0, now - ready))
             db.execute("UPDATE scheduling SET claimed=requested WHERE user_id=?", (user_id,))
             return fence
     return None

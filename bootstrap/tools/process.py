@@ -13,7 +13,7 @@ from core.protocol.datatype.user import User
 from core.protocol.interface.permission import PermissionPolicy
 from core.shell import BashTool, HostEnvironment
 from core.skill import SKILL, SkillSystem, SkillTool
-from core.storage.adapters import DurableEventSink, StoredDetails, StoredQueue
+from core.storage.adapters import DurableEventSink, StoredDetails, StoredQueue, StoredTraces
 from core.subagents.tools import tools as subagent_tools
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
@@ -106,6 +106,7 @@ def run(config):
         AllowAllPolicy(storage),
         store=RuntimeStore(storage),
         queue=StoredQueue(queue),
+        traces=StoredTraces(storage),
         shrinker=ResultShrinker(
             details, config.agent.tool_result_detail_chars, whole=frozenset({DETAIL_READ, SKILL})
         ),
@@ -123,6 +124,7 @@ def run(config):
             },
             config.services.tools_url,
             bind_host=config.services.bind_host,
+            service_name="tools",
         )
     finally:
         tools.shutdown()

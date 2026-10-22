@@ -10,6 +10,7 @@ from bootstrap.common.vault import VaultSecrets
 from core.compaction import CompactionCoordinator, LlmCompactor
 from core.journal.runtime_store import RuntimeStore
 from core.llm.configured_provider import ConfiguredProvider
+from core.observability import start_metrics_server
 from core.scheduling.worker import run_workers
 from core.storage.adapters import DurableEventSink
 
@@ -17,6 +18,7 @@ _log = logging.getLogger(__name__)
 
 
 def run(config):
+    start_metrics_server()
     stop = shutdown_event()
     token = service_token(config)
     storage = ServiceClient(config.services.storage_url, token, config.services.request_timeout)

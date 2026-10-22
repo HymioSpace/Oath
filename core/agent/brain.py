@@ -13,6 +13,7 @@ from typing import cast
 from core.compaction.coordinator import CompactionCoordinator
 from core.intake import IntakeCoordinator
 from core.journal.runtime_store import State
+from core.observability import LLM_DURATION, LLM_TOKENS, LLM_TTFT, STEP_DURATION
 from core.protocol.datatype import Message, ToolCallRequest, ToolDefinition, User
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
 from core.protocol.datatype.message import MessageEvent, MessageEventType
@@ -37,6 +38,9 @@ from core.trace.attributes import (
     GEN_AI_USAGE_CACHE_READ_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
+    OATH_ACCEPTED_AT_UNIX_MS,
+    OATH_CHANNEL,
+    OATH_INPUT_DELAY_MS,
     OATH_LLM_ATTEMPT,
     OATH_LLM_DURATION_MS,
     OATH_LLM_FIRST_CONTENT_MS,
@@ -85,6 +89,7 @@ class AgentBrain:
         两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
         """
         from core.agent.runtime_prompt import RUNTIME_PROMPT
+
         parts = [
             self._ctx.config.system_prompt,
             RUNTIME_PROMPT,
@@ -273,6 +278,9 @@ class AgentBrain:
                     OATH_STEP_TRIGGERS: list(step["trigger"]),
                     OATH_STEP_INPUT_COUNT: len(claimed),
                     OATH_STEP_LLM_CALLS: 0,
+                    OATH_CHANNEL: step.get("channel", "unknown"),
+                    OATH_ACCEPTED_AT_UNIX_MS: step.get("accepted_at_unix_ms"),
+                    OATH_INPUT_DELAY_MS: _input_delay_ms(step, started),
                 },
                 events=_input_events(started, claimed),
                 links=links,
@@ -324,10 +332,17 @@ class AgentBrain:
                     OATH_STEP_INPUT_COUNT: len(step["input_ids"]),
                     OATH_STEP_LLM_CALLS: llm_calls,
                     OATH_STEP_DURATION_MS: round((end - start) / 1_000_000, 3),
+                    OATH_CHANNEL: step.get("channel", "unknown"),
+                    OATH_ACCEPTED_AT_UNIX_MS: step.get("accepted_at_unix_ms"),
+                    OATH_INPUT_DELAY_MS: _input_delay_ms(step, start),
                 },
                 events=_ordered(_input_events(start, claimed) + stages),
                 links=tuple(source_links(state, inputs)),
             ),
+        )
+        duration = (end - start) / 1_000_000_000
+        STEP_DURATION.labels(step.get("channel", "unknown"), step["status"]).observe(
+            max(0, duration)
         )
 
     def _record_llm(
@@ -380,6 +395,27 @@ class AgentBrain:
                 value = response.usage.get(key)
                 if isinstance(value, int):
                     attributes[name] = value
+        model = request["model"]
+        channel = step.get("channel", "unknown")
+        LLM_DURATION.labels(model, "ok" if error is None else "error").observe(
+            max(0, duration_ms / 1000)
+        )
+        if ttft_ms is not None:
+            LLM_TTFT.labels(model, channel).observe(max(0, ttft_ms / 1000))
+        if response is not None:
+            for key, direction in (
+                ("prompt_tokens", "input"),
+                ("completion_tokens", "output"),
+            ):
+                value = response.usage.get(key)
+                if isinstance(value, int) and value >= 0:
+                    LLM_TOKENS.labels(model, direction, "total").inc(value)
+            details = response.usage.get("prompt_tokens_details")
+            cached = details.get("cached_tokens") if isinstance(details, dict) else None
+            if cached is None:
+                cached = response.usage.get("cache_read_input_tokens")
+            if isinstance(cached, int) and cached >= 0:
+                LLM_TOKENS.labels(model, "input", "cached").inc(cached)
         events = [SpanEvent(REQUEST_EVENT, started_ns, {BODY: canonical_json(request)})]
         if response is not None:
             raw = canonical_json(_body(response))
@@ -452,6 +488,13 @@ def _input_events(
         )
         for queue, at, item in claimed
     )
+
+
+def _input_delay_ms(step: State, started_ns: int) -> float | None:
+    accepted = step.get("accepted_at_unix_ms")
+    if not isinstance(accepted, (int, float)):
+        return None
+    return round(max(0, started_ns / 1_000_000 - accepted), 3)
 
 
 def _step_span_id(step_id: str) -> str:

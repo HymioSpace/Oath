@@ -1,6 +1,10 @@
 """每客户端的 Outbox 读取协议；连接不拥有任何执行状态。"""
 
 import asyncio
+import time
+from datetime import datetime
+
+from core.observability import DELIVERY_DELAY
 
 
 class Delivery:
@@ -45,6 +49,11 @@ class Delivery:
                 seq=event["event_seq"],
             )
             await self.send(event)
+            created = _unix_seconds(event.get("created_at"))
+            if created is not None:
+                DELIVERY_DELAY.labels(str(event.get("type", "unknown"))).observe(
+                    max(0, time.time() - created)
+                )
             self.highest_sent = event["event_seq"]
 
     async def run(self, attached):
@@ -78,3 +87,12 @@ class Delivery:
                 after = event["event_seq"]
             if not events:
                 await asyncio.sleep(self.poll_seconds)
+
+
+def _unix_seconds(value: object) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
