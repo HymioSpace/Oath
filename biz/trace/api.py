@@ -37,14 +37,53 @@ def list_traces(traces: TraceStore, user: User, *, limit: int, offset: int) -> J
     return {"trace_ids": listed, "total": len(trace_ids), "limit": limit, "offset": offset}
 
 
-def query_trace(traces: TraceStore, user: User, trace_id: str) -> JsonObject:
-    """按 trace_id 取一条 trace 的全部 span。找不到就是空列表 —— 与「无权查看」不可区分。"""
+def query_trace(
+    traces: TraceStore, user: User, trace_id: str, *, summary: bool = False
+) -> JsonObject:
+    """按 trace_id 取一条 trace。
+
+    `summary` 保留节点、时间、状态、属性名和事件名，但不返回模型请求/响应等
+    event 属性正文。移动端先读 summary，只有用户要求原始数据时才读取 full。
+    """
     spans = traces.spans(user, trace_id)
     return {
         "trace_id": trace_id,
         "duration_ms": _elapsed(spans),
-        "spans": [{**span.to_dict(), "duration_ms": span.duration_ms} for span in spans],
+        "view": "summary" if summary else "full",
+        "spans": [_span(span, summary=summary) for span in spans],
     }
+
+
+def _span(span: Span, *, summary: bool) -> JsonObject:
+    result: JsonObject = {
+        "trace_id": span.trace_id,
+        "span_id": span.span_id,
+        "parent_span_id": span.parent_span_id,
+        "name": span.name,
+        "kind": span.kind,
+        "start_unix_nano": span.start_unix_nano,
+        "end_unix_nano": span.end_unix_nano,
+        "status": span.status,
+        "duration_ms": span.duration_ms,
+        "attributes": span.attributes,
+        "events": [
+            {
+                "name": event.name,
+                "unix_nano": event.unix_nano,
+                "attributes": {} if summary else event.attributes,
+            }
+            for event in span.events
+        ],
+        "links": [
+            {
+                "trace_id": link.trace_id,
+                "span_id": link.span_id,
+                "attributes": {} if summary else link.attributes,
+            }
+            for link in span.links
+        ],
+    }
+    return result
 
 
 def _elapsed(spans: tuple[Span, ...]) -> float | None:

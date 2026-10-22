@@ -70,7 +70,9 @@ ask 项不在集合中；立即拒绝的项直接形成终态；之后经 system
 审批状态和执行状态分别保存。`approved` 表示裁定已生效，不表示执行已成功。终态携带
 batch_id、invocation_id、tool_call_id、outcome、`source`、event_id；`source=brain` 表示初次
 提交产生，`source=system` 表示审批后的提交或拒绝、过期产生。source 由 core 持久化，客户端
-和业务 tool 不可自称。run_id 保留原调用归属；新 run 不自动丢弃旧结果，也不撤销旧审批。
+和业务 tool 不可自称。run_id 保留原调用归属。结果仍持久化在 journal，但新用户消息确立
+新 intent 后，旧 run 晚到的 tool result 不再进入活跃 buffer 或唤醒 Brain；它只保留为
+trace/history。当前 run 的多个结果可以在同一 step 内合并呈现，模型只生成一次答复。
 
 ### 2.2 批次呈现到哪里为止
 

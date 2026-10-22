@@ -119,7 +119,8 @@ def event_of(user_id, row):
 def page(db, user_id, *, before=None, limit=10):
     if type(limit) is not int or not 1 <= limit <= 20:
         raise ValueError("limit must be 1..20 conversation turns")
-    high = ensure(db, user_id)
+    row = db.execute("SELECT event_seq FROM users WHERE user_id=?", (user_id,)).fetchone()
+    high = row[0] if row else 0
     if before is not None and (type(before) is not int or not 1 <= before <= high + 1):
         raise ValueError("invalid history cursor")
     end = before if before is not None else high + 1

@@ -6,6 +6,7 @@ import json
 import time
 
 from starlette.applications import Starlette
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
@@ -42,7 +43,13 @@ def build_app(service, cli_service, admin_token=""):
         status = "ok"
         try:
             user = user_of(service, request)
-            return JSONResponse(service.query_trace(user, request.query_params.get("trace_id", "")))
+            return JSONResponse(
+                service.query_trace(
+                    user,
+                    request.query_params.get("trace_id", ""),
+                    summary=request.query_params.get("summary") == "1",
+                )
+            )
         except (Unauthorized, BadQuery) as exc:
             status = "error"
             return error_response(exc)
@@ -79,7 +86,13 @@ def build_app(service, cli_service, admin_token=""):
         status = "ok"
         try:
             user = admin_user(request)
-            return JSONResponse(service.query_trace(user, request.query_params.get("trace_id", "")))
+            return JSONResponse(
+                service.query_trace(
+                    user,
+                    request.query_params.get("trace_id", ""),
+                    summary=request.query_params.get("summary") == "1",
+                )
+            )
         except (Unauthorized, BadQuery, ValueError):
             status = "error"
             return JSONResponse({"error": "unauthorized"}, 401)
@@ -160,7 +173,7 @@ def build_app(service, cli_service, admin_token=""):
         body, content_type = metrics_response()
         return Response(body, media_type=content_type)
 
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/heartbeat", heartbeat),
             Route("/metrics", metrics),
@@ -175,3 +188,5 @@ def build_app(service, cli_service, admin_token=""):
             *cli_routes(cli_service),
         ]
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    return app

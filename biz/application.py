@@ -38,8 +38,8 @@ class BizApplication:
     def list_traces(self, user: User, *, limit: int, offset: int) -> JsonObject:
         return list_traces(self._traces, user, limit=limit, offset=offset)
 
-    def query_trace(self, user: User, trace_id: str) -> JsonObject:
-        return query_trace(self._traces, user, trace_id)
+    def query_trace(self, user: User, trace_id: str, *, summary: bool = False) -> JsonObject:
+        return query_trace(self._traces, user, trace_id, summary=summary)
 
     def run_cli(self, user: User, name: str, arguments: JsonObject) -> JsonValue:
         command = next((c for c in self.commands if c.name == name), None)

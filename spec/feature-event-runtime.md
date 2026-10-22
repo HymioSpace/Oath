@@ -47,7 +47,8 @@ flowchart LR
 不重新定义。
 
 SystemConsumer 应用控制动作后才认领输入；重复控制命令不会重复审批、取消新 run 或重置重试计数。
-ToolConsumer 校验终态与工具系统保存的事实一致，无效消息单独 rejected 并报告，其他结果继续处理。
+ToolConsumer 校验终态与工具系统保存的事实一致；旧 run 的结果如果晚于新的用户意图，只作为
+历史记录隔离，不进入活跃 buffer。无效消息单独 rejected 并报告，其他结果继续处理。
 
 一次 Brain claim 收走当时三条队列的全部输入，详情见 [Intake](feature-intake.md)。
 
