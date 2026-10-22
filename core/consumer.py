@@ -76,6 +76,21 @@ class UserConsumer(QueueConsumer):
 class ToolConsumer(QueueConsumer):
     queue_name = QueueName.TOOL
 
+    def _reject(self, user: User, item: Inbound, error: str) -> None:
+        _log.info("隔离工具输入 %s: %s", input_key(item), error)
+        try:
+            self.ctx.sink.emit(
+                MessageEvent(
+                    type="intake.rejected",
+                    user=user,
+                    payload={"input_id": input_key(item), "error": error},
+                    idempotency_key=input_key(item),
+                    occur_dt=utc_now_iso(),
+                )
+            )
+        except Exception:
+            _log.exception("无效输入通知失败；可从 session.status 查询")
+
     def receive(self, user: User, item: Inbound) -> None:
         """工具事实由工具系统生成；队列通知不能伪造调用或改写终态。
 
@@ -84,7 +99,18 @@ class ToolConsumer(QueueConsumer):
         """
         window = self.ctx.config.tool_round_timeout_seconds
 
-        def check(state: State) -> bool:
+        new_intents = self.ctx.buffer.peek(user, QueueName.USER)
+        if new_intents and any(
+            not pending.occur_dt or item.occur_dt > pending.occur_dt for pending in new_intents
+        ):
+            self._reject(user, item, "工具结果晚于新的用户意图，已作为历史结果隔离")
+            return
+
+        def check(state: State) -> str:
+            run_id = item.payload.get("run_id")
+            current_run = state["meta"].get("run_id")
+            if isinstance(run_id, str) and run_id and current_run and run_id != current_run:
+                return "工具结果属于已被新用户意图替代的 run"
             invocation_id = item.payload.get("invocation_id")
             call = state["calls"].get(invocation_id) if isinstance(invocation_id, str) else None
             if not (
@@ -93,7 +119,7 @@ class ToolConsumer(QueueConsumer):
                 and item.source_id == call["terminal"]["event_id"]
                 and item.source == "tool.terminal"
             ):
-                return False
+                return "未知调用或终态不一致"
             batch = state["batches"].get(item.payload.get("batch_id"))
             if batch is not None and batch.get("buffer_deadline") is None:
                 batch.update(
@@ -101,22 +127,11 @@ class ToolConsumer(QueueConsumer):
                     buffer_deadline=time.time() + window,
                     buffer_window=window,
                 )
-            return True
+            return ""
 
-        if not self.ctx.store.transact(user, "tool.result_verified", check):
-            _log.error("隔离无效工具输入 %s", input_key(item))
-            try:
-                self.ctx.sink.emit(
-                    MessageEvent(
-                        type="intake.rejected",
-                        user=user,
-                        payload={"input_id": input_key(item), "error": "未知调用或终态不一致"},
-                        idempotency_key=input_key(item),
-                        occur_dt=utc_now_iso(),
-                    )
-                )
-            except Exception:
-                _log.exception("无效输入通知失败；可从 session.status 查询")
+        rejected = self.ctx.store.transact(user, "tool.result_verified", check)
+        if rejected:
+            self._reject(user, item, rejected)
             return
         super().receive(user, item)
 
