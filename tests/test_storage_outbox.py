@@ -292,3 +292,14 @@ def test_a_client_id_has_to_be_a_usable_string(service: Storage) -> None:
     for bad in ("", "x" * 129, None, 7):
         with pytest.raises(ValueError, match="client_id"):
             service.call("client.attach", user_id="u1", client_id=bad)
+
+
+def test_trace_metadata_does_not_conflict_with_retry(service: Storage) -> None:
+    first = _message("context-retry")
+    first["telemetry"] = {"trace_id": "first", "received_at_unix_ms": 1}
+    retry = {**first, "telemetry": {"trace_id": "second", "received_at_unix_ms": 2}}
+    original = service.call("queue.add", user_id="u1", item=first)
+    assert service.call("queue.add", user_id="u1", item=retry) == original
+    changed = {**retry, "payload": {**retry["payload"], "content": "changed"}}
+    with pytest.raises(ValueError, match="idempotency conflict"):
+        service.call("queue.add", user_id="u1", item=changed)
