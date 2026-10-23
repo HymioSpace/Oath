@@ -23,7 +23,9 @@ _log = logging.getLogger(__name__)
 
 
 def new_intent(queue, item):
-    return queue == QueueName.USER or (queue == QueueName.SYSTEM and item.source.startswith("app."))
+    return (queue == QueueName.USER and item.source != "app.message.reaction") or (
+        queue == QueueName.SYSTEM and item.source.startswith("app.")
+    )
 
 
 class StepExecutor(Protocol):
@@ -116,7 +118,11 @@ class IntakeCoordinator:
             for key, entry in entries:
                 state["inputs"][key] = entry
             step_id = uuid.uuid4().hex
-            new_user = any(entry["queue"] == QueueName.USER for _, entry in entries)
+            new_user = any(
+                entry["queue"] == QueueName.USER
+                and entry["item"]["source"] != "app.message.reaction"
+                for _, entry in entries
+            )
             new_run = (
                 new_user
                 or any(

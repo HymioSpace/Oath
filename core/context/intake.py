@@ -73,7 +73,14 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
                 }
             )
         elif entry["queue"] == "user":
-            messages.append({"role": "user", "content": str(item.payload["content"])})
+            content = str(item.payload["content"])
+            reference = item.payload.get("message_id") or item.source_id
+            if item.source == "user.message" and isinstance(reference, str):
+                content = (
+                    f"<user_message id={quoteattr('user:' + reference)}>"
+                    f"{escape(content)}</user_message>"
+                )
+            messages.append({"role": "user", "content": content})
         elif entry["queue"] == "system":
             messages.append(
                 {

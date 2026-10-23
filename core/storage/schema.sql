@@ -114,6 +114,10 @@ CREATE TABLE IF NOT EXISTS subagents (
 );
 CREATE INDEX IF NOT EXISTS subagents_owner ON subagents(user_id,created_at);
 CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status,deadline);
+CREATE TABLE IF NOT EXISTS message_reactions (
+ user_id TEXT NOT NULL, target TEXT NOT NULL, actor TEXT NOT NULL, seq INTEGER NOT NULL,
+ PRIMARY KEY(user_id,target,actor)
+);
 CREATE TABLE IF NOT EXISTS subagent_notes (
  agent_id TEXT NOT NULL REFERENCES subagents(agent_id), note_id TEXT NOT NULL,
  content TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(agent_id,note_id)

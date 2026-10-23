@@ -152,6 +152,17 @@ def build_app(service, cli_service, admin_token=""):
                     service.agent_operation, user, "queue.add", item=item.to_dict()
                 )
                 return JSONResponse({"accepted": True, "id": result})
+            if request.url.path == "/messages/react":
+                result = await asyncio.to_thread(
+                    service.agent_operation,
+                    user,
+                    "message.react",
+                    actor=data.get("actor"),
+                    target=data.get("target"),
+                    emoji=data.get("emoji"),
+                    operation_id=data.get("operation_id"),
+                )
+                return JSONResponse(result)
             action = request.path_params["action"]
             if action not in {"spawn", "list", "get", "cancel"}:
                 raise ValueError("Unknown action")
@@ -180,6 +191,7 @@ def build_app(service, cli_service, admin_token=""):
             Route("/admin/traces", admin_traces),
             Route("/admin/trace", admin_trace),
             Route("/events", agent_operation, methods=["POST"]),
+            Route("/messages/react", agent_operation, methods=["POST"]),
             Route("/executions/get", agent_operation, methods=["POST"]),
             Route("/subagents/{action}", agent_operation, methods=["POST"]),
             Route("/conversation_history", history),
