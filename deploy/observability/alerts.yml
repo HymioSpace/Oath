@@ -22,6 +22,28 @@ groups:
         annotations:
           summary: Host root filesystem has less than 15% free space
 
+      - alert: OathHostFileCacheThrashing
+        expr: |
+          (rate(node_vmstat_workingset_refault_file[5m]) > 5000)
+          and on (job, instance)
+          (rate(node_vmstat_pgscan_kswapd[5m]) > 10000)
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Host {{ $labels.instance }} is repeatedly reclaiming and rereading file cache"
+          description: Check file-backed THP policy, cache working set and per-service read rates before restarting.
+
+      - alert: OathHostDiskReadLatencyHigh
+        expr: |
+          (rate(node_disk_read_time_seconds_total{device!~"loop.*|ram.*"}[5m])
+            / clamp_min(rate(node_disk_reads_completed_total[5m]), 0.001) > 0.02)
+          and on (job, instance, device)
+          (rate(node_disk_reads_completed_total[5m]) > 100)
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Disk {{ $labels.device }} read latency exceeds 20 ms under load"
+
       - alert: OathStorageLockTimeouts
         expr: increase(oath_storage_transaction_seconds_count{outcome="busy"}[5m]) > 0
         for: 1m
