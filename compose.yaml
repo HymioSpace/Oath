@@ -168,6 +168,7 @@ services:
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
       - --path.rootfs=/rootfs
+      - --collector.vmstat.fields=^(oom_kill|pgpg|pswp|pg.*fault|workingset_refault_file|pgscan_kswapd|pgsteal_kswapd).*
       - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+)($$|/)
     volumes:
       - /proc:/host/proc:ro
