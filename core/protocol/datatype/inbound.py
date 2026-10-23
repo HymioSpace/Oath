@@ -82,6 +82,7 @@ def of_command(command: Command) -> Inbound | None:
             source=command.type,
             payload={
                 "content": str(command.payload.get("content", "")),
+                "message_id": command.id,
                 "user_context": dict(context) if isinstance(context, dict) else {},
                 **({"model": command.payload["model"]} if "model" in command.payload else {}),
             },

@@ -17,6 +17,7 @@ OPERATIONS = {
     "users.list",
     "tools.users",
     "queue.add",
+    "message.react",
     "relay.claim",
     "relay.confirm",
     "consumer.claim",

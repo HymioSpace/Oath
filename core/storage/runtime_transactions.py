@@ -160,7 +160,11 @@ def project(db, user_id, before, after, changes):
             )
     for key, entry in changes.get("inputs", {}).items():
         db.execute("DELETE FROM inbox_events WHERE user_id=? AND identity=?", (user_id, key))
-        if key not in before["inputs"] and entry["queue"] == "user":
+        if (
+            key not in before["inputs"]
+            and entry["queue"] == "user"
+            and entry["item"]["source"] == "user.message"
+        ):
             outbox.append(db, user_id, "user.message", entry["item"]["payload"], f"input:{key}")
     for batch_id, batch in changes.get("batches", {}).items():
         db.execute(

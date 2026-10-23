@@ -208,6 +208,27 @@ def page(db, user_id, *, before=None, limit=10):
                 "text": row["content"],
             },
         }
+    # Feedback may arrive long after its message's page was written. Include the
+    # latest actor slot for messages in this page regardless of feedback time.
+    targets = {
+        (
+            "user:" + str(e["event_seq"])
+            if e["event_type"] == "user.message"
+            else "assistant:" + str(e["payload"].get("step_id", ""))
+        )
+        for e in events.values()
+        if e["event_type"] in {"user.message", "assistant.message"}
+    }
+    if targets and db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_reactions'"
+    ).fetchone():
+        for target in targets:
+            for row in db.execute(
+                "SELECT e.* FROM message_reactions r JOIN outbox_events e "
+                "ON e.user_id=r.user_id AND e.seq=r.seq WHERE r.user_id=? AND r.target=?",
+                (user_id, target),
+            ):
+                events[row["seq"]] = event_of(user_id, row)
     return {
         "events": sorted(events.values(), key=lambda e: e["event_seq"]),
         "checkpoint": high,

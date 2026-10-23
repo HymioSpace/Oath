@@ -100,6 +100,10 @@ class StorageService:
                 ]
             if operation == "queue.add":
                 return runtime.enqueue(db, uid, p["item"])
+            if operation == "message.react":
+                from core.storage.reactions import mutate
+
+                return mutate(db, uid, p)
             if operation == "relay.claim":
                 now = time.time()
                 old = db.execute("SELECT * FROM relay_lease WHERE id=1").fetchone()

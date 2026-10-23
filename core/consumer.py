@@ -99,7 +99,11 @@ class ToolConsumer(QueueConsumer):
         """
         window = self.ctx.config.tool_round_timeout_seconds
 
-        new_intents = self.ctx.buffer.peek(user, QueueName.USER)
+        new_intents = [
+            pending
+            for pending in self.ctx.buffer.peek(user, QueueName.USER)
+            if pending.source != "app.message.reaction"
+        ]
         if new_intents and any(
             not pending.occur_dt or item.occur_dt > pending.occur_dt for pending in new_intents
         ):
