@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+from bootstrap.clients.context_provider import provider
 from bootstrap.clients.tool_client import ToolClient
 from bootstrap.common.extension_loader import load_extensions
 from core.context import ContextManager
@@ -50,4 +51,5 @@ def build_context(config, storage, queue, tools, fence=None):
         ),
         traces=StoredTraces(storage),
         config=agent_config,
+        context_provider=provider(agent_config),
     )

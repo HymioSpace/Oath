@@ -42,6 +42,7 @@ class AgentContext:
     #: 可观测记录。派生数据：写失败只丢 span，不影响推理。
     traces: TraceStore
     config: AgentConfig
+    context_provider: object = None
 
 
 __all__ = ["AgentContext"]

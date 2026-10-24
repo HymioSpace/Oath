@@ -19,14 +19,18 @@ def enqueue(db, user_id, item):
     child = lookup(db, user_id)
     if child and inbound.kind != "tool":
         raise ValueError("Subagents accept only tool results")
-    # occur_dt is metadata, not the identity of a retried command.
-    fingerprint = encode({k: v for k, v in item.items() if k != "occur_dt"})
+    # Receipt time and causal tracing do not change a retried business command.
+    fingerprint = encode({k: v for k, v in item.items() if k not in {"occur_dt", "telemetry"}})
     known = db.execute(
-        "SELECT id,fingerprint FROM broker_outbox WHERE user_id=? AND identity=?",
+        "SELECT id,fingerprint,item_json FROM broker_outbox WHERE user_id=? AND identity=?",
         (user_id, inbound.identity),
     ).fetchone()
     if known:
-        if known["fingerprint"] != fingerprint:
+        original = json.loads(known["item_json"])
+        original_fingerprint = encode(
+            {k: v for k, v in original.items() if k not in {"occur_dt", "telemetry"}}
+        )
+        if original_fingerprint != fingerprint:
             raise ValueError("Input idempotency conflict")
         return known["id"]
     return db.execute(

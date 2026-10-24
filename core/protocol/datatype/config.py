@@ -41,6 +41,8 @@ class AgentConfig:
 
     system_prompt: str = ""
     system_prompt_file: Path | None = None
+    context_provider_url: str = ""
+    context_provider_token_file: str = ""
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
     selectable_models: tuple[str, ...] = ()
     model_providers: dict[str, ModelProviderConfig] = field(default_factory=dict)
