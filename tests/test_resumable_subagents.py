@@ -1,6 +1,11 @@
 import json
 
+from bootstrap.storage.process import OPERATIONS
 from tests._support.storage import Storage
+
+
+def test_storage_rpc_exposes_subagent_continue():
+    assert "subagent.continue" in OPERATIONS
 
 
 def test_completed_subagent_context_accepts_a_new_bounded_turn(service: Storage):
