@@ -41,6 +41,9 @@ class BizApplication:
     def query_trace(self, user: User, trace_id: str, *, summary: bool = False) -> JsonObject:
         return query_trace(self._traces, user, trace_id, summary=summary)
 
+    def compaction_events(self, *, since: str, limit: int = 5000) -> list[JsonObject]:
+        return self._access.compaction_events(since=since, limit=limit)
+
     def run_cli(self, user: User, name: str, arguments: JsonObject) -> JsonValue:
         command = next((c for c in self.commands if c.name == name), None)
         if command is None:

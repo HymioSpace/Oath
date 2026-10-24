@@ -124,6 +124,38 @@ STEP_DURATION = Histogram(
     buckets=LATENCY,
     registry=REGISTRY,
 )
+STEP_PAUSED = Counter(
+    "oath_step_paused_total",
+    "Steps paused before model execution.",
+    ("reason",),
+    registry=REGISTRY,
+)
+COMPACTION_ATTEMPTS = Counter(
+    "oath_compaction_attempts_total",
+    "Context compaction attempts by mode and terminal outcome.",
+    ("mode", "outcome", "reason"),
+    registry=REGISTRY,
+)
+COMPACTION_DURATION = Histogram(
+    "oath_compaction_duration_seconds",
+    "Context compaction duration including the model call.",
+    ("mode", "outcome"),
+    buckets=LATENCY,
+    registry=REGISTRY,
+)
+COMPACTION_LEASE_WAIT = Histogram(
+    "oath_compaction_lease_wait_seconds",
+    "Time spent acquiring the per-user compaction lease.",
+    ("mode",),
+    buckets=LATENCY,
+    registry=REGISTRY,
+)
+COMPACTION_BLOCKED_STEPS = Counter(
+    "oath_compaction_blocked_steps_total",
+    "Steps that could not proceed because context preparation was incomplete.",
+    ("mode",),
+    registry=REGISTRY,
+)
 LLM_DURATION = Histogram(
     "oath_llm_duration_seconds",
     "Model call duration including streaming.",
@@ -186,6 +218,10 @@ def start_metrics_server(port: int = 8780) -> None:
 __all__ = [
     "BRAIN_CLAIM_WAIT",
     "BUFFER_WAKE_DELAY",
+    "COMPACTION_ATTEMPTS",
+    "COMPACTION_BLOCKED_STEPS",
+    "COMPACTION_DURATION",
+    "COMPACTION_LEASE_WAIT",
     "CONTENT_TYPE_LATEST",
     "DELIVERY_DELAY",
     "GATEWAY_COMMANDS",
@@ -203,6 +239,7 @@ __all__ = [
     "RPC_PAYLOAD_BYTES",
     "RPC_REQUESTS",
     "STEP_DURATION",
+    "STEP_PAUSED",
     "TOOL_DURATION",
     "TOOL_TERMINALS",
     "TRACE_API_DURATION",

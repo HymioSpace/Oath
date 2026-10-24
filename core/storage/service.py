@@ -19,6 +19,7 @@ READ_OPERATIONS = frozenset(
         "tools.users",
         "buffer.peek",
         "outbox.read",
+        "compaction.events",
         "history.page",
         "detail.get",
         "trace.list",
@@ -234,6 +235,25 @@ class StorageService:
                 )
             if operation == "outbox.read":
                 return outbox.read(db, uid, p["after"], p.get("through"), p.get("limit", 128))
+            if operation == "compaction.events":
+                rows = db.execute(
+                    "SELECT user_id,type,payload_json,created_at FROM outbox_events "
+                    "WHERE (type='context.compaction' OR "
+                    "(type='step.status' AND "
+                    "json_extract(payload_json,'$.status')='paused' AND "
+                    "json_extract(payload_json,'$.reason')='context_window')) "
+                    "AND created_at>=? ORDER BY created_at DESC LIMIT ?",
+                    (p["since"], min(max(int(p.get("limit", 5000)), 1), 10000)),
+                ).fetchall()
+                return [
+                    {
+                        "user_id": row["user_id"],
+                        "event_type": row["type"],
+                        "payload": json.loads(row["payload_json"]),
+                        "occurred_at": row["created_at"],
+                    }
+                    for row in rows
+                ]
             if operation == "history.page":
                 return conversation_history.page(
                     db, uid, before=p.get("before"), limit=p.get("limit", 10)

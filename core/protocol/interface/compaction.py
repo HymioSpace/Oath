@@ -13,6 +13,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+class CompactionError(RuntimeError):
+    """A compaction attempt that produced no usable artifact."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class Compactor(ABC):
     """历史压缩算法。"""
 
@@ -30,4 +38,4 @@ class Compactor(ABC):
         ...
 
 
-__all__ = ["Compactor"]
+__all__ = ["CompactionError", "Compactor"]

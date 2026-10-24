@@ -21,6 +21,9 @@ class StoredAgentAccess:
             "history.page", user_id=user.storage_id, before=before, limit=limit
         )
 
+    def compaction_events(self, *, since, limit=5000):
+        return self.storage.call("compaction.events", since=since, limit=limit)
+
     def user_context(self, user):
         state = self.storage.call("state.read", user_id=user.storage_id)["state"]
         return current(table_of(state), now=time.time())

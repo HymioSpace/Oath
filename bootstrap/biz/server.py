@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 import time
+from datetime import UTC, datetime
 
 from starlette.applications import Starlette
 from starlette.middleware.gzip import GZipMiddleware
@@ -99,6 +100,19 @@ def build_app(service, cli_service, admin_token=""):
         finally:
             TRACE_API_DURATION.labels("admin_query", status).observe(time.monotonic() - started)
 
+    def admin_compactions(request):
+        supplied = request.headers.get("authorization", "")
+        if not admin_token or not hmac.compare_digest(supplied, f"Bearer {admin_token}"):
+            return JSONResponse({"error": "unauthorized"}, 401)
+        try:
+            hours = min(168, max(1, int(request.query_params.get("hours", 24))))
+            since = datetime.fromtimestamp(time.time() - hours * 3600, UTC).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            )
+            return JSONResponse({"events": service.compaction_events(since=since), "hours": hours})
+        except (TypeError, ValueError):
+            return JSONResponse({"error": "bad_query"}, 400)
+
     def history(request):
         try:
             user = user_of(service, request)
@@ -190,6 +204,7 @@ def build_app(service, cli_service, admin_token=""):
             Route("/metrics", metrics),
             Route("/admin/traces", admin_traces),
             Route("/admin/trace", admin_trace),
+            Route("/admin/compactions", admin_compactions),
             Route("/events", agent_operation, methods=["POST"]),
             Route("/messages/react", agent_operation, methods=["POST"]),
             Route("/executions/get", agent_operation, methods=["POST"]),

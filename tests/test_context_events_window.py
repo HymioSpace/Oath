@@ -1,5 +1,6 @@
 import copy
 import threading
+import time
 from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
@@ -17,6 +18,7 @@ from core.protocol.datatype.inbound import Inbound, of_command
 from core.protocol.datatype.llm import LlmResponse
 from core.protocol.datatype.user import User
 from core.protocol.datatype.wire import Command
+from core.protocol.interface.compaction import CompactionError
 from core.utils.tokens import estimate
 
 
@@ -272,6 +274,160 @@ def test_sync_reuses_pending_that_finished_while_waiting_for_lease(service):
         coordinator.shutdown()
 
 
+def test_sync_compaction_never_waits_for_another_process_lease(service):
+    _store, user, algorithm, coordinator = setup(service, 128)
+    fence = service.call(
+        "lease.acquire",
+        user_id=user.storage_id,
+        lane="compaction",
+        owner="other-worker",
+        ttl=60,
+    )
+    try:
+        started = time.monotonic()
+        coordinator._compress(user, applied=True, context_window=128000)
+        assert time.monotonic() - started < 0.5
+        assert algorithm.inputs == []
+    finally:
+        service.call(
+            "lease.release",
+            user_id=user.storage_id,
+            fence=fence,
+        )
+        coordinator.shutdown()
+
+
+def test_prepare_does_not_wait_for_local_async_compaction(service):
+    class BlockingCompactor:
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+            self.inputs = []
+
+        def compress(self, messages, *, budget_tokens):
+            self.inputs.append(copy.deepcopy(messages))
+            self.started.set()
+            assert self.release.wait(5)
+            return [{"role": "user", "content": "short summary"}]
+
+    store, user = RuntimeStore(service), User("blocking-async")
+    store.transact(user, "fixture", lambda s: s["conversation"].update(messages=history(60)))
+    algorithm = BlockingCompactor()
+    coordinator = CompactionCoordinator(store, algorithm, AgentConfig(), workers=1)
+    try:
+        coordinator.prepare(user, context_window=128000)
+        assert algorithm.started.wait(2)
+        store.transact(
+            user,
+            "more",
+            lambda s: s["conversation"]["messages"].extend(history(60)),
+        )
+        started = time.monotonic()
+        coordinator.prepare(user, context_window=128000)
+        assert time.monotonic() - started < 0.5
+        assert len(algorithm.inputs) == 1
+    finally:
+        algorithm.release.set()
+        coordinator.shutdown()
+
+
+def test_compaction_failure_has_reason_and_short_circuits_retry(service):
+    class FailingCompactor:
+        def __init__(self):
+            self.calls = 0
+
+        def compress(self, messages, *, budget_tokens):
+            self.calls += 1
+            raise CompactionError("invalid_output")
+
+    events = []
+    store, user = RuntimeStore(service), User("failing-compaction")
+    store.transact(user, "fixture", lambda s: s["conversation"].update(messages=history(128)))
+    algorithm = FailingCompactor()
+    coordinator = CompactionCoordinator(
+        store,
+        algorithm,
+        AgentConfig(),
+        sink=SimpleNamespace(emit=events.append),
+        workers=1,
+        retry_seconds=60,
+    )
+    try:
+        coordinator.prepare(
+            user,
+            context_window=128000,
+            trace_id="a" * 32,
+            step_id="step-a",
+        )
+        assert algorithm.calls == 1
+        assert events[-1].payload["status"] == "failed"
+        assert events[-1].payload["reason"] == "invalid_output"
+        assert events[-1].payload["trace_id"] == "a" * 32
+        assert events[-1].payload["step_id"] == "step-a"
+        coordinator.prepare(
+            user,
+            context_window=128000,
+            trace_id="b" * 32,
+            step_id="step-b",
+        )
+        assert algorithm.calls == 1
+    finally:
+        coordinator.shutdown()
+
+
+def test_async_events_keep_trigger_trace_and_step(service):
+    events = []
+    _store, user, _algorithm, coordinator = setup(service, 60)
+    coordinator._sink = SimpleNamespace(emit=events.append)
+    try:
+        coordinator.prepare(
+            user,
+            context_window=128000,
+            trace_id="c" * 32,
+            step_id="step-c",
+            channel="ios",
+        )
+        coordinator._pool.submit(lambda: None).result(timeout=5)
+        states = [(e.payload["status"], e.payload["mode"]) for e in events]
+        assert ("started", "async") in states
+        assert ("ready", "async") in states
+        assert all(e.payload["trace_id"] == "c" * 32 for e in events)
+        assert all(e.payload["step_id"] == "step-c" for e in events)
+        assert all(e.payload["channel"] == "ios" for e in events)
+    finally:
+        coordinator.shutdown()
+
+
+def test_async_completion_resumes_context_paused_step(service):
+    store, user, _algorithm, coordinator = setup(service, 60)
+    step_id = "2" * 16
+
+    def pause(state):
+        state["steps"][step_id] = {
+            "step_id": step_id,
+            "run_id": "r",
+            "trace_id": "3" * 32,
+            "status": "paused",
+            "pause_reason": "context_window",
+            "error": "内容较多",
+            "attempts": 0,
+            "input_ids": [],
+            "trigger": ["user"],
+        }
+        state["meta"]["active_step"] = step_id
+
+    store.transact(user, "fixture.pause", pause)
+    try:
+        coordinator.prepare(user, context_window=128000)
+        coordinator._pool.submit(lambda: None).result(timeout=5)
+        step = store.read(user)["steps"][step_id]
+        assert step["status"] == "prepared"
+        assert step["pause_reason"] is None
+        assert step["error"] is None
+    finally:
+        coordinator.shutdown()
+
+
 def test_intake_freezes_selected_model_window_and_continuations(service):
     from core.intake.coordinator import IntakeCoordinator
 
@@ -338,12 +494,14 @@ def test_sync_threshold_is_configurable(service):
 
 def test_oversized_recent_input_pauses_without_provider_request(service):
     store, user, _, coordinator = setup(service, 1)
+    spans = []
     brain = AgentBrain(
         SimpleNamespace(
             store=store,
             config=AgentConfig(),
             context_provider=None,
             sink=SimpleNamespace(emit=lambda e: None),
+            traces=SimpleNamespace(append=lambda _user, span: spans.append(span)),
         ),
         None,
         coordinator,
@@ -351,9 +509,12 @@ def test_oversized_recent_input_pauses_without_provider_request(service):
     messages = [{"role": "user", "content": "文" * 130000}]
     store.transact(user, "fixture", lambda s: s["conversation"].update(messages=messages))
     step = {
-        "step_id": "s",
+        "step_id": "1" * 16,
         "run_id": "r",
         "trace_id": "0" * 32,
+        "trace_started": time.time_ns(),
+        "input_ids": [],
+        "trigger": ["user"],
         "status": "prepared",
         "request": None,
         "context_window": 128000,
@@ -364,13 +525,19 @@ def test_oversized_recent_input_pauses_without_provider_request(service):
             "max_output_tokens": 2048,
         },
     }
-    store.transact(user, "fixture.step", lambda s: s["steps"].update(s=step))
+    store.transact(
+        user,
+        "fixture.step",
+        lambda s: s["steps"].update({step["step_id"]: step}),
+    )
     service.call("wake", user_id=user.storage_id, force=True)
     store.fence = service.call("brain.claim", owner="pause", ttl=60)
     try:
         value = brain._prepare_request(user, step)
         assert value["status"] == "paused" and value["request"] is None
         assert value["request_draft"]["messages"] == messages
+        assert spans and spans[-1].end_unix_nano is not None
+        assert spans[-1].status == "unset"
     finally:
         brain.close()
         coordinator.shutdown()
