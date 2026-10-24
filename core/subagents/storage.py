@@ -75,6 +75,13 @@ def finish(db, row, status, result):
     snapshot = db.execute(
         "SELECT version,state_json FROM users WHERE user_id=?", (row["storage_id"],)
     ).fetchone()
+    turn = db.execute(
+        "SELECT turn_id FROM subagent_turns WHERE agent_id=? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (row["agent_id"],),
+    ).fetchone()
+    turn_id = turn["turn_id"] if turn else ""
+    suffix = ":" + turn_id if turn_id else ""
     state = json.loads(snapshot["state_json"])
     if state["meta"].get("run_id"):
         from core.storage.runtime_transactions import commit
@@ -86,17 +93,10 @@ def finish(db, row, status, result):
             snapshot["version"],
             state,
             "subagent.terminated",
-            "subagent:" + row["agent_id"] + ":terminated",
+            "subagent:" + row["agent_id"] + ":terminated" + suffix,
         )
     db.execute("DELETE FROM inbox_events WHERE user_id=?", (row["storage_id"],))
     db.execute("UPDATE scheduling SET completed=requested WHERE user_id=?", (row["storage_id"],))
-    turn = db.execute(
-        "SELECT turn_id FROM subagent_turns WHERE agent_id=? "
-        "ORDER BY created_at DESC LIMIT 1",
-        (row["agent_id"],),
-    ).fetchone()
-    turn_id = turn["turn_id"] if turn else ""
-    suffix = ":" + turn_id if turn_id else ""
     notify(
         db,
         row,

@@ -1,6 +1,7 @@
 import json
 
 from bootstrap.storage.process import OPERATIONS
+from core.subagents import storage as subagent_storage
 from tests._support.storage import Storage
 
 
@@ -119,3 +120,36 @@ def test_deferred_context_starts_only_after_binding(service: Storage):
     assert service.call("buffer.peek", user_id=child_user, kind="user")[0]["source"] == (
         "subagent.message"
     )
+
+
+def test_each_resumed_turn_can_finish_its_own_termination_commit(service: Storage):
+    child = service.call(
+        "subagent.spawn",
+        user_id="u1",
+        request_id="repeat-kit-thread",
+        title="应用开发",
+        objective="构建应用",
+        success_criteria="完成",
+        notify_parent=False,
+        timeout_seconds=60,
+    )
+    with service.transaction() as db:
+        row = subagent_storage.lookup(db, f"u1:{child['agent_id']}")
+        subagent_storage.finish(db, row, "succeeded", "first")
+
+    service.call(
+        "subagent.continue",
+        user_id="u1",
+        agent_id=child["agent_id"],
+        message_id="turn-two",
+        content="继续修改",
+        success_criteria="完成",
+        timeout_seconds=60,
+    )
+    with service.transaction() as db:
+        row = subagent_storage.lookup(db, f"u1:{child['agent_id']}")
+        subagent_storage.finish(db, row, "succeeded", "second")
+
+    assert service.call(
+        "subagent.get", user_id="u1", agent_id=child["agent_id"]
+    )["status"] == "succeeded"
