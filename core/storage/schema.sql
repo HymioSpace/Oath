@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS outbox_events (
  idempotency_key TEXT NOT NULL, type TEXT NOT NULL, payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
  created_at TEXT NOT NULL, PRIMARY KEY(user_id,seq), UNIQUE(user_id,idempotency_key)
 );
+CREATE INDEX IF NOT EXISTS outbox_type_time ON outbox_events(type,created_at DESC);
 CREATE TABLE IF NOT EXISTS client_cursors (
  user_id TEXT NOT NULL REFERENCES users(user_id), client_id TEXT NOT NULL,
  acked INTEGER NOT NULL DEFAULT 0, delivered INTEGER NOT NULL DEFAULT 0,

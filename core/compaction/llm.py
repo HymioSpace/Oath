@@ -14,7 +14,7 @@ from xml.sax.saxutils import escape
 from core.context.policy import model_capacity
 from core.protocol.datatype.llm import LlmRequest
 from core.protocol.datatype.message import Message
-from core.protocol.interface.compaction import Compactor
+from core.protocol.interface.compaction import CompactionError, Compactor
 from core.protocol.interface.llm import ModelProvider
 from core.utils.tokens import estimate, estimate_text
 
@@ -62,7 +62,7 @@ class LlmCompactor(Compactor):
         # forward; never send a 1M conversation to a 200K summarizer in one call.
         capacity = int(self._context_window * 0.8) - estimate_text(_INSTRUCTION) - budget * 2 - 128
         if capacity <= 0:
-            return None
+            raise CompactionError("capacity_exhausted")
         body = transcript(messages)
         digest = None
         offset = 0
@@ -71,7 +71,7 @@ class LlmCompactor(Compactor):
             while estimate_text(body[offset:end]) > capacity:
                 end = offset + (end - offset) // 2
             if end <= offset:
-                return None
+                raise CompactionError("chunk_capacity_exhausted")
             prefix = (digest["content"] + "\n\n") if digest else ""
             response = self._provider.complete(
                 LlmRequest(
@@ -85,10 +85,14 @@ class LlmCompactor(Compactor):
                 )
             )
             digest = _parse(response.content)
-            if digest is None or estimate([digest]) > budget:
-                return None
+            if digest is None:
+                raise CompactionError("invalid_output")
+            if estimate([digest]) > budget:
+                raise CompactionError("over_budget")
             offset = end
-        return [digest] if digest else None
+        if digest is None:
+            raise CompactionError("empty_output")
+        return [digest]
 
 
 def transcript(messages: Sequence[Mapping[str, Any]]) -> str:

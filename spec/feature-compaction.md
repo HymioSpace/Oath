@@ -83,6 +83,17 @@ Brain 先检查有效唤醒、active step 和预算状态。新的 step.input �
 - 90%：先应用可用 pending 并重算；仍超阈值时最多同步压缩一次，覆盖更多历史。
   同步调用在事务外；不循环压缩。
 
+异步任务、同步任务和其他 Worker 共用 per-user compaction lease，但任何模式都不等待
+另一个模式释放 lease。lease 被占用时立即放弃本次优化；请求仍低于硬窗口就继续执行，
+超过硬窗口则暂停。这样异步准备不会占住 Agent Worker，也不会把一个可选优化变成唤醒阻塞。
+异步产物成功后，由下一次 Brain 启动时原子应用。
+
+失败后按用户进入短暂冷却，冷却期间不重复压缩近似相同的历史。冷却只阻止重复模型调用，
+不阻止正常消息接纳或其他 Worker 调度。
+
+异步产物成功时，如果当前 active step 因 `context_window` 暂停，同一事务把它恢复为
+prepared，Session 随后主动唤醒该用户；其他情况保留下次 Brain 启动时应用 pending。
+
 阈值取 `(0,1]` 且同步高于异步；1.0 表示达到 100% 时触发，不是禁用开关。
 无法压缩、算法失败或摘要不更短时保留原视图。单条巨大输入、必须保留的尾段或 detail_read
 全文本身超过窗口时，这套历史压缩无法保证请求可发送，需调用方限制输入或另设分页读取能力。
@@ -114,8 +125,10 @@ LlmCompactor 对受模型容量约束的输入分段调用，将上一段摘要�
 - 输入已认领但请求未保存：恢复固定草稿，继续准备；不重新 drain。
 - 请求已保存：不重算摘要，不修改请求；模型响应已保存则只恢复后处理。
 - 压缩模型失败：保留视图，记录错误；主模型失败仍遵守有限重试。
+- 暂停：step 保留可恢复状态，同时关闭当前 `invoke_agent` span，不能留下永久运行态。
 
-压缩通过独立 compaction lease 跨进程互斥并续租。全文分页、精确 tokenizer、摘要质量评估和文件回收仍是后续工作。
+压缩通过独立 compaction lease 跨进程互斥并续租；获取使用一次非阻塞尝试。全文分页、
+精确 tokenizer、摘要质量评估和文件回收仍是后续工作。
 
 ## 7 对外事件
 
@@ -124,9 +137,14 @@ Coordinator 注入 AgentEventSink，通过现有 WebSocket 发 context.compactio
 算法 / 存储失败发 failed，无有效缩短或被新产物取代发 skipped。
 payload 包含 compression_id、status、mode、covers、reason，不含原文或异常正文。
 通知通过 DurableEventSink 写入持久 Outbox。产物保存 covers、mode、context_window、input_tokens、output_tokens 与生成时间。
+同步事件携带当前 step 的 `trace_id` 与 `step_id`；异步事件携带触发它的 step。
+终态事件另带 `duration_ms`。失败原因区分 `invalid_output`、`over_budget`、`not_reduced`、
+`provider_error`、`storage_error`、`lease_busy` 等，不能用同一个原因合并不同故障。
 
 ## 8 跨仓库影响
 
 Hymio 根据 detail_key 展示完整结果入口；不能假定长结果仍为 JSON 对象。
 Nostalgia 读取终态得到截断视图，全文需通过同 scope 的 DetailStore 读取。
 工具终态字段新增 detail_key / original_chars；历史摘要不改变工具真实终态。
+Hymio 管理台通过带服务凭据的 `/admin/compactions` 查询持久 Outbox 中的压缩与暂停记录；
+该接口跨用户但仍只返回可观测元数据，不依赖普通客户端在线，也不返回对话正文或摘要正文。

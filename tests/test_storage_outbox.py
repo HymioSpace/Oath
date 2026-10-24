@@ -217,6 +217,33 @@ def test_events_get_monotonic_seq_per_user(service: Storage) -> None:
     assert second == first + 1
 
 
+def test_compaction_events_are_readable_across_users_for_admin(service: Storage) -> None:
+    service.call(
+        "outbox.append",
+        user_id="u1",
+        type="context.compaction",
+        payload={"compression_id": "c1", "status": "started", "mode": "async"},
+        key="compaction:c1:started",
+    )
+    service.call(
+        "outbox.append",
+        user_id="u1",
+        type="assistant.message",
+        payload={"content": "not an admin compaction record"},
+        key="assistant",
+    )
+
+    events = service.call(
+        "compaction.events",
+        since="2000-01-01T00:00:00.000000Z",
+    )
+
+    assert len(events) == 1
+    assert events[0]["user_id"] == "u1"
+    assert events[0]["event_type"] == "context.compaction"
+    assert events[0]["payload"]["compression_id"] == "c1"
+
+
 def test_the_same_key_does_not_produce_two_events(service: Storage) -> None:
     """重连重发是常态。同一个幂等键换内容则是 bug，要显式报错而不是覆盖。"""
     first = service.call("outbox.append", user_id="u1", type="t", payload={"a": 1}, key="k1")

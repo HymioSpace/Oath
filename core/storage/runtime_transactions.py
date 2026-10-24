@@ -156,6 +156,7 @@ def project(db, user_id, before, after, changes):
                     "step_id": step_id,
                     "status": step["status"],
                     "error": step.get("error"),
+                    "reason": step.get("pause_reason"),
                     "trace_id": step["trace_id"],
                     "run_id": step["run_id"],
                 },

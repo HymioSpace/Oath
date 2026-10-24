@@ -15,6 +15,7 @@ from core.context.policy import effective_window
 from core.intake import IntakeCoordinator
 from core.journal.runtime_store import State
 from core.observability import LLM_DURATION, LLM_TOKENS, LLM_TTFT, STEP_DURATION
+from core.observability.metrics import COMPACTION_BLOCKED_STEPS, STEP_PAUSED
 from core.protocol.datatype import Message, ToolCallRequest, ToolDefinition, User
 from core.protocol.datatype.llm import LlmRequest, LlmResponse
 from core.protocol.datatype.message import MessageEvent, MessageEventType
@@ -128,6 +129,9 @@ class AgentBrain:
             system_prompt=prompt,
             fence=self._store.fence,
             context_window=window,
+            trace_id=step["trace_id"],
+            step_id=step["step_id"],
+            channel=step.get("channel", "unknown"),
         )
         if self._stop.is_set():
             return step
@@ -141,7 +145,8 @@ class AgentBrain:
                 if estimate(request["messages"]) + overhead > window:
                     current.update(
                         status="paused",
-                        error="上下文仍超过所选长度，请增大上下文长度或减少本次输入。",
+                        error="内容较多，我这次没整理完。请稍后重试，或把这条消息拆短一些。",
+                        pause_reason="context_window",
                     )
                     return cast(State, current)
                 current["context_usage"] = {
@@ -154,6 +159,8 @@ class AgentBrain:
 
         prepared = self._store.transact(user, "step.request", freeze)
         if prepared["status"] == "paused":
+            STEP_PAUSED.labels("context_window").inc()
+            COMPACTION_BLOCKED_STEPS.labels("sync").inc()
             self.emit(
                 user,
                 "step.status",
@@ -161,8 +168,10 @@ class AgentBrain:
                     "step_id": prepared["step_id"],
                     "status": "paused",
                     "error": prepared["error"],
+                    "reason": prepared.get("pause_reason", "context_window"),
                 },
             )
+            self._close_step(user, prepared, SpanStatus.UNSET, 0)
             return prepared
         # 压缩判定可能同步调一次模型，所以这个时刻之前的时间都算「模型之前」。
         self._stage(
@@ -345,7 +354,10 @@ class AgentBrain:
         输入事件在这里重读一遍，不靠认领时那份：后写的整条覆盖先写的，事件不补回来
         就等于从没写过。阶段节点与输入事件一起按时间排。
         """
-        start = int(step["trace_started"])
+        started = step.get("trace_started")
+        if not isinstance(started, int):
+            return
+        start = started
         end = time.time_ns()
         state = self._store.read(user)
         entries = state["inputs"]

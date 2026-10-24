@@ -39,7 +39,9 @@ the budget. Per-step selection and capacity are frozen outside provider request 
 
 40% asynchronously prepares a durable pending summary; 90% first applies pending and then,
 if necessary, synchronously compresses once. Both ratios remain configurable. Background work
-never changes an in-flight request. Raw history is retained; summary application changes only
+never changes an in-flight request or waits on a lease held by another compaction. A request
+below the hard window proceeds while asynchronous preparation runs; an in-flight asynchronous
+job never occupies an Agent Worker waiting for the same user lease. Raw history is retained; summary application changes only
 the model view. An oversized retained tail causes an explicit bounded-input error rather than
 an oversized provider call or silent deletion of recent inputs.
 
