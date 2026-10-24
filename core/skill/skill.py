@@ -49,6 +49,9 @@ def read(path: Path) -> Skill:
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise SkillError(f"{path} 的 priority 必须是整数")
     raw_channels = loaded.get("channels")
+    metadata = loaded.get("metadata")
+    if raw_channels is None and isinstance(metadata, dict):
+        raw_channels = metadata.get("channels")
     if raw_channels is not None and (
         not isinstance(raw_channels, list)
         or any(not isinstance(channel, str) or not 0 < len(channel) <= 32 for channel in raw_channels)

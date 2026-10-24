@@ -49,7 +49,8 @@ def test_skill_index_search_and_read_follow_the_same_channel_scope(tmp_path):
         "---\n"
         "name: ios-only\n"
         "description: create a mobile application\n"
-        "channels: [ios]\n"
+        "metadata:\n"
+        "  channels: [ios]\n"
         "---\n"
         "Only on iOS.\n"
     )

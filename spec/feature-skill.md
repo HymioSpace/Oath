@@ -44,7 +44,7 @@ priority: 10
 ```
 
 `name` 和 `description` 必填 —— 没有它们，索引里就没有这个技能。`priority` 可选，
-默认 0；`channels` 可选，用于声明只向哪些客户端渠道暴露。缺 `---` 围栏、frontmatter
+默认 0；`metadata.channels` 可选，用于声明只向哪些客户端渠道暴露。缺 `---` 围栏、frontmatter
 不是映射、字段类型不对，都只丢这一个文件并记一条
 warning：坏技能不能拖垮启动。同一目录下的其他文件属于技能自身的资源，本机制不读它们。
 
