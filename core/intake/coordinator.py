@@ -10,6 +10,7 @@ from typing import Protocol, cast
 
 from core.consumer import input_key
 from core.context.intake import build_messages
+from core.context.policy import CONTEXT_WINDOWS, effective_window
 from core.journal.runtime_store import State
 from core.observability import BUFFER_WAKE_DELAY
 from core.protocol.datatype import User
@@ -167,6 +168,17 @@ class IntakeCoordinator:
             if selected_model not in allowed:
                 selected_model = config.provider.model
             state["meta"]["selected_model"] = selected_model
+            selected_window = state["meta"].get("selected_context_window", config.context_window)
+            for _, entry in entries:
+                candidate = entry["item"]["payload"].get("context_window")
+                if (
+                    entry["queue"] == QueueName.USER
+                    and type(candidate) is int
+                    and candidate in CONTEXT_WINDOWS
+                ):
+                    selected_window = candidate
+            state["meta"]["selected_context_window"] = selected_window
+            window = effective_window(selected_window, selected_model, config.model_context_windows)
             messages = build_messages(state, entries, step_id)
             system = self.executor.system_prompt()
             if user.agent_id:
@@ -203,6 +215,7 @@ class IntakeCoordinator:
                 "error": "run 预算已用尽，请显式继续" if run_exhausted else None,
                 "response": None,
                 "request": None,
+                "context_window": window,
                 "request_draft": {
                     "messages": request_messages,
                     "tools": definitions,

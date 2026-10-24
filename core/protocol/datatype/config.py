@@ -50,7 +50,8 @@ class AgentConfig:
     temperature: float | None = None
 
     #: 上下文窗口的 token 数。用来判断该不该压缩。
-    context_window: int = 128_000
+    context_window: int = 256_000
+    model_context_windows: dict[str, int] = field(default_factory=dict)
     #: 单条工具结果超过这个字符数就保头留尾，全文存进 detail store。
     tool_result_detail_chars: int = 4000
     #: 用量到窗口的这个比例就在后台备一份压缩产物，不生效。
@@ -112,6 +113,9 @@ class AgentConfig:
             raise ValueError("model_providers requires named, configured providers")
         if self.provider.model in self.model_providers:
             raise ValueError("model_providers must not replace the default provider")
+        from core.context.policy import validate_windows
+
+        validate_windows(self.model_context_windows)
         if not isinstance(self.builtin_bash, bool):
             raise ValueError("builtin_bash must be boolean")
         for name in (

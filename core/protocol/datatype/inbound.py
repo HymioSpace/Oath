@@ -85,6 +85,11 @@ def of_command(command: Command) -> Inbound | None:
                 "message_id": command.id,
                 "user_context": dict(context) if isinstance(context, dict) else {},
                 **({"model": command.payload["model"]} if "model" in command.payload else {}),
+                **{
+                    key: command.payload[key]
+                    for key in ("context_window", "dynamic")
+                    if key in command.payload
+                },
             },
             source_id=command.id,
             occur_dt=utc_now_iso(),

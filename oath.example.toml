@@ -23,6 +23,11 @@ rabbitmq_password = ""
 broker_url = ""
 
 [agent]
+context_window = 256000
+compress_async_at_ratio = 0.4
+compress_sync_at_ratio = 0.9
+# Optional confirmed deployment capacities (tokens); unknown models use 128000.
+# model_context_windows = { "private-model" = 256000 }
 # Optional model IDs using this same provider endpoint and credential.
 selectable_models = []
 system_prompt = """

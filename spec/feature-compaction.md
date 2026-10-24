@@ -1,6 +1,6 @@
 # Feature — Compaction：工具结果截断与历史压缩
 
-状态：历史设计（模块思路保留；当前部署、身份与存储以 [分布式 Agent 设计](feature-distributed-personal-agent.md) 为准）。
+状态：Implemented。当前事件与用户窗口设置见 [Event context and window policy](feature-context-events-window.md)。
 
 ## 总览
 
@@ -75,7 +75,8 @@ Brain 先检查有效唤醒、active step 和预算状态。新的 step.input �
 已保存模型响应的 step 只补后处理，不运行压缩。
 
 占用估算包括当前历史视图、本轮输入、system prompt、工具定义和 max_output_tokens。
-字符启发式计量不是 provider 的精确 tokenizer，阈值不承诺请求绝对不超限。
+字符启发式计量包括保留的 reasoning 与消息封装开销，不是 provider 的精确 tokenizer。
+最终请求估算仍超窗口时明确暂停，不静默删除近期输入。
 
 - 40%：同 scope 至多一个异步压缩任务。可用 pending 存在时不重复准备。
   任务只保存 pending，不修改当前请求。
@@ -93,7 +94,7 @@ Compactor.compress(messages, *, budget_tokens) -> list[dict] | None
 ```
 
 算法只生成替代消息，不决定阈值、切点、生效或持久化。返回 None 表示无法压缩。
-LlmCompactor 使用一次模型调用，输出 XML：
+LlmCompactor 对受模型容量约束的输入分段调用，将上一段摘要传给下一段，输出 XML：
 
 ```xml
 <context_digest>
@@ -114,7 +115,7 @@ LlmCompactor 使用一次模型调用，输出 XML：
 - 请求已保存：不重算摘要，不修改请求；模型响应已保存则只恢复后处理。
 - 压缩模型失败：保留视图，记录错误；主模型失败仍遵守有限重试。
 
-当前是单进程互斥。跨进程 owner、全文分页、精确 tokenizer、摘要质量评估和文件回收另行实现。
+压缩通过独立 compaction lease 跨进程互斥并续租。全文分页、精确 tokenizer、摘要质量评估和文件回收仍是后续工作。
 
 ## 7 对外事件
 
@@ -122,7 +123,7 @@ Coordinator 注入 AgentEventSink，通过现有 WebSocket 发 context.compactio
 实际开始算法前发 started；产物提交后发 ready（异步）或 applied（同步 / 应用 pending）。
 算法 / 存储失败发 failed，无有效缩短或被新产物取代发 skipped。
 payload 包含 compression_id、status、mode、covers、reason，不含原文或异常正文。
-在线通知不承诺重放，session.status.compaction 提供已保存产物的元数据。
+通知通过 DurableEventSink 写入持久 Outbox。产物保存 covers、mode、context_window、input_tokens、output_tokens 与生成时间。
 
 ## 8 跨仓库影响
 

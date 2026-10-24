@@ -122,8 +122,7 @@ def build_payload(request: LlmRequest, model: str, *, stream: bool = False) -> J
     合并顺序（后者覆盖前者）：provider 透传参数 → 请求自带参数 → 调用点显式给的
     两个（model / max_tokens / temperature）。显式给的赢 —— 那是最具体的一次决定。
 
-    `stream` 放在 `extra_params` **之前**：provider 透传参数里写 `stream = true` 不应该
-    把调用点的选择顶掉 —— 要流式是调用点的决定。
+    `stream`、model 与 max_tokens 由冻结请求决定，不允许透传参数覆盖预算或路由。
     """
     payload: JsonObject = {
         "model": model or request.model,
@@ -136,6 +135,14 @@ def build_payload(request: LlmRequest, model: str, *, stream: bool = False) -> J
     if tools is not None:
         payload["tools"] = tools
     payload.update(request.extra_params)
+    payload["model"] = model or request.model
+    payload["max_tokens"] = request.max_output_tokens
+    payload["messages"] = [to_wire_message(m) for m in request.messages]
+    payload.pop("tools", None)
+    if tools is not None:
+        payload["tools"] = tools
+    if request.temperature is not None:
+        payload["temperature"] = request.temperature
     payload["stream"] = stream
     return payload
 

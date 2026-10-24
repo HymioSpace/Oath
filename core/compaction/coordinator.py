@@ -54,7 +54,13 @@ class CompactionCoordinator:
         return compacted(messages, state)
 
     def prepare(
-        self, user: User, *, overhead: int = 0, system_prompt: str | None = None, fence=None
+        self,
+        user: User,
+        *,
+        overhead: int = 0,
+        system_prompt: str | None = None,
+        fence=None,
+        context_window: int | None = None,
     ) -> None:
         """固定请求之前调整 context。到同步阈值就生效，到异步阈值就备一份。
 
@@ -62,21 +68,24 @@ class CompactionCoordinator:
         """
         if self._stop.is_set():
             return
+        window = context_window or self._config.context_window
         try:
             messages, state = self._history(user)
             used = self._usage(messages, state, system_prompt) + overhead
-            if used >= self._sync_limit():
+            if used >= self._sync_limit(window):
                 with self._store.fenced(fence):
                     self._apply_pending(user)
                 messages, state = self._history(user)
-                if self._usage(messages, state, system_prompt) + overhead >= self._sync_limit():
-                    self._compress(user, applied=True)
+                if self._usage(messages, state, system_prompt) + overhead >= self._sync_limit(
+                    window
+                ):
+                    self._compress(user, applied=True, context_window=window)
                     with self._store.fenced(fence):
                         self._apply_pending(user)
                 messages, state = self._history(user)
                 used = self._usage(messages, state, system_prompt) + overhead
-            if used >= self._async_limit() and self._reserve(user, messages, state):
-                self._pool.submit(self._background, user)
+            if used >= self._async_limit(window) and self._reserve(user, messages, state):
+                self._pool.submit(self._background, user, window)
         except Exception:
             _log.exception("上下文压缩判定失败，保留原历史")
 
@@ -98,11 +107,11 @@ class CompactionCoordinator:
             view = [{"role": "system", "content": prompt}, *view]
         return estimate(view)
 
-    def _async_limit(self) -> float:
-        return self._config.context_window * self._config.compress_async_at_ratio
+    def _async_limit(self, window) -> float:
+        return window * self._config.compress_async_at_ratio
 
-    def _sync_limit(self) -> float:
-        return self._config.context_window * self._config.compress_sync_at_ratio
+    def _sync_limit(self, window) -> float:
+        return window * self._config.compress_sync_at_ratio
 
     def _reserve(self, user: User, messages: list[State], state: State) -> bool:
         """登记一个在跑的异步压缩。同一个 user 一次只有一个。
@@ -124,9 +133,9 @@ class CompactionCoordinator:
             self._inflight.add(user)
         return True
 
-    def _background(self, user: User) -> None:
+    def _background(self, user: User, window: int) -> None:
         try:
-            self._compress(user, applied=False)
+            self._compress(user, applied=False, context_window=window)
         except Exception:
             # 备产物失败只是这次没有产物；不能让线程把异常抛到顶上。
             _log.exception("异步压缩失败，保留原历史")
@@ -150,10 +159,21 @@ class CompactionCoordinator:
         applied = self._store.transact(user, "context.compression_applied", apply)
         if applied:
             saved = self._store.read(user)["compactions"][APPLIED]
-            self._emit(user, saved.get("compression_id", ""), "applied", "pending", saved["covers"])
+            self._emit(
+                user,
+                saved.get("compression_id", ""),
+                "applied",
+                "pending",
+                saved["covers"],
+                metrics={
+                    k: saved[k]
+                    for k in ("input_tokens", "output_tokens", "context_window")
+                    if k in saved
+                },
+            )
         return applied
 
-    def _compress(self, user: User, *, applied: bool) -> None:
+    def _compress(self, user: User, *, applied: bool, context_window: int) -> None:
         # Independent of the Brain lease: a prepared summary survives the current step.
         deadline = time.monotonic() + self._config.provider.timeout_seconds + self._lease_seconds
         owner = uuid.uuid4().hex
@@ -177,19 +197,24 @@ class CompactionCoordinator:
                 renewed(self._store.storage, fence, self._lease_seconds),
                 self._store.fenced(fence),
             ):
-                self._compress_owned(user, applied=applied)
+                self._compress_owned(user, applied=applied, context_window=context_window)
         finally:
             try:
                 self._store.storage.call("lease.release", user_id=user.storage_id, fence=fence)
             except Exception:
                 _log.warning("Compaction lease released by expiry")
 
-    def _compress_owned(self, user: User, *, applied: bool) -> None:
+    def _compress_owned(self, user: User, *, applied: bool, context_window: int) -> None:
         messages, snapshot = self._history(user)
         cut = cut_index(messages, self._config.compress_keep_recent)
         if cut is None:
             return
         current = usable_artifact(snapshot, APPLIED, messages)
+        pending = usable_artifact(snapshot, PENDING, messages)
+        if applied and pending is not None and pending[1] >= cut:
+            # An async producer may have finished while sync waited for its lease.
+            # The caller applies that durable artifact after releasing this lease.
+            return
         covered = current[1] if current else 0
         if cut <= covered:
             return
@@ -207,7 +232,11 @@ class CompactionCoordinator:
             _log.exception("压缩算法失败，保留原历史")
             self._emit(user, identity, "failed", mode, cut, "algorithm_error")
             return
-        if not replacement or estimate(replacement) >= estimate(segment):
+        if (
+            not replacement
+            or estimate(replacement) > budget
+            or estimate(replacement) >= estimate(segment)
+        ):
             self._emit(user, identity, "skipped", mode, cut, "no_smaller_summary")
             return
         if self._stop.is_set():
@@ -223,6 +252,10 @@ class CompactionCoordinator:
                 "messages": replacement,
                 "created_dt": utc_now_iso(),
                 "compression_id": identity,
+                "mode": mode,
+                "context_window": context_window,
+                "input_tokens": estimate(segment),
+                "output_tokens": estimate(replacement),
             }
             return True
 
@@ -232,7 +265,18 @@ class CompactionCoordinator:
             self._emit(user, identity, "failed", mode, cut, "storage_error")
             raise
         status = "ready" if saved else "skipped"
-        self._emit(user, identity, status, mode, cut)
+        self._emit(
+            user,
+            identity,
+            status,
+            mode,
+            cut,
+            metrics={
+                "input_tokens": estimate(segment),
+                "output_tokens": estimate(replacement),
+                "context_window": context_window,
+            },
+        )
 
     def _emit(
         self,
@@ -242,6 +286,7 @@ class CompactionCoordinator:
         mode: str,
         covers: int,
         reason: str | None = None,
+        metrics: dict | None = None,
     ) -> None:
         if self._sink is None or self._stop.is_set():
             return
@@ -256,6 +301,7 @@ class CompactionCoordinator:
                         "mode": mode,
                         "covers": covers,
                         "reason": reason,
+                        **(metrics or {}),
                     },
                     idempotency_key=f"compaction:{identity}:{status}",
                     occur_dt=utc_now_iso(),
