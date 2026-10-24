@@ -244,6 +244,12 @@ def test_compaction_events_are_readable_across_users_for_admin(service: Storage)
     assert events[0]["payload"]["compression_id"] == "c1"
 
 
+def test_compaction_event_query_is_exposed_over_storage_rpc() -> None:
+    from bootstrap.storage.process import OPERATIONS
+
+    assert "compaction.events" in OPERATIONS
+
+
 def test_the_same_key_does_not_produce_two_events(service: Storage) -> None:
     """重连重发是常态。同一个幂等键换内容则是 bug，要显式报错而不是覆盖。"""
     first = service.call("outbox.append", user_id="u1", type="t", payload={"a": 1}, key="k1")

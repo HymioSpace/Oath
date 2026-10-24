@@ -33,6 +33,7 @@ OPERATIONS = {
     "supervisor.tick",
     "outbox.append",
     "outbox.read",
+    "compaction.events",
     "history.page",
     "client.attach",
     "client.ack",
