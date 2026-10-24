@@ -30,7 +30,7 @@ flowchart LR
 
 | queue | 输入 | consumer |
 | --- | --- | --- |
-| user | user.message | 进 buffer 即 wake；附带同步 user_context |
+| user | user.message | 普通输入进 buffer 即 wake；`defer_wake` 输入随下一轮认领；可附带 user_context |
 | tool | tool.terminal | 进 buffer；按 initial_submitted / presented / 固定 deadline 决定是否 wake |
 | system | permission.decide、permission.expire、run.cancel、step.retry | 进 buffer，先执行控制动作 |
 | system | system.invoke | **不进 buffer**，只强制 wake |

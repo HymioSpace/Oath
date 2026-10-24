@@ -250,6 +250,8 @@ class ThreadedToolSystem(ToolSystem):
                 raise ValueError("工具未注册")
             if user.agent_id and not registered.tool.allow_subagent:
                 raise ValueError("Tool is unavailable to delegated executions")
+            if not user.agent_id and registered.tool.subagent_only:
+                raise ValueError("Tool is only available to delegated executions")
             channel = call.get("channel", "unknown")
             if (
                 registered.tool.expose_channels is not None

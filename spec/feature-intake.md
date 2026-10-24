@@ -95,11 +95,16 @@ consumer 在 Brain 调模型期间继续工作；不持锁调用 Brain 或执行
 
 | consumer | 接收动作 | 默认唤醒规则 |
 | --- | --- | --- |
-| UserConsumer | buffer 用户输入，附带同步 user_context | 有新有效输入即 wake |
+| UserConsumer | buffer 用户输入，附带同步 user_context | 有新有效输入且不 deferred 时 wake |
 | ToolConsumer | buffer 真实终态，查询本批状态 | 按第 4 节 |
 | SystemConsumer | 应用控制决定后再 buffer 已应用事件；`system.invoke` **不进 buffer** | 批准本身不 wake |
 
 三个 consumer 是三条队列各一个线程。`system.invoke` 只置强制唤醒标记，不是模型输入。
+
+`telemetry.defer_wake=true` 的 user-queue 输入仍持久进入 buffer，但不请求 wake。它由后续
+普通用户输入、工具结果或 system 触发的那次认领顺带带走；若没有其他输入就保留在原处。
+这用于应用页面交互等背景事实，避免每次点击都启动一轮模型。deferred 输入不构成新 intent，
+也不应让先到的工具结果被判为被新用户意图替代。
 
 SystemConsumer 先应用控制动作再让该消息进入 buffer，防止 Brain 收到尚未生效的批准。
 批准：原子记录裁定与执行意图，异步提交原调用。拒绝 / 过期：记录未执行终态，投递 tool 队列。

@@ -85,6 +85,8 @@ class ToolRegistry:
         definition = tool.definition
         if not isinstance(tool.allow_subagent, bool):
             raise ToolRegistrationError("allow_subagent must be boolean")
+        if not isinstance(tool.subagent_only, bool):
+            raise ToolRegistrationError("subagent_only must be boolean")
         if tool.expose_channels is not None and (
             not isinstance(tool.expose_channels, frozenset)
             or any(
@@ -133,6 +135,7 @@ class ToolRegistry:
             entry.definition
             for entry in entries
             if (not delegated or entry.tool.allow_subagent)
+            and (delegated or not entry.tool.subagent_only)
             and (
                 channel is None
                 or entry.tool.expose_channels is None

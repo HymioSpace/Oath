@@ -73,6 +73,7 @@ def mutate(db, uid, data):
                 "kind": "user",
                 "source": "app.message.reaction",
                 "source_id": key,
+                "telemetry": {"defer_wake": True},
                 "payload": {
                     **payload,
                     "content": "Message reaction feedback (not a new task): "

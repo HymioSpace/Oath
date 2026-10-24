@@ -28,6 +28,8 @@ class Tool(ABC):
     """
 
     allow_subagent: bool = True
+    #: Expose only inside an independent delegated context.
+    subagent_only: bool = False
     #: `None` exposes the tool on every channel. A set limits provider exposure and
     #: execution to those client channels.
     expose_channels: frozenset[str] | None = None

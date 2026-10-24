@@ -32,6 +32,7 @@ ToolRegistry 校验定义与 timeout，definitions 按名称排序并按当前�
 ```python
 definition: ToolDefinition
 expose_channels: frozenset[str] | None   # None = all channels
+subagent_only: bool                      # hidden from main-Agent definitions/admission
 execute(invocation: ToolInvocation) -> ToolResult
 ```
 

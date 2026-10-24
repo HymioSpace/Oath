@@ -32,10 +32,20 @@ def get(db, user_id, agent_id):
             (agent_id,),
         )
     ]
+    value["turns"] = [
+        dict(turn)
+        for turn in db.execute(
+            "SELECT turn_id,content,success_criteria,created_at FROM subagent_turns "
+            "WHERE agent_id=? ORDER BY created_at",
+            (agent_id,),
+        )
+    ]
     return value
 
 
 def notify(db, row, type_, payload, key):
+    if not row["notify_parent"]:
+        return
     from core.storage.runtime_transactions import enqueue
 
     enqueue(
@@ -80,12 +90,19 @@ def finish(db, row, status, result):
         )
     db.execute("DELETE FROM inbox_events WHERE user_id=?", (row["storage_id"],))
     db.execute("UPDATE scheduling SET completed=requested WHERE user_id=?", (row["storage_id"],))
+    turn = db.execute(
+        "SELECT turn_id FROM subagent_turns WHERE agent_id=? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (row["agent_id"],),
+    ).fetchone()
+    turn_id = turn["turn_id"] if turn else ""
+    suffix = ":" + turn_id if turn_id else ""
     notify(
         db,
         row,
         "subagent.completed",
-        {"status": status, "result": result[:16000]},
-        "subagent:" + row["agent_id"] + ":completed",
+        {"status": status, "result": result[:16000], "turn_id": turn_id},
+        "subagent:" + row["agent_id"] + ":completed" + suffix,
     )
 
 
@@ -104,6 +121,8 @@ def spawn(db, owner, p):
         result = get(db, owner, known[0])
         if any(result[k] != p[k] for k in ("title", "objective", "success_criteria")):
             raise ValueError("Delegation idempotency conflict")
+        if result["notify_parent"] != p.get("notify_parent", True):
+            raise ValueError("Delegation idempotency conflict")
         return result
     if (
         db.execute(
@@ -116,12 +135,18 @@ def spawn(db, owner, p):
     if not 1 <= max_steps <= 100 or not 10 <= timeout <= 3600:
         raise ValueError("max_steps must be 1..100; timeout_seconds must be 10..3600")
     agent_id = uuid.uuid4().hex
+    notify_parent = p.get("notify_parent", True)
+    if not isinstance(notify_parent, bool):
+        raise ValueError("notify_parent must be boolean")
+    defer_start = p.get("defer_start", False)
+    if not isinstance(defer_start, bool):
+        raise ValueError("defer_start must be boolean")
     target = User(owner, agent_id).storage_id
     now = time.time()
     db.execute(
         "INSERT INTO subagents(agent_id,user_id,storage_id,request_id,title,objective,"
-        "success_criteria,model,status,max_steps,deadline,created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+        "success_criteria,model,status,max_steps,deadline,created_at,notify_parent) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             agent_id,
             owner,
@@ -131,10 +156,11 @@ def spawn(db, owner, p):
             p["objective"],
             p["success_criteria"],
             p.get("model", ""),
-            "running",
+            "waiting" if defer_start else "running",
             max_steps,
             now + timeout,
             now,
+            notify_parent,
         ),
     )
     Database.ensure(db, target)
@@ -146,28 +172,114 @@ def spawn(db, owner, p):
     )
     if "user_context" in parent["meta"]:
         state["meta"]["user_context"] = parent["meta"]["user_context"]
+    if parent["meta"].get("client_channel"):
+        state["meta"]["client_channel"] = parent["meta"]["client_channel"]
     model = p.get("model") or parent["meta"].get("selected_model", "")
     if model:
         state["meta"]["selected_model"] = model
         db.execute("UPDATE subagents SET model=? WHERE agent_id=?", (model, agent_id))
     db.execute("UPDATE users SET state_json=? WHERE user_id=?", (encode(state), target))
-    item = Inbound(
-        "tool",
-        "subagent.start",
-        {
-            "content": "Delegated objective: "
-            + p["objective"]
-            + "\nSuccess criteria: "
-            + p["success_criteria"]
-        },
-        "subagent:" + agent_id + ":start",
+    if not defer_start:
+        item = Inbound(
+            "tool",
+            "subagent.start",
+            {
+                "content": "Delegated objective: "
+                + p["objective"]
+                + "\nSuccess criteria: "
+                + p["success_criteria"]
+            },
+            "subagent:" + agent_id + ":start",
+        )
+        db.execute(
+            "INSERT INTO inbox_events(user_id,kind,identity,item_json) VALUES(?,?,?,?)",
+            (target, "tool", item.identity, encode(item.to_dict())),
+        )
+        scheduling.wake(db, target)
+    return get(db, owner, agent_id)
+
+
+def resume(db, uid, p):
+    agent_id = p.get("agent_id")
+    turn_id = p.get("message_id")
+    content = p.get("content")
+    success_criteria = p.get("success_criteria", "")
+    if (
+        not isinstance(agent_id, str)
+        or not agent_id
+        or not isinstance(turn_id, str)
+        or not turn_id
+        or len(turn_id) > 256
+        or not isinstance(content, str)
+        or not content.strip()
+        or len(content) > 20000
+        or not isinstance(success_criteria, str)
+        or len(success_criteria) > 20000
+    ):
+        raise ValueError("agent_id, message_id and bounded content are required")
+    row = db.execute(
+        "SELECT * FROM subagents WHERE user_id=? AND agent_id=?", (uid, agent_id)
+    ).fetchone()
+    if not row:
+        raise ValueError("Subagent not found")
+    if row["status"] == "cancelled":
+        raise ValueError("Cancelled subagent context cannot be resumed")
+    if row["status"] != "running" and (
+        db.execute(
+            "SELECT COUNT(*) FROM subagents WHERE user_id=? AND status='running'",
+            (uid,),
+        ).fetchone()[0]
+        >= 8
+    ):
+        raise ValueError("At most eight active subagents per user")
+    known = db.execute(
+        "SELECT content,success_criteria FROM subagent_turns "
+        "WHERE agent_id=? AND turn_id=?",
+        (agent_id, turn_id),
+    ).fetchone()
+    if known:
+        if known["content"] != content or known["success_criteria"] != success_criteria:
+            raise ValueError("Subagent turn idempotency conflict")
+        return get(db, uid, agent_id)
+    timeout = int(p.get("timeout_seconds", 900))
+    max_steps = int(p.get("max_steps", row["max_steps"]))
+    if not 10 <= timeout <= 3600 or not 1 <= max_steps <= 100:
+        raise ValueError("Invalid subagent continuation bounds")
+    now = time.time()
+    notify_parent = p.get("notify_parent", bool(row["notify_parent"]))
+    if not isinstance(notify_parent, bool):
+        raise ValueError("notify_parent must be boolean")
+    db.execute(
+        "UPDATE subagents SET status='running',result='',finished_at=NULL,"
+        "max_steps=?,deadline=?,notify_parent=? WHERE agent_id=?",
+        (max_steps, now + timeout, notify_parent, agent_id),
     )
     db.execute(
-        "INSERT INTO inbox_events(user_id,kind,identity,item_json) VALUES(?,?,?,?)",
-        (target, "tool", item.identity, encode(item.to_dict())),
+        "INSERT INTO subagent_turns(agent_id,turn_id,content,success_criteria,created_at) "
+        "VALUES(?,?,?,?,?)",
+        (agent_id, turn_id, content, success_criteria, now),
     )
-    scheduling.wake(db, target)
-    return get(db, owner, agent_id)
+    item = Inbound(
+        "user",
+        "subagent.message",
+        {
+            "content": content,
+            "success_criteria": success_criteria,
+            "dynamic": {"success_criteria": success_criteria},
+        },
+        agent_id + ":" + turn_id,
+    )
+    db.execute(
+        "INSERT OR IGNORE INTO inbox_events(user_id,kind,identity,item_json) "
+        "VALUES(?,?,?,?)",
+        (row["storage_id"], "user", item.identity, encode(item.to_dict())),
+    )
+    db.execute(
+        "UPDATE leases SET expires=0 WHERE user_id=? AND lane='brain'",
+        (row["storage_id"],),
+    )
+    scheduling.wake(db, row["storage_id"])
+    return get(db, uid, agent_id)
 
 
 def call(db, uid, operation, p):
@@ -210,6 +322,8 @@ def call(db, uid, operation, p):
         raise ValueError("Subagents cannot manage delegated executions")
     if operation == "subagent.spawn":
         return spawn(db, uid, p)
+    if operation == "subagent.continue":
+        return resume(db, uid, p)
     if operation == "subagent.list":
         return [
             get(db, uid, r[0])

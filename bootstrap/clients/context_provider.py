@@ -17,6 +17,7 @@ def provider(config):
                 data=json.dumps(
                     {
                         "user_id": user.user_id,
+                        "agent_id": user.agent_id,
                         "channel": (
                             channel
                             if isinstance(channel, str) and 0 < len(channel) <= 32

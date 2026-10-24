@@ -141,8 +141,19 @@ class StorageService:
                 scheduling.check(db, uid, fence, required=True)
                 item = Inbound.from_dict(p["item"])
                 child = subagents.lookup(db, uid)
-                if child and (item.kind != "tool" or child["status"] != "running"):
-                    return None
+                if child:
+                    allowed_child_input = (
+                        child["status"] == "running"
+                        and (
+                            item.kind == "tool"
+                            or (
+                                item.kind == "user"
+                                and item.source == "subagent.message"
+                            )
+                        )
+                    )
+                    if not allowed_child_input:
+                        return None
                 # Already claimed messages cannot re-enter the inbox on redelivery.
                 state = json.loads(
                     db.execute("SELECT state_json FROM users WHERE user_id=?", (uid,)).fetchone()[0]
@@ -153,7 +164,7 @@ class StorageService:
                         "VALUES(?,?,?,?)",
                         (uid, item.kind, item.identity, encode(p["item"])),
                     ).rowcount
-                    if inserted and item.kind == "user":
+                    if inserted and item.kind == "user" and item.wakes:
                         scheduling.wake(db, uid)
                 return None
             if operation == "buffer.peek":

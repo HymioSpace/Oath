@@ -24,7 +24,7 @@ _log = logging.getLogger(__name__)
 
 
 def new_intent(queue, item):
-    return (queue == QueueName.USER and item.source != "app.message.reaction") or (
+    return (queue == QueueName.USER and item.wakes) or (
         queue == QueueName.SYSTEM and item.source.startswith("app.")
     )
 
@@ -133,7 +133,7 @@ class IntakeCoordinator:
             step_id = uuid.uuid4().hex
             new_user = any(
                 entry["queue"] == QueueName.USER
-                and entry["item"]["source"] != "app.message.reaction"
+                and Inbound.from_dict(entry["item"]).wakes
                 for _, entry in entries
             )
             new_run = (
@@ -197,9 +197,11 @@ class IntakeCoordinator:
                 system += (
                     "\n\n## Delegated execution\nYou are a bounded subagent with an "
                     "independent context. "
-                    "Work only on the delegated objective and success criteria. You "
+                    "Work only on the delegated objective and success criteria. New bounded "
+                    "work messages from your owner may continue this context. You "
                     "cannot delegate or manage tasks. "
-                    "Only tool results can continue this execution. Use "
+                    "Tool results continue the current turn; owner work messages arrive only as "
+                    "new bounded turns. Use "
                     "subagent_notify for significant findings. "
                     "When complete or blocked, issue a final response without tools "
                     "describing results and limitations; "

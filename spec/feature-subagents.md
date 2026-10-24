@@ -6,6 +6,10 @@ Status: Implemented
 
 A personal agent can delegate a bounded assignment without blocking its own conversation. A child has an independent context, journal, tool batches and execution lease, owned by the same user. Children cannot delegate again. Completion and intermediate findings are durable events sent to the parent.
 
+For durable application editors, a delegated context may receive later bounded work turns. Its
+journal, conversation and assigned tools persist; each turn still has its own deadline, step budget
+and terminal result. This is continuation of one agent context, not a new parent session.
+
 ```mermaid
 flowchart LR
   Parent -->|subagent_spawn| Storage
@@ -20,7 +24,11 @@ flowchart LR
 
 `user_id` remains the account/authorization identity. Optional `agent_id` selects a delegated execution. The storage partition is internal and cannot be supplied by business clients as a user ID. Public APIs always authenticate the owner. Tools receive the real owner plus the optional agent ID; the worker pool and tool engine are reused, without permanent child threads.
 
-Only tool results can enter a child's queue after initial admission. User/system events, periodic invoke and permission controls are never routed to it. A child starts with a copied assignment and explicit success criteria, not the parent's conversation. User-context KV may be copied as a point-in-time snapshot for authorized application tools.
+Tool results continue a running child turn. Explicit owner work messages may start another
+bounded turn through `continue`; arbitrary user/system events, periodic invoke and permission
+controls are never routed to it. A child starts with a copied assignment and explicit success
+criteria, not the parent's conversation. User-context KV may be copied as a point-in-time snapshot
+for authorized application tools.
 
 ## Boundaries
 
@@ -51,8 +59,16 @@ Cancellation marks the run durably so queued tools cannot start; an already runn
 agent_id/title/status/result. These are semantic system inputs to the parent. `subagent.status`
 is the corresponding client event. Parent notification and terminal state are committed together.
 
-`POST /events` admits application semantic events into the authenticated owner's system queue.
-It requires event_id, a type under `app.*`, and an object payload. It cannot issue runtime controls.
+`POST /subagents/continue` appends an owner-supplied message with a stable `message_id` to an
+existing non-cancelled context and wakes it for another bounded turn. The context keeps its earlier
+journal and tools. Calls are idempotent by `(agent_id,message_id)`. A context may set
+`notify_parent=false`; its progress and terminal events remain queryable through `get` but do not
+enter the parent queue. This is used by private application editors, whose UI owns the conversation.
+
+`POST /events` admits application semantic events into the authenticated owner's `system` or
+`user` queue. It requires event_id, a type under `app.*`, and an object payload. `defer_wake=true`
+is accepted only as wake policy: a user-queue event remains buffered and joins the next natural
+step instead of waking the model. It cannot issue runtime controls.
 Applications can schedule work without storing a user's login credential; the configured external
 identity provider may issue its own short-lived service credentials through the ordinary auth contract.
 
@@ -63,6 +79,10 @@ Application extensions always receive the real owner user_id and optional agent_
 Extensions can declare `Tool.allow_subagent = False`. The registry filters child definitions and
 the tool admission path rejects the same tools even when a model fabricates their names.
 Application-specific tool names are not encoded in Oath core.
+
+Extensions can also declare `Tool.subagent_only = True`. Such tools are absent from main-Agent
+definitions and rejected at admission. This keeps source/build tools inside delegated coding
+contexts without encoding an application tool name in core.
 
 A final response without new calls terminates only after every earlier tool result has entered
 the child's context. A batch-timeout reminder does not end a child that is still waiting for

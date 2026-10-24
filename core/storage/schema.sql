@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS subagents (
  title TEXT NOT NULL, objective TEXT NOT NULL, success_criteria TEXT NOT NULL,
  model TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL DEFAULT '',
  max_steps INTEGER NOT NULL, deadline REAL NOT NULL, created_at REAL NOT NULL,
- finished_at REAL, UNIQUE(user_id,request_id)
+ finished_at REAL, notify_parent INTEGER NOT NULL DEFAULT 1, UNIQUE(user_id,request_id)
 );
 CREATE INDEX IF NOT EXISTS subagents_owner ON subagents(user_id,created_at);
 CREATE INDEX IF NOT EXISTS subagents_deadline ON subagents(status,deadline);
@@ -122,4 +122,9 @@ CREATE TABLE IF NOT EXISTS message_reactions (
 CREATE TABLE IF NOT EXISTS subagent_notes (
  agent_id TEXT NOT NULL REFERENCES subagents(agent_id), note_id TEXT NOT NULL,
  content TEXT NOT NULL, created_at REAL NOT NULL, PRIMARY KEY(agent_id,note_id)
+);
+CREATE TABLE IF NOT EXISTS subagent_turns (
+ agent_id TEXT NOT NULL REFERENCES subagents(agent_id), turn_id TEXT NOT NULL,
+ content TEXT NOT NULL, success_criteria TEXT NOT NULL, created_at REAL NOT NULL,
+ PRIMARY KEY(agent_id,turn_id)
 );
