@@ -239,6 +239,7 @@ class ToolCallRequest:
     invocation_id: str | None = None
     batch_id: str = ""
     run_id: str = ""
+    channel: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +254,7 @@ class ToolInvocation:
     invocation_id: str
     arguments: JsonObject
     deadline: float | None
+    channel: str = "unknown"
 
 
 @dataclass(frozen=True, slots=True)

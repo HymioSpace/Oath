@@ -85,6 +85,14 @@ class ToolRegistry:
         definition = tool.definition
         if not isinstance(tool.allow_subagent, bool):
             raise ToolRegistrationError("allow_subagent must be boolean")
+        if tool.expose_channels is not None and (
+            not isinstance(tool.expose_channels, frozenset)
+            or any(
+                not isinstance(channel, str) or not 0 < len(channel) <= 32
+                for channel in tool.expose_channels
+            )
+        ):
+            raise ToolRegistrationError("expose_channels must be a frozenset of channel names")
         _validate(definition)
         timeout = self._default_timeout if timeout_seconds is None else timeout_seconds
         if timeout <= 0:
@@ -111,7 +119,9 @@ class ToolRegistry:
         with self._lock:
             return tuple(sorted(self._entries))
 
-    def definitions(self, *, delegated=False) -> tuple[ToolDefinition, ...]:
+    def definitions(
+        self, *, delegated=False, channel: str | None = None
+    ) -> tuple[ToolDefinition, ...]:
         """汇总给 context 的定义，按名字排序。
 
         排序不是美观问题：同一份工具集在不同进程、不同注册顺序下必须序列化成
@@ -120,7 +130,14 @@ class ToolRegistry:
         with self._lock:
             entries = [self._entries[name] for name in sorted(self._entries)]
         return tuple(
-            entry.definition for entry in entries if not delegated or entry.tool.allow_subagent
+            entry.definition
+            for entry in entries
+            if (not delegated or entry.tool.allow_subagent)
+            and (
+                channel is None
+                or entry.tool.expose_channels is None
+                or channel in entry.tool.expose_channels
+            )
         )
 
     def __contains__(self, name: object) -> bool:

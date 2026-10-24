@@ -22,6 +22,10 @@ class Skill:
     description: str
     priority: int
     path: Path
+    channels: frozenset[str] | None = None
+
+    def exposed_on(self, channel: str | None) -> bool:
+        return channel is None or self.channels is None or channel in self.channels
 
 
 class SkillError(ValueError):
@@ -44,11 +48,18 @@ def read(path: Path) -> Skill:
     priority = loaded.get("priority", 0)
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise SkillError(f"{path} 的 priority 必须是整数")
+    raw_channels = loaded.get("channels")
+    if raw_channels is not None and (
+        not isinstance(raw_channels, list)
+        or any(not isinstance(channel, str) or not 0 < len(channel) <= 32 for channel in raw_channels)
+    ):
+        raise SkillError(f"{path} 的 channels 必须是渠道名数组")
     return Skill(
         name=str(fields["name"]),
         description=str(fields["description"]),
         priority=priority,
         path=path,
+        channels=frozenset(raw_channels) if raw_channels is not None else None,
     )
 
 

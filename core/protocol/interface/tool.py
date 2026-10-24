@@ -28,6 +28,9 @@ class Tool(ABC):
     """
 
     allow_subagent: bool = True
+    #: `None` exposes the tool on every channel. A set limits provider exposure and
+    #: execution to those client channels.
+    expose_channels: frozenset[str] | None = None
 
     @property
     @abstractmethod
@@ -72,7 +75,7 @@ class ToolSystem(ABC):
     def cancel(self, user: User, run_id: str | None = None) -> None: ...
 
     @abstractmethod
-    def definitions(self) -> tuple[ToolDefinition, ...]:
+    def definitions(self, *, channel: str | None = None) -> tuple[ToolDefinition, ...]:
         """汇总当前可用的工具定义，交给 context。
 
         顺序稳定（按名字排序）是硬要求：同一份工具集在不同进程里必须序列化成

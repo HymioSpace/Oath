@@ -85,7 +85,7 @@ class AgentBrain:
         self._stop = threading.Event()
         self.intake = IntakeCoordinator(ctx, self, self._stop)
 
-    def system_prompt(self) -> str:
+    def system_prompt(self, channel: str = "unknown") -> str:
         """system prompt + 工作区 + 技能索引。模型先读规则，再知道在哪干活、有什么可选能力。
 
         两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
@@ -98,7 +98,7 @@ class AgentBrain:
             workspace_note(self._ctx.config.workspace_root)
             if self._ctx.config.builtin_bash
             else "",
-            self._ctx.skills.list(self._ctx.config.skill_index_tokens),
+            self._ctx.skills.list(self._ctx.config.skill_index_tokens, channel=channel),
         ]
         return "\n\n".join(part for part in parts if part)
 
@@ -108,7 +108,9 @@ class AgentBrain:
         draft = step["request_draft"]
         if self._ctx.context_provider:
             draft = copy.deepcopy(draft)
-            application_context = self._ctx.context_provider(user)
+            application_context = self._ctx.context_provider(
+                user, step.get("channel", "unknown")
+            )
             if application_context:
                 prefix = (
                     "\n\n## Personal context data\n"
@@ -245,6 +247,7 @@ class AgentBrain:
                         invocation_id=f"{step_id}-{i}",
                         batch_id=step_id,
                         run_id=step["run_id"],
+                        channel=step.get("channel", "unknown"),
                     )
                     for i, c in enumerate(calls)
                 ],

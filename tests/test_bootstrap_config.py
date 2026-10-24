@@ -125,6 +125,22 @@ def test_extra_provider_params_are_carried(tmp_path: Path) -> None:
     assert config.agent.provider.extra_params == {"top_p": 0.9}
 
 
+def test_context_provider_can_be_injected_for_worker_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = tmp_path / "context-token"
+    token.write_text("token")
+    monkeypatch.setenv(
+        "OATH_CONTEXT_PROVIDER_URL", "http://host.docker.internal:8080/internal/agent/context"
+    )
+    monkeypatch.setenv("OATH_CONTEXT_PROVIDER_TOKEN_FILE", str(token))
+
+    config = load_config(_write(tmp_path, MINIMAL))
+
+    assert config.agent.context_provider_url.endswith("/internal/agent/context")
+    assert config.agent.context_provider_token_file == str(token)
+
+
 def test_an_absent_temperature_stays_none(tmp_path: Path) -> None:
     """给 `temperature: 0` 和「没设」是一回事，但没设不能变成 0 —— 那会让模型变确定。"""
     assert load_config(_write(tmp_path, MINIMAL)).agent.temperature is None

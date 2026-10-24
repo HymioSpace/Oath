@@ -10,12 +10,14 @@ class ToolClient:
     def __init__(self, client, fence=None):
         self.client, self.fence = client, fence
 
-    def definitions(self):
+    def definitions(self, channel="unknown"):
         child = bool(self.fence and User.from_storage_id(self.fence["user_id"]).agent_id)
         return tuple(
             ToolDefinition(**d)
             for d in self.client.call(
-                "tools.definitions", **({"user_id": self.fence["user_id"]} if self.fence else {})
+                "tools.definitions",
+                channel=channel,
+                **({"user_id": self.fence["user_id"]} if self.fence else {}),
             )
             if child or d["name"] != "subagent_notify"
         )

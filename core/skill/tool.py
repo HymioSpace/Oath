@@ -51,20 +51,28 @@ class SkillTool(Tool):
     def execute(self, invocation: ToolInvocation) -> ToolResult:
         action = invocation.arguments.get("action")
         if action == _SEARCH:
-            return ToolResult(content=self._search(self._text(invocation, "query")))
+            return ToolResult(
+                content=self._search(
+                    self._text(invocation, "query"), channel=invocation.channel
+                )
+            )
         if action == _READ:
-            return ToolResult(content=self._read(self._text(invocation, "name")))
+            return ToolResult(
+                content=self._read(
+                    self._text(invocation, "name"), channel=invocation.channel
+                )
+            )
         raise ToolExecutionError(f"action 只接受 {_SEARCH} 或 {_READ}: {action!r}")
 
-    def _search(self, query: str) -> str:
-        found = self._skills.find(query)
+    def _search(self, query: str, *, channel: str) -> str:
+        found = self._skills.find(query, channel=channel)
         if not found:
             return f"没有匹配「{query}」的技能。"
         return "\n".join(f"- {skill.name}: {skill.description}" for skill in found)
 
-    def _read(self, name: str) -> str:
+    def _read(self, name: str, *, channel: str) -> str:
         try:
-            return self._skills.load(name)
+            return self._skills.load(name, channel=channel)
         except (KeyError, SkillError) as error:
             raise ToolExecutionError(f"读不了技能 {name}: {error}") from error
 

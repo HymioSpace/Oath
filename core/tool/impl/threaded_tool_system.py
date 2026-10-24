@@ -118,8 +118,10 @@ class ThreadedToolSystem(ToolSystem):
         )
         self._watchdog.start()
 
-    def definitions(self, *, delegated=False) -> tuple[ToolDefinition, ...]:
-        return self._registry.definitions(delegated=delegated)
+    def definitions(
+        self, *, delegated=False, channel: str | None = None
+    ) -> tuple[ToolDefinition, ...]:
+        return self._registry.definitions(delegated=delegated, channel=channel)
 
     # -- 终态发布 ------------------------------------------------------------
 
@@ -176,6 +178,7 @@ class ThreadedToolSystem(ToolSystem):
                 "arguments": copy.deepcopy(r.arguments),
                 "batch_id": batch_id,
                 "run_id": r.run_id,
+                "channel": r.channel,
             }
             for r in requests
         ]
@@ -247,6 +250,12 @@ class ThreadedToolSystem(ToolSystem):
                 raise ValueError("工具未注册")
             if user.agent_id and not registered.tool.allow_subagent:
                 raise ValueError("Tool is unavailable to delegated executions")
+            channel = call.get("channel", "unknown")
+            if (
+                registered.tool.expose_channels is not None
+                and channel not in registered.tool.expose_channels
+            ):
+                raise ValueError("Tool is unavailable on this client channel")
             verdict = self.permissions.authorize(
                 user, call["tool"], copy.deepcopy(call["arguments"])
             )
@@ -516,6 +525,7 @@ class ThreadedToolSystem(ToolSystem):
                             call["deadline"],
                             call["admission"]["timeout"],
                         ),
+                        call.get("channel", "unknown"),
                     )
                 )
                 if self._stop.is_set():

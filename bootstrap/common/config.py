@@ -180,6 +180,12 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
         *(Path.home() / name for name in _AGENT_SKILL_DIRS),
         *(Path(path) for path in agent_raw.get("skill_scan_dirs", ())),
     )
+    if os.environ.get("OATH_CONTEXT_PROVIDER_URL"):
+        agent_fields["context_provider_url"] = os.environ["OATH_CONTEXT_PROVIDER_URL"]
+    if os.environ.get("OATH_CONTEXT_PROVIDER_TOKEN_FILE"):
+        agent_fields["context_provider_token_file"] = os.environ[
+            "OATH_CONTEXT_PROVIDER_TOKEN_FILE"
+        ]
 
     prompt = agent_raw.get("system_prompt", "")
     prompt_file = None

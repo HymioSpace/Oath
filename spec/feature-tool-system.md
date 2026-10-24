@@ -27,10 +27,11 @@ flowchart TD
 
 ## 1 接口与身份
 
-ToolRegistry 校验定义与 timeout，definitions 按名称排序。Tool 提供：
+ToolRegistry 校验定义与 timeout，definitions 按名称排序并按当前客户端渠道过滤。Tool 提供：
 
 ```python
 definition: ToolDefinition
+expose_channels: frozenset[str] | None   # None = all channels
 execute(invocation: ToolInvocation) -> ToolResult
 ```
 

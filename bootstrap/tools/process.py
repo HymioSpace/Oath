@@ -41,9 +41,9 @@ class ToolService:
         if operation == "tools.definitions":
             target = User.from_storage_id(p["user_id"]) if p.get("user_id") else None
             definitions = (
-                self.tools.definitions(delegated=True)
+                self.tools.definitions(delegated=True, channel=p.get("channel", "unknown"))
                 if target and target.agent_id
-                else self.tools.definitions()
+                else self.tools.definitions(channel=p.get("channel", "unknown"))
             )
             return [d.to_dict() for d in definitions]
         user = User.from_storage_id(p["user_id"])

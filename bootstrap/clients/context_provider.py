@@ -9,12 +9,21 @@ def provider(config):
     if not config.context_provider_url:
         return None
 
-    def fetch(user):
+    def fetch(user, channel="unknown"):
         try:
             token = Path(config.context_provider_token_file).read_text().strip()
             request = Request(
                 config.context_provider_url,
-                data=json.dumps({"user_id": user.user_id}).encode(),
+                data=json.dumps(
+                    {
+                        "user_id": user.user_id,
+                        "channel": (
+                            channel
+                            if isinstance(channel, str) and 0 < len(channel) <= 32
+                            else "unknown"
+                        ),
+                    }
+                ).encode(),
                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
             )
             with urlopen(request, timeout=8) as response:

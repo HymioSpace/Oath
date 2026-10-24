@@ -30,7 +30,7 @@ def new_intent(queue, item):
 
 
 class StepExecutor(Protocol):
-    def system_prompt(self) -> str: ...
+    def system_prompt(self, channel: str = "unknown") -> str: ...
     def execute(self, user: User, step: State) -> None: ...
     def open_step(
         self,
@@ -76,7 +76,19 @@ class IntakeCoordinator:
             )
         if not items:
             return None
-        definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
+        definition_channel = next(
+            (
+                item.telemetry.get("channel")
+                for queue, item in items
+                if queue == QueueName.USER and item.telemetry
+            ),
+            state["meta"].get("client_channel", "unknown"),
+        )
+        if not isinstance(definition_channel, str) or not 0 < len(definition_channel) <= 32:
+            definition_channel = "unknown"
+        definitions = [
+            t.to_dict() for t in self._ctx.tools.definitions(channel=definition_channel)
+        ]
         config = self._ctx.config
         fresh = False
         claimed: list[tuple[str, float | None, State]] = []
@@ -180,7 +192,7 @@ class IntakeCoordinator:
             state["meta"]["selected_context_window"] = selected_window
             window = effective_window(selected_window, selected_model, config.model_context_windows)
             messages = build_messages(state, entries, step_id)
-            system = self.executor.system_prompt()
+            system = self.executor.system_prompt(channel)
             if user.agent_id:
                 system += (
                     "\n\n## Delegated execution\nYou are a bounded subagent with an "
