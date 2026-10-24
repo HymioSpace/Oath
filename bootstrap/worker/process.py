@@ -8,6 +8,7 @@ from bootstrap.common.authentication import service_token
 from bootstrap.common.signals import shutdown_event
 from bootstrap.common.vault import VaultSecrets
 from core.compaction import CompactionCoordinator, LlmCompactor
+from core.context.policy import model_capacity
 from core.journal.runtime_store import RuntimeStore
 from core.llm.configured_provider import ConfiguredProvider
 from core.observability import start_metrics_server
@@ -38,6 +39,9 @@ def run(config):
             provider,
             model=config.agent.provider.model,
             max_output_tokens=config.agent.max_output_tokens,
+            context_window=model_capacity(
+                config.agent.provider.model, config.agent.model_context_windows
+            ),
         ),
         config.agent,
         sink=DurableEventSink(storage),

@@ -11,6 +11,7 @@ from websockets.asyncio.server import serve
 
 from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.authentication import UserAuthenticator, service_token
+from core.context.policy import CONTEXT_WINDOWS
 from core.observability import (
     GATEWAY_COMMANDS,
     GATEWAY_CONNECTIONS,
@@ -24,6 +25,7 @@ from core.protocol.datatype.trace import new_trace_id
 from core.protocol.datatype.user import User
 from core.protocol.datatype.wire import Command, CommandType, ack, error_frame, pong
 from core.trace.attributes import OATH_CHANNEL
+from core.utils.encoding import canonical_json
 
 _log = logging.getLogger(__name__)
 
@@ -233,6 +235,14 @@ def validate(command):
             command.payload.get("user_context"), dict
         ):
             raise ValueError("user.message requires content and user_context")
+        window = command.payload.get("context_window")
+        if window is not None and (type(window) is not int or window not in CONTEXT_WINDOWS):
+            raise ValueError("Invalid context window")
+        dynamic = command.payload.get("dynamic")
+        if dynamic is not None and (
+            not isinstance(dynamic, dict) or len(canonical_json(dynamic).encode()) > 4096
+        ):
+            raise ValueError("Invalid event dynamic context")
         if any(not key for key in command.payload["user_context"]):
             raise ValueError("user_context keys must be nonempty")
     elif command.type == CommandType.PERMISSION_DECIDE:

@@ -27,7 +27,8 @@ def estimate(messages: Sequence[Mapping[str, Any]]) -> int:
     """一段消息的 token 估算。`tool_calls` 的参数一并计入 —— 它同样进请求体。"""
     total = 0.0
     for message in messages:
-        total += _cost(str(message.get("content", "")))
+        total += 8 + _cost(str(message.get("content", "")))
+        total += _cost(str(message.get("reasoning", "") or ""))
         for call in message.get("tool_calls") or ():
             total += _cost(str(call.get("name", "")))
             total += _cost(str(call.get("arguments", "")))

@@ -139,11 +139,11 @@ def test_temperature_is_sent_when_set() -> None:
     assert build_payload(_request(temperature=0.2), "m1")["temperature"] == 0.2
 
 
-def test_extra_params_win() -> None:
+def test_frozen_output_budget_wins() -> None:
     """调用点显式给的参数是最具体的一次决定。"""
     request = _request(max_output_tokens=100, extra_params={"max_tokens": 999})
 
-    assert build_payload(request, "m1")["max_tokens"] == 999
+    assert build_payload(request, "m1")["max_tokens"] == 100
 
 
 def test_the_configured_model_wins_over_the_request() -> None:

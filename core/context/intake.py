@@ -6,6 +6,7 @@ import copy
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
+from core.context.events import event_xml
 from core.journal.runtime_store import State
 from core.protocol.datatype.inbound import Inbound
 from core.utils.encoding import canonical_json
@@ -56,11 +57,19 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
         batch["presented_by_step"] = step_id
         # 这次呈现带的是不是真结果。带占位符不算 —— 真结果到了还要再叫模型一次。
         batch["delivered"] = all(call["invocation_id"] in selected for call in calls)
+    events: list[str] = []
+
+    def flush_events() -> None:
+        if events:
+            messages.append({"role": "user", "content": "<events>" + "".join(events) + "</events>"})
+            events.clear()
+
     for key, entry in entries:
         item = Inbound.from_dict(entry["item"])
-        if item.source == "subagent.start":
-            messages.append({"role": "user", "content": item.payload["content"]})
-        elif entry["queue"] == "tool" and key not in used:
+        if entry["queue"] != "tool" or item.source == "subagent.start":
+            events.append(event_xml(item, entry.get("buffered_at")))
+        elif key not in used:
+            flush_events()
             p = item.payload
             attrs = " ".join(
                 f"{name}={quoteattr(str(p.get(name, '')))}"
@@ -72,25 +81,7 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
                     "content": f"<tool_result {attrs}>{escape(_result_text(p))}</tool_result>",
                 }
             )
-        elif entry["queue"] == "user":
-            content = str(item.payload["content"])
-            reference = item.payload.get("message_id") or item.source_id
-            if item.source == "user.message" and isinstance(reference, str):
-                content = (
-                    f"<user_message id={quoteattr('user:' + reference)}>"
-                    f"{escape(content)}</user_message>"
-                )
-            messages.append({"role": "user", "content": content})
-        elif entry["queue"] == "system":
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"<system_event type={quoteattr(item.source)}>"
-                        f"{escape(canonical_json(item.payload))}</system_event>"
-                    ),
-                }
-            )
+    flush_events()
     validate_messages(messages)
     return messages
 

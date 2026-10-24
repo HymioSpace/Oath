@@ -11,6 +11,7 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 from core.compaction.coordinator import CompactionCoordinator
+from core.context.policy import effective_window
 from core.intake import IntakeCoordinator
 from core.journal.runtime_store import State
 from core.observability import LLM_DURATION, LLM_TOKENS, LLM_TTFT, STEP_DURATION
@@ -66,7 +67,7 @@ from core.trace.attributes import (
 )
 from core.trace.links import source_links
 from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
-from core.utils.tokens import estimate_text
+from core.utils.tokens import estimate, estimate_text
 
 _log = logging.getLogger(__name__)
 
@@ -118,8 +119,15 @@ class AgentBrain:
         # system prompt 已在 draft；Coordinator 负责加入固定开销，不能重复计入。
         overhead = estimate_text(canonical_json(draft["tools"])) + draft["max_output_tokens"]
         prompt = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        window = step.get("context_window") or effective_window(
+            self._ctx.config.context_window, draft["model"], self._ctx.config.model_context_windows
+        )
         self._compaction.prepare(
-            user, overhead=overhead, system_prompt=prompt, fence=self._store.fence
+            user,
+            overhead=overhead,
+            system_prompt=prompt,
+            fence=self._store.fence,
+            context_window=window,
         )
         if self._stop.is_set():
             return step
@@ -130,11 +138,32 @@ class AgentBrain:
                 prefix = messages[:1] if messages and messages[0]["role"] == "system" else []
                 history = messages[len(prefix) :]
                 request = {**draft, "messages": prefix + self._compaction.view(history, state)}
+                if estimate(request["messages"]) + overhead > window:
+                    current.update(
+                        status="paused",
+                        error="上下文仍超过所选长度，请增大上下文长度或减少本次输入。",
+                    )
+                    return cast(State, current)
+                current["context_usage"] = {
+                    "window": window,
+                    "estimated_tokens": estimate(request["messages"]) + overhead,
+                }
                 current["request"] = request
                 current["request_draft"] = None
             return cast(State, current)
 
         prepared = self._store.transact(user, "step.request", freeze)
+        if prepared["status"] == "paused":
+            self.emit(
+                user,
+                "step.status",
+                {
+                    "step_id": prepared["step_id"],
+                    "status": "paused",
+                    "error": prepared["error"],
+                },
+            )
+            return prepared
         # 压缩判定可能同步调一次模型，所以这个时刻之前的时间都算「模型之前」。
         self._stage(
             user,
@@ -147,7 +176,7 @@ class AgentBrain:
     def execute(self, user: User, step: State) -> None:
         if step["response"] is None:
             step = self._prepare_request(user, step)
-        if self._stop.is_set():
+        if self._stop.is_set() or step["status"] == "paused":
             return
         step_id = step["step_id"]
         if step["response"] is None:
