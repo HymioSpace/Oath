@@ -161,7 +161,21 @@ def build_app(service, cli_service, admin_token=""):
                     raise ValueError("event_id required")
                 if not isinstance(data.get("payload", {}), dict):
                     raise ValueError("Invalid payload")
-                item = Inbound("system", source, data.get("payload", {}), data["event_id"])
+                queue = data.get("queue", "system")
+                if queue not in {"user", "system"}:
+                    raise ValueError("Application event queue must be user or system")
+                defer_wake = data.get("defer_wake", False)
+                if not isinstance(defer_wake, bool):
+                    raise ValueError("defer_wake must be boolean")
+                if defer_wake and queue != "user":
+                    raise ValueError("defer_wake is only valid for the user queue")
+                item = Inbound(
+                    queue,
+                    source,
+                    data.get("payload", {}),
+                    data["event_id"],
+                    telemetry={"defer_wake": True} if defer_wake else {},
+                )
                 result = await asyncio.to_thread(
                     service.agent_operation, user, "queue.add", item=item.to_dict()
                 )
@@ -178,7 +192,7 @@ def build_app(service, cli_service, admin_token=""):
                 )
                 return JSONResponse(result)
             action = request.path_params["action"]
-            if action not in {"spawn", "list", "get", "cancel"}:
+            if action not in {"spawn", "list", "get", "cancel", "continue"}:
                 raise ValueError("Unknown action")
             if "user_id" in data or "fence" in data:
                 raise ValueError("Identity is derived from credentials")

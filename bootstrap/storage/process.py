@@ -10,6 +10,7 @@ OPERATIONS = {
     "subagent.list",
     "subagent.get",
     "subagent.cancel",
+    "subagent.continue",
     "subagent.notify",
     "state.read",
     "state.summary",

@@ -174,6 +174,16 @@ def main() -> None:
     start.add_argument(
         "--system-prompt", type=Path, help="Replace application instructions with a Markdown file"
     )
+    start.add_argument(
+        "--context-provider",
+        default="",
+        help="Authenticated application context provider URL for Worker",
+    )
+    start.add_argument(
+        "--context-provider-token-file",
+        type=Path,
+        help="Bearer token file used only by Worker for the context provider",
+    )
     start.add_argument("--name", default="oath", help="Local deployment name")
     auth_arguments(start)
     for kind in _KINDS:
@@ -203,6 +213,17 @@ def main() -> None:
                 if args.auth_token_file
                 else ""
             )
+            if bool(args.context_provider) != bool(args.context_provider_token_file):
+                raise ValueError(
+                    "--context-provider and --context-provider-token-file must be used together"
+                )
+            context_token = (
+                args.context_provider_token_file.expanduser().resolve()
+                if args.context_provider_token_file
+                else None
+            )
+            if context_token and not context_token.is_file():
+                raise ValueError("Context provider token file does not exist")
             environment = auth_environment(args.auth_mode, args.auth_url, auth_file)
             overlay_data = _overlay(paths, loaded.agent.system_prompt_file)
             for service in ("gateway", "biz"):
@@ -222,6 +243,27 @@ def main() -> None:
                             "read_only": True,
                         }
                     )
+            if args.context_provider:
+                worker = overlay_data["services"].setdefault(
+                    "worker", {"environment": {}, "volumes": []}
+                )
+                worker["environment"].update(
+                    {
+                        "OATH_CONTEXT_PROVIDER_URL": args.context_provider,
+                        "OATH_CONTEXT_PROVIDER_TOKEN_FILE": (
+                            "/run/oath/context-provider-token"
+                        ),
+                    }
+                )
+                worker.setdefault("extra_hosts", ["host.docker.internal:host-gateway"])
+                worker["volumes"].append(
+                    {
+                        "type": "bind",
+                        "source": str(context_token),
+                        "target": "/run/oath/context-provider-token",
+                        "read_only": True,
+                    }
+                )
             overlay_text = yaml.safe_dump(overlay_data, sort_keys=False)
             digest = hashlib.sha256(overlay_text.encode()).hexdigest()[:12]
             overlay = _state_dir() / f"{args.name}.{digest}.compose.yaml"

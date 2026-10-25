@@ -52,13 +52,15 @@ class SkillSystem:
                 if injected:
                     self._injected = (*self._injected, skill)
 
-    def list(self, budget: int) -> str:
+    def list(self, budget: int, *, channel: str | None = None) -> str:
         """进 system prompt 的索引。预算装不下就整条丢掉，不塞半截。"""
         if budget < 1:
             raise ValueError(f"索引预算必须是正整数: {budget!r}")
         lines: list[str] = []
         used = estimate_text(f"{_HEADER}\n\n{_HINT}\n")
         for skill in _by_priority(self._injected):
+            if not skill.exposed_on(channel):
+                continue
             line = _LINE.format(name=skill.name, description=skill.description)
             if used + estimate_text(line) > budget:
                 break
@@ -66,7 +68,9 @@ class SkillSystem:
             used += estimate_text(line)
         return "" if not lines else "\n".join([_HEADER, "", _HINT, *lines])
 
-    def find(self, query: str, *, limit: int = 5) -> Sequence[Skill]:
+    def find(
+        self, query: str, *, limit: int = 5, channel: str | None = None
+    ) -> Sequence[Skill]:
         """在全部技能里模糊查名字和描述，空 query 返回空列表。
 
         query 按空白切词，每个词都要出现在同一个技能的 name 或 description 里；
@@ -82,19 +86,23 @@ class SkillSystem:
         found = [
             (self._relevance(skill, whole), -skill.priority, skill.name, skill)
             for skill in self._index.values()
-            if all(word in self._haystack(skill) for word in words)
+            if skill.exposed_on(channel)
+            and all(word in self._haystack(skill) for word in words)
         ]
         found.sort(key=lambda hit: hit[:3])
         return [skill for *_, skill in found[:limit]]
 
-    def load(self, name: str) -> str:
+    def load(self, name: str, *, channel: str | None = None) -> str:
         """读技能正文。
 
         名字只在索引里查，从不拼进路径：路径是扫描时从目录项读出来的，调用方给的
         字符串只当字典键用。名字不存在抛 `KeyError`，正文读不出来抛 `SkillError` ——
         两种都让调用方当失败报，不发空串。
         """
-        return body(self._index[name].path)
+        skill = self._index[name]
+        if not skill.exposed_on(channel):
+            raise KeyError(name)
+        return body(skill.path)
 
     @staticmethod
     def _haystack(skill: Skill) -> str:

@@ -44,7 +44,8 @@ priority: 10
 ```
 
 `name` 和 `description` 必填 —— 没有它们，索引里就没有这个技能。`priority` 可选，
-默认 0。缺 `---` 围栏、frontmatter 不是映射、字段类型不对，都只丢这一个文件并记一条
+默认 0；`metadata.channels` 可选，用于声明只向哪些客户端渠道暴露。缺 `---` 围栏、frontmatter
+不是映射、字段类型不对，都只丢这一个文件并记一条
 warning：坏技能不能拖垮启动。同一目录下的其他文件属于技能自身的资源，本机制不读它们。
 
 `priority` 是整数，越大越晚被丢掉。不写就是 0，也就是「没有声明优先」：项目自己写的
@@ -53,7 +54,7 @@ warning：坏技能不能拖垮启动。同一目录下的其他文件属于技�
 ## 2 索引
 
 `SkillSystem` 在构造时扫完目录，之后只读。每个技能留下 `name` / `description` /
-`priority` 和文件路径 —— **正文不进内存**，需要时再读文件。
+`priority`、渠道范围和文件路径 —— **正文不进内存**，需要时再读文件。
 
 扫描顺序即覆盖顺序：注入的技能目录在前，配置里的发现目录按给定顺序跟进，每个目录下的
 子目录按名字排序。名字撞车时先扫到的赢，后来的一条记 warning：顺序是确定的，
@@ -64,7 +65,8 @@ warning：坏技能不能拖垮启动。同一目录下的其他文件属于技�
 
 ## 3 list：注入 system prompt 的索引
 
-`list(budget)` 返回一段 markdown，追加在 system prompt 末尾。预算以 token 计，
+`list(budget, channel=...)` 返回一段 markdown，追加在 system prompt 末尾，并过滤掉
+不属于当前渠道的技能。预算以 token 计，
 装不下就整条丢掉，装得下就按优先级从高到低逐条累加。
 
 排序：`priority` 降序，同优先级按描述长度降序（先丢长的更省预算），再按名字升序
@@ -78,7 +80,8 @@ warning：坏技能不能拖垮启动。同一目录下的其他文件属于技�
 
 ## 4 find：按需发现
 
-`find(query, limit)` 在**全部**技能（含发现技能）里模糊查 `name` 与 `description`。
+`find(query, limit, channel=...)` 在当前渠道可见的技能（含发现技能）里模糊查
+`name` 与 `description`。
 
 query 按空白切成若干词，**每个词都要出现**在同一个技能的 name 或 description 里
 （缺一不算命中）。命中后按匹配质量排序：名字完全相等 > 名字包含 > 描述包含，
@@ -91,7 +94,7 @@ query 按空白切成若干词，**每个词都要出现**在同一个技能的 
 
 ## 5 load：读正文
 
-`load(name)` 按名字返回 SKILL.md 的 markdown 正文（不含 frontmatter）。名字只在索引
+`load(name, channel=...)` 按名字返回当前渠道可见的 SKILL.md 正文（不含 frontmatter）。名字只在索引
 里查，**从不拼进路径**：路径是扫描时从目录项读出来的，模型给的字符串只当字典键用，
 所以不存在穿越目录的可能。
 

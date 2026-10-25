@@ -34,6 +34,14 @@ class Database:
             raise RuntimeError("A Storage service already owns this SQLite database") from None
         with self.transaction() as db:
             db.executescript(Path(__file__).with_name("schema.sql").read_text())
+            subagent_columns = {
+                row[1] for row in db.execute("PRAGMA table_info(subagents)")
+            }
+            if "notify_parent" not in subagent_columns:
+                db.execute(
+                    "ALTER TABLE subagents "
+                    "ADD COLUMN notify_parent INTEGER NOT NULL DEFAULT 1"
+                )
             if [r[0] for r in db.execute("SELECT version FROM schema_version")] != [1]:
                 raise RuntimeError("Unsupported database schema")
         from core.storage import conversation_history

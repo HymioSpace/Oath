@@ -216,7 +216,8 @@ def test_request_freezes_effective_window_and_survives_retry(service):
     ctx = SimpleNamespace(
         store=store,
         config=AgentConfig(provider=ModelProviderConfig(model="MiniMax-M3")),
-        context_provider=lambda u: calls.append(u) or "Overall understanding",
+            context_provider=lambda u, channel: calls.append((u, channel))
+            or "Overall understanding",
         sink=sink,
     )
     brain = AgentBrain(ctx, None, coordinator)
@@ -224,6 +225,7 @@ def test_request_freezes_effective_window_and_survives_retry(service):
         "step_id": "s",
         "run_id": "r",
         "trace_id": "0" * 32,
+            "channel": "ios",
         "status": "prepared",
         "request": None,
         "context_window": 128000,
@@ -245,6 +247,7 @@ def test_request_freezes_effective_window_and_survives_retry(service):
         original = copy.deepcopy(prepared["request"])
         again = brain._prepare_request(user, prepared)
         assert again["request"] == original and len(calls) == 1
+        assert calls == [(user, "ios")]
         assert "context_window" not in original
     finally:
         brain.close()
@@ -447,11 +450,13 @@ def test_intake_freezes_selected_model_window_and_continuations(service):
     ctx = SimpleNamespace(
         store=store,
         config=config,
-        tools=SimpleNamespace(definitions=lambda: ()),
+        tools=SimpleNamespace(definitions=lambda **_: ()),
         buffer=SimpleNamespace(peek=lambda u, q: buffer.get(q, [])),
     )
     executor = SimpleNamespace(
-        system_prompt=lambda: "Rules", open_step=lambda *args: None, emit=lambda *args: None
+            system_prompt=lambda channel="unknown": "Rules",
+            open_step=lambda *args: None,
+            emit=lambda *args: None,
     )
     service.call("wake", user_id=user.storage_id, force=True)
     store.fence = service.call("brain.claim", owner="intake-test", ttl=60)

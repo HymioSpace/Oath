@@ -46,6 +46,15 @@ class Inbound:
         """
         return canonical_json([self.kind, self.source, self.source_id])
 
+    @property
+    def wakes(self) -> bool:
+        """Whether admission alone should request a model turn.
+
+        Deferred application events wait in the user queue and join the next turn
+        caused by other work.
+        """
+        return self.telemetry.get("defer_wake") is not True
+
     def to_dict(self) -> JsonObject:
         return {
             "kind": self.kind,

@@ -31,8 +31,11 @@ def test_provider_sends_authenticated_user_and_bounds_response(tmp_path, monkeyp
         return Response()
 
     monkeypatch.setattr("bootstrap.clients.context_provider.urlopen", open_request)
-    assert provider(config)(SimpleNamespace(user_id="user-a")) == "Specific user understanding"
-    assert seen == [{"user_id": "user-a"}]
+    assert (
+        provider(config)(SimpleNamespace(user_id="user-a", agent_id=""), "ios")
+        == "Specific user understanding"
+    )
+    assert seen == [{"user_id": "user-a", "agent_id": "", "channel": "ios"}]
 
 
 def test_provider_failure_is_explicit(tmp_path):

@@ -24,13 +24,13 @@ _log = logging.getLogger(__name__)
 
 
 def new_intent(queue, item):
-    return (queue == QueueName.USER and item.source != "app.message.reaction") or (
+    return (queue == QueueName.USER and item.wakes) or (
         queue == QueueName.SYSTEM and item.source.startswith("app.")
     )
 
 
 class StepExecutor(Protocol):
-    def system_prompt(self) -> str: ...
+    def system_prompt(self, channel: str = "unknown") -> str: ...
     def execute(self, user: User, step: State) -> None: ...
     def open_step(
         self,
@@ -76,7 +76,19 @@ class IntakeCoordinator:
             )
         if not items:
             return None
-        definitions = [t.to_dict() for t in self._ctx.tools.definitions()]
+        definition_channel = next(
+            (
+                item.telemetry.get("channel")
+                for queue, item in items
+                if queue == QueueName.USER and item.telemetry
+            ),
+            state["meta"].get("client_channel", "unknown"),
+        )
+        if not isinstance(definition_channel, str) or not 0 < len(definition_channel) <= 32:
+            definition_channel = "unknown"
+        definitions = [
+            t.to_dict() for t in self._ctx.tools.definitions(channel=definition_channel)
+        ]
         config = self._ctx.config
         fresh = False
         claimed: list[tuple[str, float | None, State]] = []
@@ -121,7 +133,7 @@ class IntakeCoordinator:
             step_id = uuid.uuid4().hex
             new_user = any(
                 entry["queue"] == QueueName.USER
-                and entry["item"]["source"] != "app.message.reaction"
+                and Inbound.from_dict(entry["item"]).wakes
                 for _, entry in entries
             )
             new_run = (
@@ -180,14 +192,16 @@ class IntakeCoordinator:
             state["meta"]["selected_context_window"] = selected_window
             window = effective_window(selected_window, selected_model, config.model_context_windows)
             messages = build_messages(state, entries, step_id)
-            system = self.executor.system_prompt()
+            system = self.executor.system_prompt(channel)
             if user.agent_id:
                 system += (
                     "\n\n## Delegated execution\nYou are a bounded subagent with an "
                     "independent context. "
-                    "Work only on the delegated objective and success criteria. You "
+                    "Work only on the delegated objective and success criteria. New bounded "
+                    "work messages from your owner may continue this context. You "
                     "cannot delegate or manage tasks. "
-                    "Only tool results can continue this execution. Use "
+                    "Tool results continue the current turn; owner work messages arrive only as "
+                    "new bounded turns. Use "
                     "subagent_notify for significant findings. "
                     "When complete or blocked, issue a final response without tools "
                     "describing results and limitations; "

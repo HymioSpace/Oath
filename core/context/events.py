@@ -14,7 +14,7 @@ def event_xml(item: Inbound, buffered_at=None) -> str:
     at = item.occur_dt
     if not at and buffered_at is not None:
         at = datetime.fromtimestamp(buffered_at, UTC).isoformat()
-    if item.source in {"user.message", "subagent.start"}:
+    if item.source in {"user.message", "subagent.start", "subagent.message"}:
         content = str(item.payload.get("content", ""))
     else:
         content = canonical_json({k: v for k, v in item.payload.items() if k != "dynamic"})

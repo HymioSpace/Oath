@@ -68,7 +68,7 @@ class UserConsumer(QueueConsumer):
         super().receive(user, item)
 
     def evaluate(self, user: User, delivered: bool) -> float:
-        if self._buffered or self.ctx.buffer.peek(user, self.queue_name):
+        if any(item.wakes for item in self.ctx.buffer.peek(user, self.queue_name)):
             self.brain.wake(user)
         return _LISTEN_SECONDS
 
@@ -102,7 +102,7 @@ class ToolConsumer(QueueConsumer):
         new_intents = [
             pending
             for pending in self.ctx.buffer.peek(user, QueueName.USER)
-            if pending.source != "app.message.reaction"
+            if pending.wakes
         ]
         if new_intents and any(
             not pending.occur_dt or item.occur_dt > pending.occur_dt for pending in new_intents
