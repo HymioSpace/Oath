@@ -108,9 +108,7 @@ class AgentBrain:
         draft = step["request_draft"]
         if self._ctx.context_provider:
             draft = copy.deepcopy(draft)
-            application_context = self._ctx.context_provider(
-                user, step.get("channel", "unknown")
-            )
+            application_context = self._ctx.context_provider(user, step.get("channel", "unknown"))
             if application_context:
                 prefix = (
                     "\n\n## Personal context data\n"
@@ -205,9 +203,7 @@ class AgentBrain:
                 return cast(State, state["steps"][step_id])
 
             if had_request:
-                step = self._store.transact(
-                    user, "step.attempt", attempt, reuse_snapshot=True
-                )
+                step = self._store.transact(user, "step.attempt", attempt, reuse_snapshot=True)
             attempt_no = int(step["attempts"])
             emit = self._delta(user, step_id)
             # ttft = 第一段增量到达的时刻。计时用单调时钟：墙上时间会被 NTP 拨一下。
@@ -224,7 +220,9 @@ class AgentBrain:
 
             started_ns = time.time_ns()
             try:
-                response = self._provider.complete(_request(step["request"]), on_delta=on_delta)
+                response = self._provider.complete(
+                    _request(step["request"], user.user_id), on_delta=on_delta
+                )
                 if self._stop.is_set():
                     return
                 payload = _response(response)
@@ -598,7 +596,7 @@ def _body(response: LlmResponse) -> JsonObject:
     }
 
 
-def _request(raw: State) -> LlmRequest:
+def _request(raw: State, user_id: str = "") -> LlmRequest:
     messages = [
         Message(
             m["role"], m["content"], {k: v for k, v in m.items() if k not in {"role", "content"}}
@@ -612,6 +610,7 @@ def _request(raw: State) -> LlmRequest:
         max_output_tokens=raw["max_output_tokens"],
         temperature=raw["temperature"],
         extra_params=copy.deepcopy(raw["extra_params"]),
+        user_id=user_id,
     )
 
 

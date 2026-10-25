@@ -144,7 +144,15 @@ def project(records: list[Record], cursor_end: Cursor | None = None) -> list[Mes
             break
         type_ = record.type
         if type_ == EventType.USER_MESSAGE:
-            out.append(Message(role="user", content=str(record.payload.get("content", ""))))
+            out.append(
+                Message(
+                    role="user",
+                    content=str(record.payload.get("content", "")),
+                    extra={"image_refs": record.payload["image_refs"]}
+                    if record.payload.get("image_refs")
+                    else {},
+                )
+            )
         elif type_ == EventType.ASSISTANT_MESSAGE:
             _close_and_append_assistant(out, slots, record.payload)
         elif type_ == EventType.TOOL_CALL:

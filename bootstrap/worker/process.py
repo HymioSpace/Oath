@@ -2,6 +2,7 @@
 
 import logging
 
+from bootstrap.clients.image_resolver import resolver
 from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.assembly import build_context
 from bootstrap.common.authentication import service_token
@@ -32,7 +33,7 @@ def run(config):
         config.secrets.role_id_file,
         config.secrets.secret_id_file,
     )
-    provider = ConfiguredProvider(config.agent, secrets)
+    provider = ConfiguredProvider(config.agent, secrets, resolver(config.agent))
     compaction = CompactionCoordinator(
         RuntimeStore(storage),
         LlmCompactor(

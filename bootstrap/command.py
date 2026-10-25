@@ -185,6 +185,11 @@ def main() -> None:
         help="Bearer token file used only by Worker for the context provider",
     )
     start.add_argument("--name", default="oath", help="Local deployment name")
+    start.add_argument(
+        "--image-resolver",
+        default="",
+        help="Private image resolver URL; uses the context provider token file",
+    )
     auth_arguments(start)
     for kind in _KINDS:
         start.add_argument(f"--{kind}", action="append", default=[], metavar="DIR")
@@ -222,6 +227,8 @@ def main() -> None:
                 if args.context_provider_token_file
                 else None
             )
+            if args.image_resolver and not context_token:
+                raise ValueError("--image-resolver requires --context-provider-token-file")
             if context_token and not context_token.is_file():
                 raise ValueError("Context provider token file does not exist")
             environment = auth_environment(args.auth_mode, args.auth_url, auth_file)
@@ -250,11 +257,11 @@ def main() -> None:
                 worker["environment"].update(
                     {
                         "OATH_CONTEXT_PROVIDER_URL": args.context_provider,
-                        "OATH_CONTEXT_PROVIDER_TOKEN_FILE": (
-                            "/run/oath/context-provider-token"
-                        ),
+                        "OATH_CONTEXT_PROVIDER_TOKEN_FILE": ("/run/oath/context-provider-token"),
                     }
                 )
+                if args.image_resolver:
+                    worker["environment"]["OATH_IMAGE_RESOLVER_URL"] = args.image_resolver
                 worker.setdefault("extra_hosts", ["host.docker.internal:host-gateway"])
                 worker["volumes"].append(
                     {

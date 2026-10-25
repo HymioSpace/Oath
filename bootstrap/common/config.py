@@ -183,9 +183,13 @@ def from_dict(data: dict[str, Any], *, base: Path | None = None) -> OathConfig:
     if os.environ.get("OATH_CONTEXT_PROVIDER_URL"):
         agent_fields["context_provider_url"] = os.environ["OATH_CONTEXT_PROVIDER_URL"]
     if os.environ.get("OATH_CONTEXT_PROVIDER_TOKEN_FILE"):
-        agent_fields["context_provider_token_file"] = os.environ[
-            "OATH_CONTEXT_PROVIDER_TOKEN_FILE"
-        ]
+        agent_fields["context_provider_token_file"] = os.environ["OATH_CONTEXT_PROVIDER_TOKEN_FILE"]
+    if os.environ.get("OATH_IMAGE_RESOLVER_URL"):
+        agent_fields["image_resolver_url"] = os.environ["OATH_IMAGE_RESOLVER_URL"]
+    if agent_fields.get("image_resolver_url") and not agent_fields.get("image_resolver_token_file"):
+        agent_fields["image_resolver_token_file"] = agent_fields.get(
+            "context_provider_token_file", ""
+        )
 
     prompt = agent_raw.get("system_prompt", "")
     prompt_file = None
