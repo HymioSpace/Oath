@@ -157,9 +157,13 @@ class AgentBrain:
                 }
                 current["request"] = request
                 current["request_draft"] = None
+                # The first attempt starts as soon as the request is frozen. Keep
+                # the attempt counter in the same transaction instead of sending
+                # the complete state again just to increment one integer.
+                current["attempts"] = int(current.get("attempts", 0)) + 1
             return cast(State, current)
 
-        prepared = self._store.transact(user, "step.request", freeze)
+        prepared = self._store.transact(user, "step.request", freeze, reuse_snapshot=True)
         if prepared["status"] == "paused":
             STEP_PAUSED.labels("context_window").inc()
             COMPACTION_BLOCKED_STEPS.labels("sync").inc()
@@ -185,6 +189,7 @@ class AgentBrain:
         return prepared
 
     def execute(self, user: User, step: State) -> None:
+        had_request = step["request"] is not None
         if step["response"] is None:
             step = self._prepare_request(user, step)
         if self._stop.is_set() or step["status"] == "paused":
@@ -195,11 +200,15 @@ class AgentBrain:
                 self._fail(user, step_id, "模型重试次数已耗尽")
                 return
 
-            def attempt(state: State) -> None:
+            def attempt(state: State) -> State:
                 state["steps"][step_id]["attempts"] += 1
+                return cast(State, state["steps"][step_id])
 
-            self._store.transact(user, "step.attempt", attempt)
-            attempt_no = int(step["attempts"]) + 1
+            if had_request:
+                step = self._store.transact(
+                    user, "step.attempt", attempt, reuse_snapshot=True
+                )
+            attempt_no = int(step["attempts"])
             emit = self._delta(user, step_id)
             # ttft = 第一段增量到达的时刻。计时用单调时钟：墙上时间会被 NTP 拨一下。
             timing: list[float] = []
@@ -230,7 +239,7 @@ class AgentBrain:
             def save(state: State) -> None:
                 state["steps"][step_id]["response"] = payload
 
-            self._store.transact(user, "step.response", save)
+            self._store.transact(user, "step.response", save, reuse_snapshot=True)
             step["response"] = payload
         # 已保存响应后只补后处理；不重新调用模型。
         cancelled = self._store.read(user)["meta"].get(f"cancelled:{step['run_id']}")
@@ -277,7 +286,7 @@ class AgentBrain:
             return cast(State, current)
 
         # 终态从事务里回读，不复用认领时那份 —— 写进 span 的必须是最终的 status。
-        closed = self._store.transact(user, "step.completed", finish)
+        closed = self._store.transact(user, "step.completed", finish, reuse_snapshot=True)
         self._stage(user, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
         self._close_step(user, closed, SpanStatus.OK, int(closed["attempts"]))
 
@@ -288,7 +297,7 @@ class AgentBrain:
             step.update(status="failed" if failed else "prepared", error=error[:500])
             return cast(State, step)
 
-        step = self._store.transact(user, "step.error", change)
+        step = self._store.transact(user, "step.error", change, reuse_snapshot=True)
         if step["status"] == "failed":
             self._close_step(user, step, SpanStatus.ERROR, int(step["attempts"]))
             return
