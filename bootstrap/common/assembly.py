@@ -40,7 +40,7 @@ def build_context(config, storage, queue, tools, fence=None):
     journal = StoredJournal(storage)
     return AgentContext(
         journal=journal,
-        store=RuntimeStore(storage, fence=fence),
+        store=RuntimeStore(storage, fence=fence, patch_commits=True),
         queue=StoredQueue(queue, fence),
         buffer=StoredBuffer(storage, fence),
         sink=DurableEventSink(storage, fence),

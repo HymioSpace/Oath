@@ -52,6 +52,7 @@ class LlmRequest:
     max_output_tokens: int = 2048
     temperature: float | None = None
     extra_params: JsonObject = field(default_factory=dict)
+    user_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

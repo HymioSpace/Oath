@@ -85,9 +85,14 @@ def to_wire_message(message: Message) -> JsonObject:
             continue
         # `outcome` / `unresolved` 是 Oath 给投影与客户端看的标记，
         # 模型 API 不认 —— 发出去会被拒或者被静默忽略。
-        if key in ("outcome", "unresolved", "model", "usage"):
+        if key in ("outcome", "unresolved", "model", "usage", "image_refs", "images"):
             continue
         out[key] = value
+    images = message.extra.get("images")
+    if images:
+        parts: list[JsonValue] = [{"type": "text", "text": message.content}]
+        parts.extend({"type": "image_url", "image_url": {"url": url}} for url in images)
+        out["content"] = parts
     calls = _tool_call_refs(message)
     if calls:
         out["tool_calls"] = calls

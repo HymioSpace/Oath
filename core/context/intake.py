@@ -58,16 +58,41 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
         # 这次呈现带的是不是真结果。带占位符不算 —— 真结果到了还要再叫模型一次。
         batch["delivered"] = all(call["invocation_id"] in selected for call in calls)
     events: list[str] = []
+    image_refs: list[str] = []
+    # Images are application-owned references inside a structured tool result.
+    # Add them after every declared tool slot has been closed, as user image parts.
+    for _, payload in selected.values():
+        result = payload.get("content")
+        refs = result.get("image_refs") if isinstance(result, dict) else None
+        if isinstance(refs, list) and len(refs) <= 12 and all(
+            isinstance(ref, str) and 1 <= len(ref) <= 128 for ref in refs
+        ):
+            image_refs.extend(refs)
+    if image_refs:
+        events.append("<tool_images>Images referenced by completed tool results.</tool_images>")
 
     def flush_events() -> None:
         if events:
-            messages.append({"role": "user", "content": "<events>" + "".join(events) + "</events>"})
+            message: State = {"role": "user", "content": "<events>" + "".join(events) + "</events>"}
+            if image_refs:
+                message["image_refs"] = list(dict.fromkeys(image_refs))
+            messages.append(message)
             events.clear()
+            image_refs.clear()
 
     for key, entry in entries:
         item = Inbound.from_dict(entry["item"])
         if entry["queue"] != "tool" or item.source == "subagent.start":
             events.append(event_xml(item, entry.get("buffered_at")))
+            if item.source == "user.message":
+                refs = item.payload.get("image_refs", [])
+                if (
+                    not isinstance(refs, list)
+                    or len(refs) > 12
+                    or any(not isinstance(ref, str) or not 1 <= len(ref) <= 128 for ref in refs)
+                ):
+                    raise ValueError("Invalid image references")
+                image_refs.extend(ref for ref in refs if isinstance(ref, str))
         elif key not in used:
             flush_events()
             p = item.payload

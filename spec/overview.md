@@ -37,4 +37,8 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 
 See [model selection](feature-model-selection.md) for per-user model choice and immutable step requests.
 
+Native image references and private application resolution: [image input](feature-native-images.md).
+
+Versioned incremental service transitions: [state patches](feature-state-patches.md).
+
 Event XML and per-user context capacities: [context events and window policy](feature-context-events-window.md).

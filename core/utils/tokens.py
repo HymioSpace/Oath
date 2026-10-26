@@ -29,6 +29,7 @@ def estimate(messages: Sequence[Mapping[str, Any]]) -> int:
     for message in messages:
         total += 8 + _cost(str(message.get("content", "")))
         total += _cost(str(message.get("reasoning", "") or ""))
+        total += 8192 * len(message.get("image_refs") or ())
         for call in message.get("tool_calls") or ():
             total += _cost(str(call.get("name", "")))
             total += _cost(str(call.get("arguments", "")))

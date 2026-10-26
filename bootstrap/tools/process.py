@@ -104,7 +104,7 @@ def run(config):
         registry,
         DurableEventSink(storage),
         AllowAllPolicy(storage),
-        store=RuntimeStore(storage),
+        store=RuntimeStore(storage, patch_commits=True),
         queue=StoredQueue(queue),
         traces=StoredTraces(storage),
         shrinker=ResultShrinker(

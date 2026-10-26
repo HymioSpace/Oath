@@ -96,7 +96,7 @@ def of_command(command: Command) -> Inbound | None:
                 **({"model": command.payload["model"]} if "model" in command.payload else {}),
                 **{
                     key: command.payload[key]
-                    for key in ("context_window", "dynamic")
+                    for key in ("context_window", "dynamic", "image_refs")
                     if key in command.payload
                 },
             },

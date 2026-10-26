@@ -33,6 +33,7 @@ class ModelProviderConfig:
     import_env: str = ""
     timeout_seconds: float = 60.0
     extra_params: JsonObject = field(default_factory=dict)
+    supports_images: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,8 @@ class AgentConfig:
     system_prompt_file: Path | None = None
     context_provider_url: str = ""
     context_provider_token_file: str = ""
+    image_resolver_url: str = ""
+    image_resolver_token_file: str = ""
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
     selectable_models: tuple[str, ...] = ()
     model_providers: dict[str, ModelProviderConfig] = field(default_factory=dict)

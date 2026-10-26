@@ -14,6 +14,7 @@ from core.subagents import storage as subagents
 READ_OPERATIONS = frozenset(
     {
         "state.read",
+        "state.entries",
         "state.summary",
         "users.list",
         "tools.users",
@@ -77,6 +78,20 @@ class StorageService:
                 return subagents.call(db, uid, operation, p)
             if operation == "state.summary":
                 return status_summary.read(db, uid)
+            if operation == "state.entries":
+                table, keys = p.get("table"), p.get("keys")
+                if table not in runtime.TABLES or not isinstance(keys, list) or len(keys) > 128:
+                    raise ValueError("Invalid state entry selection")
+                if any(not isinstance(key, str) or len(key) > 256 for key in keys):
+                    raise ValueError("Invalid state entry key")
+                # Select one table on the SQLite owner; accumulated conversation
+                # and unrelated tables never cross the RPC boundary.
+                row = db.execute(
+                    "SELECT json_extract(state_json,?) FROM users WHERE user_id=?",
+                    ("$." + json.dumps(table), uid),
+                ).fetchone()
+                values = json.loads(row[0])
+                return {key: values[key] for key in keys if key in values}
             if operation == "state.read":
                 row = db.execute(
                     "SELECT version,state_json FROM users WHERE user_id=?", (uid,)
@@ -85,9 +100,18 @@ class StorageService:
                 if not p.get("compact", False):
                     request_archives.hydrate(db, uid, state)
                 return {"version": row["version"], "state": state}
-            if operation == "state.commit":
+            if operation in {"state.commit", "state.patch"}:
+                if operation == "state.patch" and not isinstance(p.get("changes"), dict):
+                    raise ValueError("Invalid state patch")
                 return runtime.commit(
-                    db, uid, p["expected"], p["state"], p["reason"], p["commit_id"], fence
+                    db,
+                    uid,
+                    p["expected"],
+                    p.get("state"),
+                    p["reason"],
+                    p["commit_id"],
+                    fence,
+                    changes=p["changes"] if operation == "state.patch" else None,
                 )
             if operation == "users.list":
                 return [r[0] for r in db.execute("SELECT user_id FROM users ORDER BY user_id")]
@@ -142,15 +166,9 @@ class StorageService:
                 item = Inbound.from_dict(p["item"])
                 child = subagents.lookup(db, uid)
                 if child:
-                    allowed_child_input = (
-                        child["status"] == "running"
-                        and (
-                            item.kind == "tool"
-                            or (
-                                item.kind == "user"
-                                and item.source == "subagent.message"
-                            )
-                        )
+                    allowed_child_input = child["status"] == "running" and (
+                        item.kind == "tool"
+                        or (item.kind == "user" and item.source == "subagent.message")
                     )
                     if not allowed_child_input:
                         return None

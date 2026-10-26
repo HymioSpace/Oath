@@ -35,9 +35,11 @@ def run_workers(stop, manager, context_factory, provider, compaction, *, ttl, po
                     step = brain.intake.claim(user)
                     if step and step["status"] == "prepared" and not lost.is_set():
                         brain.execute(user, step)
-                    state = ctx.store.read(user)
-                    active = state["meta"].get("active_step")
-                    retry = bool(active and state["steps"][active]["status"] == "prepared")
+                    active = ctx.store.entries(user, "meta", ["active_step"]).get("active_step")
+                    step = (
+                        ctx.store.entries(user, "steps", [active]).get(active) if active else None
+                    )
+                    retry = bool(step and step["status"] == "prepared")
             except Exception:
                 retry = True
                 _log.exception("Worker failed; durable step remains recoverable")
