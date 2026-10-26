@@ -115,6 +115,11 @@ LlmCompactor 对受模型容量约束的输入分段调用，将上一段摘要�
 </context_digest>
 ```
 
+压缩调用使用独立的 `compress_max_output_tokens`（默认 16384），不复用主回复输出预算。
+`compress_summary_tokens`（默认 4096）仅作为 prompt 的长度目标，超出目标不拒绝有效摘要；模型调用的输出空间额外容纳
+reasoning 与 XML 包装。分段输入容量同时预留模型输出和上一段摘要的实际估算大小，不能用增大输出预算突破窗口。
+达到输出上限返回 `output_truncated`，不保存不完整摘要。
+
 解析后以转义的 context_summary 包装为 user 消息。空摘要、无效 XML、不比输入短的摘要不保存。
 工具执行状态仍以 RuntimeStore 为准，摘要不能授予权限或修改工具状态。
 
@@ -138,7 +143,7 @@ Coordinator 注入 AgentEventSink，通过现有 WebSocket 发 context.compactio
 payload 包含 compression_id、status、mode、covers、reason，不含原文或异常正文。
 通知通过 DurableEventSink 写入持久 Outbox。产物保存 covers、mode、context_window、input_tokens、output_tokens 与生成时间。
 同步事件携带当前 step 的 `trace_id` 与 `step_id`；异步事件携带触发它的 step。
-终态事件另带 `duration_ms`。失败原因区分 `invalid_output`、`over_budget`、`not_reduced`、
+终态事件另带 `duration_ms`。失败原因区分 `invalid_output`、`output_truncated`、`not_reduced`、
 `provider_error`、`storage_error`、`lease_busy` 等，不能用同一个原因合并不同故障。
 
 ## 8 跨仓库影响

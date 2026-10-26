@@ -12,11 +12,11 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from core.context.policy import model_capacity
-from core.protocol.datatype.llm import LlmRequest
+from core.protocol.datatype.llm import LlmFinishReason, LlmRequest
 from core.protocol.datatype.message import Message
 from core.protocol.interface.compaction import CompactionError, Compactor
 from core.protocol.interface.llm import ModelProvider
-from core.utils.tokens import estimate, estimate_text
+from core.utils.tokens import estimate_text
 
 _INSTRUCTION = """\
 你把一段对话历史压缩成一条摘要，供同一个助手接着往下推理。只输出下面这个 XML，不要解释：
@@ -57,38 +57,49 @@ class LlmCompactor(Compactor):
     def compress(
         self, messages: Sequence[Mapping[str, Any]], *, budget_tokens: int
     ) -> list[dict[str, Any]] | None:
-        budget = min(budget_tokens, self._max_output_tokens)
+        target = budget_tokens
         # The compression model can be smaller than the main model. Carry a bounded digest
         # forward; never send a 1M conversation to a 200K summarizer in one call.
-        capacity = int(self._context_window * 0.8) - estimate_text(_INSTRUCTION) - budget * 2 - 128
+        instruction = (
+            _INSTRUCTION + f"\n摘要正文尽量控制在 {target} tokens 以内，优先保留必要事实。"
+        )
+        capacity = (
+            int(self._context_window * 0.8)
+            - estimate_text(instruction)
+            - self._max_output_tokens
+            - 128
+        )
         if capacity <= 0:
             raise CompactionError("capacity_exhausted")
         body = transcript(messages)
         digest = None
         offset = 0
         while offset < len(body):
-            end = min(len(body), offset + capacity * 4)
-            while estimate_text(body[offset:end]) > capacity:
+            prefix = (digest["content"] + "\n\n") if digest else ""
+            available = capacity - estimate_text(prefix)
+            if available <= 0:
+                raise CompactionError("chunk_capacity_exhausted")
+            end = min(len(body), offset + available * 4)
+            while estimate_text(body[offset:end]) > available:
                 end = offset + (end - offset) // 2
             if end <= offset:
                 raise CompactionError("chunk_capacity_exhausted")
-            prefix = (digest["content"] + "\n\n") if digest else ""
             response = self._provider.complete(
                 LlmRequest(
                     messages=[
-                        Message("system", _INSTRUCTION),
+                        Message("system", instruction),
                         Message("user", prefix + body[offset:end]),
                     ],
                     model=self._model,
-                    max_output_tokens=budget,
+                    max_output_tokens=self._max_output_tokens,
                     temperature=0,
                 )
             )
+            if response.finish_reason == LlmFinishReason.LENGTH:
+                raise CompactionError("output_truncated")
             digest = _parse(response.content)
             if digest is None:
                 raise CompactionError("invalid_output")
-            if estimate([digest]) > budget:
-                raise CompactionError("over_budget")
             offset = end
         if digest is None:
             raise CompactionError("empty_output")

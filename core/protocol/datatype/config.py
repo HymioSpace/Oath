@@ -63,8 +63,10 @@ class AgentConfig:
     compress_sync_at_ratio: float = 0.9
     #: 压缩保留末尾这么多条消息。
     compress_keep_recent: int = 12
-    #: 压缩结果的规模上限，也是压缩调用的输出上限。
-    compress_summary_tokens: int = 1024
+    #: 摘要长度目标，仅用于 prompt 指导，不拒绝超出目标的有效摘要。
+    compress_summary_tokens: int = 4096
+    #: 压缩模型的输出预算，额外容纳 reasoning 和格式包装。
+    compress_max_output_tokens: int = 16384
 
     #: 内置扩展根目录。每个目录下扫描 `tools/`、`cli/`、`skills/`。
     #: 外部扩展由 `tool_dirs`、`cli_dirs`、`skill_dirs` 分别指定。
@@ -133,6 +135,7 @@ class AgentConfig:
             "tool_result_detail_chars",
             "compress_keep_recent",
             "compress_summary_tokens",
+            "compress_max_output_tokens",
             "skill_index_tokens",
         ):
             value = getattr(self, name)
@@ -146,6 +149,7 @@ class AgentConfig:
             "tool_result_detail_chars",
             "compress_keep_recent",
             "compress_summary_tokens",
+            "compress_max_output_tokens",
             "skill_index_tokens",
         ):
             if not isinstance(getattr(self, name), int):

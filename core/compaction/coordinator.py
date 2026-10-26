@@ -378,8 +378,6 @@ class CompactionCoordinator:
             return
         if not replacement:
             reason = "empty_output"
-        elif estimate(replacement) > budget:
-            reason = "over_budget"
         elif estimate(replacement) >= estimate(segment):
             reason = "not_reduced"
         else:
