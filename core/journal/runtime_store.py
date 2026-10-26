@@ -39,9 +39,10 @@ def fold_commit(state, payload):
 
 
 class RuntimeStore:
-    def __init__(self, storage: StoragePort, *, fence=None):
+    def __init__(self, storage: StoragePort, *, fence=None, patch_commits=False):
         self.storage = storage
         self.fence = fence
+        self.patch_commits = patch_commits
         self._context_fence = ContextVar("transaction_fence", default=None)
         # A Brain executes its step transitions on one worker thread. Reusing the
         # snapshot returned by its previous commit avoids repeatedly transferring
@@ -61,6 +62,12 @@ class RuntimeStore:
         return cast(
             State, self.storage.call("state.read", user_id=user.storage_id, compact=True)["state"]
         )
+
+    def entries(self, user: User, table: str, keys: list[str]) -> State:
+        if not self.patch_commits:
+            state = self.read(user)[table]
+            return {key: state[key] for key in keys if key in state}
+        return self.storage.call("state.entries", user_id=user.storage_id, table=table, keys=keys)
 
     def transact(
         self,
@@ -85,17 +92,49 @@ class RuntimeStore:
             if after == snapshot["state"]:
                 return copy.deepcopy(result)
             try:
-                self.storage.call(
-                    "state.commit",
+                if set(after) != set(TABLES) or any(
+                    not isinstance(after[table], dict)
+                    or not snapshot["state"][table].keys() <= after[table].keys()
+                    for table in TABLES
+                ):
+                    raise ValueError("State tables and keys cannot be deleted")
+                transition = (
+                    {
+                        "changes": {
+                            table: {
+                                key: value
+                                for key, value in after[table].items()
+                                if key not in snapshot["state"][table]
+                                or value != snapshot["state"][table][key]
+                            }
+                            for table in TABLES
+                        }
+                    }
+                    if self.patch_commits
+                    else {"state": after}
+                )
+                receipt = self.storage.call(
+                    "state.patch" if self.patch_commits else "state.commit",
                     user_id=user.storage_id,
                     expected=snapshot["version"],
-                    state=after,
+                    **transition,
                     reason=reason,
                     commit_id=uuid.uuid4().hex,
                     fence=self._context_fence.get() or self.fence,
                 )
+                version = snapshot["version"] + 1
+                if self.patch_commits:
+                    if receipt["replayed"]:
+                        fresh = self.storage.call(
+                            "state.read", user_id=user.storage_id, compact=True
+                        )
+                        self._snapshots.values[user.storage_id] = (fresh["version"], fresh["state"])
+                        return copy.deepcopy(result)
+                    version = receipt["version"]
+                    for step_id, digest in receipt["archived_requests"].items():
+                        after["steps"][step_id].update(request=None, request_archive=digest)
                 self._snapshots.values[user.storage_id] = (
-                    snapshot["version"] + 1,
+                    version,
                     after,
                 )
                 return copy.deepcopy(result)

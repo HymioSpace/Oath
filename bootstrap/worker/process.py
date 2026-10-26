@@ -35,7 +35,7 @@ def run(config):
     )
     provider = ConfiguredProvider(config.agent, secrets, resolver(config.agent))
     compaction = CompactionCoordinator(
-        RuntimeStore(storage),
+        RuntimeStore(storage, patch_commits=True),
         LlmCompactor(
             provider,
             model=config.agent.provider.model,

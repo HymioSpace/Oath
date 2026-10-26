@@ -240,7 +240,8 @@ class AgentBrain:
             self._store.transact(user, "step.response", save, reuse_snapshot=True)
             step["response"] = payload
         # 已保存响应后只补后处理；不重新调用模型。
-        cancelled = self._store.read(user)["meta"].get(f"cancelled:{step['run_id']}")
+        cancel_key = f"cancelled:{step['run_id']}"
+        cancelled = self._store.entries(user, "meta", [cancel_key]).get(cancel_key)
         calls = [] if cancelled else step["response"]["tool_calls"]
         if calls:
             self._ctx.tools.submit_batch(

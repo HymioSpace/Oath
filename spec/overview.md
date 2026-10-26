@@ -39,4 +39,6 @@ See [model selection](feature-model-selection.md) for per-user model choice and 
 
 Native image references and private application resolution: [image input](feature-native-images.md).
 
+Versioned incremental service transitions: [state patches](feature-state-patches.md).
+
 Event XML and per-user context capacities: [context events and window policy](feature-context-events-window.md).

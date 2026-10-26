@@ -64,11 +64,27 @@ def append_journal(db, user_id, type_, payload, key, occur_dt=None):
     return {"seq": seq, "raw": raw, "hit": False}
 
 
-def commit(db, user_id, expected, after, reason, commit_id, fence=None):
+def commit(db, user_id, expected, after, reason, commit_id, fence=None, *, changes=None):
     scheduling.check(db, user_id, fence, required=reason.startswith("step."))
     known = db.execute(
         "SELECT fingerprint FROM commits WHERE user_id=? AND commit_id=?", (user_id, commit_id)
     ).fetchone()
+    patch_fingerprint = None
+    if changes is not None:
+        if (
+            not isinstance(changes, dict)
+            or not changes.keys() <= set(TABLES)
+            or any(not isinstance(entries, dict) for entries in changes.values())
+        ):
+            raise ValueError("Invalid state patch")
+        patch_fingerprint = hashlib.sha256(
+            encode(["patch", expected, changes, reason]).encode()
+        ).hexdigest()
+        if known:
+            if known[0] != patch_fingerprint:
+                raise ValueError("Commit identity conflict")
+            row = db.execute("SELECT version FROM users WHERE user_id=?", (user_id,)).fetchone()
+            return {"version": row[0], "archived_requests": {}, "replayed": True}
     row = None
     if not known:
         row = db.execute(
@@ -76,13 +92,25 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None):
         ).fetchone()
         if row["version"] != expected:
             raise StorageConflict("state version changed")
+    before = json.loads(row["state_json"]) if row else None
+    if changes is not None:
+        after = {table: {**before[table], **changes.get(table, {})} for table in TABLES}
+        # Request compaction mutates step entries. Keep the previous view intact
+        # for journal diffs and outbox projection.
+        after["steps"] = {key: dict(step) for key, step in after["steps"].items()}
+    archiving = [
+        key
+        for key, step in after["steps"].items()
+        if step.get("status") == "completed" and step.get("request") is not None
+    ]
     request_archives.compact(db, user_id, after)
-    fingerprint = hashlib.sha256(encode([expected, after, reason]).encode()).hexdigest()
+    fingerprint = (
+        patch_fingerprint or hashlib.sha256(encode([expected, after, reason]).encode()).hexdigest()
+    )
     if known:
         if known[0] != fingerprint:
             raise ValueError("Commit identity conflict")
         return True
-    before = json.loads(row["state_json"])
     if set(after) != set(TABLES) or any(
         not isinstance(after[t], dict) or not before[t].keys() <= after[t].keys() for t in TABLES
     ):
@@ -117,6 +145,12 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None):
         )
         project(db, user_id, before, after, changes)
     db.execute("INSERT INTO commits VALUES(?,?,?)", (user_id, commit_id, fingerprint))
+    if patch_fingerprint:
+        return {
+            "version": expected + bool(changes),
+            "archived_requests": {key: after["steps"][key]["request_archive"] for key in archiving},
+            "replayed": False,
+        }
     return True
 
 

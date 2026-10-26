@@ -244,7 +244,7 @@ class ThreadedToolSystem(ToolSystem):
 
     def _classify(self, user: User, invocation_id: str) -> None:
         try:
-            call = self.store.read(user)["calls"][invocation_id]
+            call = self.store.entries(user, "calls", [invocation_id])[invocation_id]
             registered = self._registry.get(call["tool"])
             if registered is None:
                 raise ValueError("工具未注册")
@@ -409,7 +409,7 @@ class ThreadedToolSystem(ToolSystem):
             return
         out: list[Inbound] = []
 
-        def tick(state: State) -> None:
+        def tick(state: State) -> State:
             now = time.time()
             self._activate(user, state, now, out)
             for call in state["calls"].values():
@@ -450,9 +450,15 @@ class ThreadedToolSystem(ToolSystem):
                         )
                     )
 
-        self.store.transact(user, "tool.deadlines", tick)
+            return {
+                "batches": {
+                    key: {"admitted": batch["admitted"]} for key, batch in state["batches"].items()
+                },
+                "calls": {key: {"status": call["status"]} for key, call in state["calls"].items()},
+            }
+
+        state = self.store.transact(user, "tool.deadlines", tick)
         self._publish(user, out)
-        state = self.store.read(user)
         for batch_id, batch in state["batches"].items():
             if batch["admitted"]:
                 self._deadlines.forget((user, batch_id, "admission"))

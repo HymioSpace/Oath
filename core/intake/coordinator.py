@@ -58,9 +58,9 @@ class IntakeCoordinator:
 
     def claim(self, user: User) -> State | None:
         """Freeze StepInput. Journal, state and inbox removal commit atomically."""
-        if self._store.read(user)["meta"].get("intake_error"):
-            return None
         state = self._store.read(user)
+        if state["meta"].get("intake_error"):
+            return None
         active = state["meta"].get("active_step")
         items = self._peek(user)
         if active:
@@ -86,9 +86,7 @@ class IntakeCoordinator:
         )
         if not isinstance(definition_channel, str) or not 0 < len(definition_channel) <= 32:
             definition_channel = "unknown"
-        definitions = [
-            t.to_dict() for t in self._ctx.tools.definitions(channel=definition_channel)
-        ]
+        definitions = [t.to_dict() for t in self._ctx.tools.definitions(channel=definition_channel)]
         config = self._ctx.config
         fresh = False
         claimed: list[tuple[str, float | None, State]] = []
@@ -132,8 +130,7 @@ class IntakeCoordinator:
                 state["inputs"][key] = entry
             step_id = uuid.uuid4().hex
             new_user = any(
-                entry["queue"] == QueueName.USER
-                and Inbound.from_dict(entry["item"]).wakes
+                entry["queue"] == QueueName.USER and Inbound.from_dict(entry["item"]).wakes
                 for _, entry in entries
             )
             new_run = (
