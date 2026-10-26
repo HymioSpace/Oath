@@ -45,6 +45,9 @@ Use clear Markdown. Report what actually happened and the remaining blocker, if 
 # Alternatively remove system_prompt above and point to a UTF-8 Markdown file.
 # system_prompt_file = "./prompts/assistant.md"
 max_output_tokens = 8192
+# Compression has a separate generation budget; the retained summary stays smaller.
+compress_max_output_tokens = 16384
+compress_summary_tokens = 4096
 temperature = 0.7
 # Consecutive tool-only steps; user input or explicit system intervention resets this.
 max_tool_only_steps = 100

@@ -12,7 +12,7 @@ from xml.etree import ElementTree
 from xml.sax.saxutils import escape
 
 from core.context.policy import model_capacity
-from core.protocol.datatype.llm import LlmRequest
+from core.protocol.datatype.llm import LlmFinishReason, LlmRequest
 from core.protocol.datatype.message import Message
 from core.protocol.interface.compaction import CompactionError, Compactor
 from core.protocol.interface.llm import ModelProvider
@@ -60,7 +60,14 @@ class LlmCompactor(Compactor):
         budget = min(budget_tokens, self._max_output_tokens)
         # The compression model can be smaller than the main model. Carry a bounded digest
         # forward; never send a 1M conversation to a 200K summarizer in one call.
-        capacity = int(self._context_window * 0.8) - estimate_text(_INSTRUCTION) - budget * 2 - 128
+        instruction = _INSTRUCTION + f"\n摘要正文不超过 {budget} tokens。"
+        capacity = (
+            int(self._context_window * 0.8)
+            - estimate_text(instruction)
+            - self._max_output_tokens
+            - budget
+            - 128
+        )
         if capacity <= 0:
             raise CompactionError("capacity_exhausted")
         body = transcript(messages)
@@ -76,14 +83,16 @@ class LlmCompactor(Compactor):
             response = self._provider.complete(
                 LlmRequest(
                     messages=[
-                        Message("system", _INSTRUCTION),
+                        Message("system", instruction),
                         Message("user", prefix + body[offset:end]),
                     ],
                     model=self._model,
-                    max_output_tokens=budget,
+                    max_output_tokens=self._max_output_tokens,
                     temperature=0,
                 )
             )
+            if response.finish_reason == LlmFinishReason.LENGTH:
+                raise CompactionError("output_truncated")
             digest = _parse(response.content)
             if digest is None:
                 raise CompactionError("invalid_output")

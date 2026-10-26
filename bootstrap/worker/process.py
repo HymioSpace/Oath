@@ -39,7 +39,7 @@ def run(config):
         LlmCompactor(
             provider,
             model=config.agent.provider.model,
-            max_output_tokens=config.agent.max_output_tokens,
+            max_output_tokens=config.agent.compress_max_output_tokens,
             context_window=model_capacity(
                 config.agent.provider.model, config.agent.model_context_windows
             ),
