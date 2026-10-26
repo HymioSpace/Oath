@@ -63,7 +63,7 @@ class AgentConfig:
     compress_sync_at_ratio: float = 0.9
     #: 压缩保留末尾这么多条消息。
     compress_keep_recent: int = 12
-    #: 最终保留摘要的规模上限。
+    #: 摘要长度目标，仅用于 prompt 指导，不拒绝超出目标的有效摘要。
     compress_summary_tokens: int = 4096
     #: 压缩模型的输出预算，额外容纳 reasoning 和格式包装。
     compress_max_output_tokens: int = 16384
@@ -154,8 +154,6 @@ class AgentConfig:
         ):
             if not isinstance(getattr(self, name), int):
                 raise ValueError(f"{name} 必须是正整数")
-        if self.compress_max_output_tokens < self.compress_summary_tokens:
-            raise ValueError("compress_max_output_tokens must cover compress_summary_tokens")
         for name in ("compress_async_at_ratio", "compress_sync_at_ratio"):
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 < value <= 1:
