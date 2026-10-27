@@ -103,6 +103,14 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None, *, chang
         for key, step in after["steps"].items()
         if step.get("status") == "completed" and step.get("request") is not None
     ]
+    archiving_drafts = [
+        key
+        for key, step in after["steps"].items()
+        if "active_step" in after.get("meta", {})
+        and step.get("request_draft") is not None
+        and key != after.get("meta", {}).get("active_step")
+        and step.get("status") in {"paused", "failed", "completed"}
+    ]
     request_archives.compact(db, user_id, after)
     fingerprint = (
         patch_fingerprint or hashlib.sha256(encode([expected, after, reason]).encode()).hexdigest()
@@ -116,15 +124,16 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None, *, chang
     ):
         raise ValueError("State tables and keys cannot be deleted")
     for step_id, step in after["steps"].items():
-        digest = step.get("request_archive")
-        if (
-            digest
-            and digest != before["steps"].get(step_id, {}).get("request_archive")
-            and not db.execute(
-                "SELECT 1 FROM request_archives WHERE user_id=? AND digest=?", (user_id, digest)
-            ).fetchone()
-        ):
-            raise ValueError("Missing archived request")
+        for field in ("request_archive", "request_draft_archive"):
+            digest = step.get(field)
+            if (
+                digest
+                and digest != before["steps"].get(step_id, {}).get(field)
+                and not db.execute(
+                    "SELECT 1 FROM request_archives WHERE user_id=? AND digest=?", (user_id, digest)
+                ).fetchone()
+            ):
+                raise ValueError("Missing archived request")
     changes = {
         t: {k: v for k, v in after[t].items() if before[t].get(k) != v or k not in before[t]}
         for t in TABLES
@@ -149,6 +158,9 @@ def commit(db, user_id, expected, after, reason, commit_id, fence=None, *, chang
         return {
             "version": expected + bool(changes),
             "archived_requests": {key: after["steps"][key]["request_archive"] for key in archiving},
+            "archived_drafts": {
+                key: after["steps"][key]["request_draft_archive"] for key in archiving_drafts
+            },
             "replayed": False,
         }
     return True

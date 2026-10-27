@@ -42,3 +42,5 @@ Native image references and private application resolution: [image input](featur
 Versioned incremental service transitions: [state patches](feature-state-patches.md).
 
 Event XML and per-user context capacities: [context events and window policy](feature-context-events-window.md).
+
+Late tool-result delivery, projected reads and stage timing: [runtime latency](feature-runtime-latency-results.md).

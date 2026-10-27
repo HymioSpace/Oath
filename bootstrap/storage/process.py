@@ -19,6 +19,7 @@ OPERATIONS = {
     "state.patch",
     "users.list",
     "tools.users",
+    "tools.replay_results",
     "queue.add",
     "message.react",
     "relay.claim",

@@ -76,6 +76,10 @@ class StorageService:
                 scheduling.check(db, uid, fence)
             if operation.startswith("subagent."):
                 return subagents.call(db, uid, operation, p)
+            if operation == "tools.replay_results":
+                from core.storage.tool_recovery import replay
+
+                return replay(db, uid, p.get("invocation_ids"), dry_run=p.get("dry_run", True))
             if operation == "state.summary":
                 return status_summary.read(db, uid)
             if operation == "state.entries":
@@ -84,15 +88,55 @@ class StorageService:
                     raise ValueError("Invalid state entry selection")
                 if any(not isinstance(key, str) or len(key) > 256 for key in keys):
                     raise ValueError("Invalid state entry key")
-                # Select one table on the SQLite owner; accumulated conversation
-                # and unrelated tables never cross the RPC boundary.
-                row = db.execute(
-                    "SELECT json_extract(state_json,?) FROM users WHERE user_id=?",
-                    ("$." + json.dumps(table), uid),
-                ).fetchone()
-                values = json.loads(row[0])
-                return {key: values[key] for key in keys if key in values}
+                if not keys:
+                    return {}
+                placeholders = ",".join("?" for _ in keys)
+                rows = db.execute(
+                    "SELECT e.key,e.value,e.type FROM users u, json_each(u.state_json,?) e "
+                    f"WHERE u.user_id=? AND e.key IN ({placeholders})",
+                    ("$." + table, uid, *keys),
+                )
+                return {
+                    r[0]: json.loads(r[1])
+                    if r[2] in {"object", "array"}
+                    else True
+                    if r[2] == "true"
+                    else False
+                    if r[2] == "false"
+                    else r[1]
+                    for r in rows
+                }
             if operation == "state.read":
+                tables = p.get("tables")
+                projection = p.get("projection")
+                if projection not in {None, "tools"}:
+                    raise ValueError("Invalid state projection")
+                if tables is not None or projection:
+                    tables = ["calls", "batches", "meta", "controls"] if projection else tables
+                    if (
+                        not isinstance(tables, list)
+                        or not tables
+                        or len(tables) > len(runtime.TABLES)
+                        or any(t not in runtime.TABLES for t in tables)
+                    ):
+                        raise ValueError("Invalid state tables")
+                    columns = ",".join("json_extract(state_json,?)" for _ in tables)
+                    row = db.execute(
+                        f"SELECT version,{columns} FROM users WHERE user_id=?",
+                        (*("$." + t for t in tables), uid),
+                    ).fetchone()
+                    state = {t: {} for t in runtime.TABLES}
+                    state.update({t: json.loads(row[i + 1]) for i, t in enumerate(tables)})
+                    if projection == "tools":
+                        state["steps"] = {
+                            r[0]: {"step_id": r[0], "trace_id": r[1], "channel": r[2]}
+                            for r in db.execute(
+                                "SELECT step_id,json_extract(body_json,'$.trace_id'),"
+                                "json_extract(body_json,'$.channel') FROM steps WHERE user_id=?",
+                                (uid,),
+                            )
+                        }
+                    return {"version": row[0], "state": state}
                 row = db.execute(
                     "SELECT version,state_json FROM users WHERE user_id=?", (uid,)
                 ).fetchone()

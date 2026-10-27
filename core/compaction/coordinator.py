@@ -138,7 +138,7 @@ class CompactionCoordinator:
     # -- 内部 --------------------------------------------------------------
 
     def _history(self, user: User) -> tuple[list[State], State]:
-        state = self._store.read(user)
+        state = self._store.read(user, tables=("conversation", "compactions"))
         return list(state["conversation"].get("messages", [])), state
 
     def _usage(self, messages: list[State], state: State, system_prompt: str | None = None) -> int:
