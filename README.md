@@ -95,6 +95,16 @@ Each service exposes Prometheus metrics at `/metrics`. Prometheus also scrapes R
 Grafana includes a provisioned Oath dashboard for RPC, queue-to-wake, model TTFT, tools and
 delivery latency.
 
+When a separately deployed application exposes Prometheus metrics, pass its persistent
+file-discovery JSON to `oath start`:
+
+```bash
+oath start --hymio-metrics-target /absolute/path/to/hymio-metrics-targets.json
+```
+
+The path is saved in the deployment record and reused by `oath restart`, so a missing shell
+variable cannot silently revert Prometheus to the local default target.
+
 ```bash
 oath status
 oath restart   # reuses the saved config and extension paths

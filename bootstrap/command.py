@@ -110,6 +110,23 @@ def _load(name: str) -> dict:
     return record
 
 
+def _metrics_target(raw: Path | None) -> str:
+    if raw is None:
+        return ""
+    path = raw.expanduser().resolve()
+    if not path.is_file():
+        raise ValueError(f"Hymio metrics target file does not exist: {path}")
+    return str(path)
+
+
+def _docker_environment(record: dict) -> dict[str, str]:
+    environment = os.environ.copy()
+    metrics_target = record.get("hymio_metrics_targets")
+    if metrics_target:
+        environment["OATH_HYMIO_METRICS_TARGETS"] = metrics_target
+    return environment
+
+
 def _run_docker(action: str, record: dict, *, recreate: bool = False) -> None:
     cmd = [
         sys.executable,
@@ -127,7 +144,7 @@ def _run_docker(action: str, record: dict, *, recreate: bool = False) -> None:
     ]
     if recreate:
         cmd.append("--recreate")
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_docker_environment(record))
 
 
 def _endpoints(record: dict) -> tuple[str, str]:
@@ -156,6 +173,8 @@ def _show(record: dict) -> None:
     print(f"WS:  {ws}")
     print(f"Biz: {biz}")
     print(f"Auth: {record.get('auth_mode', 'none')}")
+    if record.get("hymio_metrics_targets"):
+        print(f"Hymio metrics target: {record['hymio_metrics_targets']}")
     for kind in _KINDS:
         for path in record["paths"][kind]:
             print(f"{kind}: {path}")
@@ -189,6 +208,11 @@ def main() -> None:
         "--image-resolver",
         default="",
         help="Private image resolver URL; uses the context provider token file",
+    )
+    start.add_argument(
+        "--hymio-metrics-target",
+        type=Path,
+        help="Persistent file_sd target JSON used by Prometheus for Hymio Backend",
     )
     auth_arguments(start)
     for kind in _KINDS:
@@ -231,6 +255,7 @@ def main() -> None:
                 raise ValueError("--image-resolver requires --context-provider-token-file")
             if context_token and not context_token.is_file():
                 raise ValueError("Context provider token file does not exist")
+            metrics_target = _metrics_target(args.hymio_metrics_target)
             environment = auth_environment(args.auth_mode, args.auth_url, auth_file)
             overlay_data = _overlay(paths, loaded.agent.system_prompt_file)
             for service in ("gateway", "biz"):
@@ -286,6 +311,7 @@ def main() -> None:
                 "system_prompt_file": str(loaded.agent.system_prompt_file)
                 if loaded.agent.system_prompt_file
                 else None,
+                "hymio_metrics_targets": metrics_target,
             }
             _run_docker("up", record)
             _healthy(record)
@@ -299,6 +325,9 @@ def main() -> None:
             for kind, paths in record["paths"].items():
                 for path in paths:
                     _validate_directory(path, kind)
+            metrics_target = record.get("hymio_metrics_targets")
+            if metrics_target and not Path(metrics_target).is_file():
+                raise ValueError(f"Hymio metrics target file does not exist: {metrics_target}")
             _run_docker("up", record, recreate=True)
             _healthy(record)
             _show(record)
