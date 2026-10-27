@@ -7,7 +7,8 @@ import itertools
 import logging
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import cast
 
 from core.compaction.coordinator import CompactionCoordinator
@@ -108,7 +109,10 @@ class AgentBrain:
         draft = step["request_draft"]
         if self._ctx.context_provider:
             draft = copy.deepcopy(draft)
-            application_context = self._ctx.context_provider(user, step.get("channel", "unknown"))
+            with self._phase(user, step["step_id"], "context_lookup"):
+                application_context = self._ctx.context_provider(
+                    user, step.get("channel", "unknown")
+                )
             if application_context:
                 prefix = (
                     "\n\n## Personal context data\n"
@@ -123,16 +127,17 @@ class AgentBrain:
         window = step.get("context_window") or effective_window(
             self._ctx.config.context_window, draft["model"], self._ctx.config.model_context_windows
         )
-        self._compaction.prepare(
-            user,
-            overhead=overhead,
-            system_prompt=prompt,
-            fence=self._store.fence,
-            context_window=window,
-            trace_id=step["trace_id"],
-            step_id=step["step_id"],
-            channel=step.get("channel", "unknown"),
-        )
+        with self._phase(user, step["step_id"], "compaction_prepare"):
+            self._compaction.prepare(
+                user,
+                overhead=overhead,
+                system_prompt=prompt,
+                fence=self._store.fence,
+                context_window=window,
+                trace_id=step["trace_id"],
+                step_id=step["step_id"],
+                channel=step.get("channel", "unknown"),
+            )
         if self._stop.is_set():
             return step
 
@@ -161,7 +166,8 @@ class AgentBrain:
                 current["attempts"] = int(current.get("attempts", 0)) + 1
             return cast(State, current)
 
-        prepared = self._store.transact(user, "step.request", freeze, reuse_snapshot=True)
+        with self._phase(user, step["step_id"], "request_freeze"):
+            prepared = self._store.transact(user, "step.request", freeze, reuse_snapshot=True)
         if prepared["status"] == "paused":
             STEP_PAUSED.labels("context_window").inc()
             COMPACTION_BLOCKED_STEPS.labels("sync").inc()
@@ -230,36 +236,47 @@ class AgentBrain:
                 self._record_llm(user, step, attempt_no, started_ns, clock, timing, None, str(exc))
                 self._fail(user, step_id, str(exc))
                 return
-            self._record_llm(
-                user, step, attempt_no, started_ns, clock, timing, response, None, content_timing
-            )
+            with self._phase(user, step_id, "llm_trace_persist"):
+                self._record_llm(
+                    user,
+                    step,
+                    attempt_no,
+                    started_ns,
+                    clock,
+                    timing,
+                    response,
+                    None,
+                    content_timing,
+                )
 
             def save(state: State) -> None:
                 state["steps"][step_id]["response"] = payload
 
-            self._store.transact(user, "step.response", save, reuse_snapshot=True)
+            with self._phase(user, step_id, "response_persist"):
+                self._store.transact(user, "step.response", save, reuse_snapshot=True)
             step["response"] = payload
         # 已保存响应后只补后处理；不重新调用模型。
         cancel_key = f"cancelled:{step['run_id']}"
         cancelled = self._store.entries(user, "meta", [cancel_key]).get(cancel_key)
         calls = [] if cancelled else step["response"]["tool_calls"]
         if calls:
-            self._ctx.tools.submit_batch(
-                user,
-                step_id,
-                [
-                    ToolCallRequest(
-                        tool=c["name"],
-                        arguments=c["arguments"],
-                        tool_call_id=c["id"],
-                        invocation_id=f"{step_id}-{i}",
-                        batch_id=step_id,
-                        run_id=step["run_id"],
-                        channel=step.get("channel", "unknown"),
-                    )
-                    for i, c in enumerate(calls)
-                ],
-            )
+            with self._phase(user, step_id, "tool_submit"):
+                self._ctx.tools.submit_batch(
+                    user,
+                    step_id,
+                    [
+                        ToolCallRequest(
+                            tool=c["name"],
+                            arguments=c["arguments"],
+                            tool_call_id=c["id"],
+                            invocation_id=f"{step_id}-{i}",
+                            batch_id=step_id,
+                            run_id=step["run_id"],
+                            channel=step.get("channel", "unknown"),
+                        )
+                        for i, c in enumerate(calls)
+                    ],
+                )
             self._stage(user, step_id, STAGE_TOOLS_SUBMITTED, {OATH_STEP_TOOL_CALLS: len(calls)})
 
         def finish(state: State) -> State:
@@ -285,7 +302,8 @@ class AgentBrain:
             return cast(State, current)
 
         # 终态从事务里回读，不复用认领时那份 —— 写进 span 的必须是最终的 status。
-        closed = self._store.transact(user, "step.completed", finish, reuse_snapshot=True)
+        with self._phase(user, step_id, "completion_persist"):
+            closed = self._store.transact(user, "step.completed", finish, reuse_snapshot=True)
         self._stage(user, step_id, STAGE_COMPLETED, {OATH_STEP_TOOL_CALLS: len(calls)})
         self._close_step(user, closed, SpanStatus.OK, int(closed["attempts"]))
 
@@ -346,6 +364,20 @@ class AgentBrain:
             ),
         )
 
+    @contextmanager
+    def _phase(self, user: User, step_id: str, phase: str) -> Iterator[None]:
+        started = time.monotonic()
+        self._stage(user, step_id, f"oath.stage.{phase}.started", {})
+        try:
+            yield
+        finally:
+            self._stage(
+                user,
+                step_id,
+                f"oath.stage.{phase}.completed",
+                {"oath.stage.duration_ms": round((time.monotonic() - started) * 1000, 3)},
+            )
+
     def _stage(self, user: User, step_id: str, name: str, attributes: JsonObject) -> None:
         """记一个 Brain 阶段节点。step span 要到最后才整条写出去，节点先攒着。
 
@@ -370,9 +402,13 @@ class AgentBrain:
             return
         start = started
         end = time.time_ns()
-        state = self._store.read(user)
-        entries = state["inputs"]
+        entries = self._store.entries(user, "inputs", step["input_ids"])
         inputs = [entries[key] for key in step["input_ids"] if key in entries]
+        source_ids = list(
+            {entry.get("item", {}).get("payload", {}).get("batch_id") for entry in inputs}
+            - {None, ""}
+        )
+        state = {"steps": self._store.entries(user, "steps", source_ids)}
         claimed = [(entry["queue"], entry["buffered_at"], entry["item"]) for entry in inputs]
         stages = self._take_stages(step["step_id"])
         self._trace(

@@ -64,8 +64,10 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
     for _, payload in selected.values():
         result = payload.get("content")
         refs = result.get("image_refs") if isinstance(result, dict) else None
-        if isinstance(refs, list) and len(refs) <= 12 and all(
-            isinstance(ref, str) and 1 <= len(ref) <= 128 for ref in refs
+        if (
+            isinstance(refs, list)
+            and len(refs) <= 12
+            and all(isinstance(ref, str) and 1 <= len(ref) <= 128 for ref in refs)
         ):
             image_refs.extend(refs)
     if image_refs:
@@ -98,7 +100,14 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
             p = item.payload
             attrs = " ".join(
                 f"{name}={quoteattr(str(p.get(name, '')))}"
-                for name in ("event_id", "batch_id", "invocation_id", "outcome")
+                for name in (
+                    "event_id",
+                    "batch_id",
+                    "invocation_id",
+                    "run_id",
+                    "tool_call_id",
+                    "outcome",
+                )
             )
             messages.append(
                 {

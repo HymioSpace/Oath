@@ -99,22 +99,7 @@ class ToolConsumer(QueueConsumer):
         """
         window = self.ctx.config.tool_round_timeout_seconds
 
-        new_intents = [
-            pending
-            for pending in self.ctx.buffer.peek(user, QueueName.USER)
-            if pending.wakes
-        ]
-        if new_intents and any(
-            not pending.occur_dt or item.occur_dt > pending.occur_dt for pending in new_intents
-        ):
-            self._reject(user, item, "工具结果晚于新的用户意图，已作为历史结果隔离")
-            return
-
         def check(state: State) -> str:
-            run_id = item.payload.get("run_id")
-            current_run = state["meta"].get("run_id")
-            if isinstance(run_id, str) and run_id and current_run and run_id != current_run:
-                return "工具结果属于已被新用户意图替代的 run"
             invocation_id = item.payload.get("invocation_id")
             call = state["calls"].get(invocation_id) if isinstance(invocation_id, str) else None
             if not (

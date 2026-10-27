@@ -6,7 +6,7 @@ import copy
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, TypedDict, TypeVar, cast
@@ -39,10 +39,15 @@ def fold_commit(state, payload):
 
 
 class RuntimeStore:
-    def __init__(self, storage: StoragePort, *, fence=None, patch_commits=False):
+    def __init__(
+        self, storage: StoragePort, *, fence=None, patch_commits=False, read_projection=None
+    ):
+        if read_projection and not patch_commits:
+            raise ValueError("Projected reads require patch commits")
         self.storage = storage
         self.fence = fence
         self.patch_commits = patch_commits
+        self.read_projection = read_projection
         self._context_fence = ContextVar("transaction_fence", default=None)
         # A Brain executes its step transitions on one worker thread. Reusing the
         # snapshot returned by its previous commit avoids repeatedly transferring
@@ -58,12 +63,27 @@ class RuntimeStore:
         finally:
             self._context_fence.reset(token)
 
-    def read(self, user: User) -> State:
+    def _read_snapshot(self, user: User, *, tables: Sequence[str] | None = None) -> Snapshot:
+        options = (
+            {"tables": list(tables)}
+            if tables
+            else ({"projection": self.read_projection} if self.read_projection else {})
+        )
         return cast(
-            State, self.storage.call("state.read", user_id=user.storage_id, compact=True)["state"]
+            Snapshot,
+            self.storage.call("state.read", user_id=user.storage_id, compact=True, **options),
         )
 
+    def read(self, user: User, *, tables: Sequence[str] | None = None) -> State:
+        return self._read_snapshot(user, tables=tables)["state"]
+
     def entries(self, user: User, table: str, keys: list[str]) -> State:
+        if len(keys) > 128:
+            return {
+                key: value
+                for offset in range(0, len(keys), 128)
+                for key, value in self.entries(user, table, keys[offset : offset + 128]).items()
+            }
         if not self.patch_commits:
             state = self.read(user)[table]
             return {key: state[key] for key in keys if key in state}
@@ -79,12 +99,7 @@ class RuntimeStore:
     ) -> T:
         cached = self._snapshots.values.get(user.storage_id) if reuse_snapshot else None
         snapshot: Snapshot = (
-            {"version": cached[0], "state": cached[1]}
-            if cached
-            else cast(
-                Snapshot,
-                self.storage.call("state.read", user_id=user.storage_id, compact=True),
-            )
+            {"version": cached[0], "state": cached[1]} if cached else self._read_snapshot(user)
         )
         for attempt in range(16):
             after = copy.deepcopy(snapshot["state"])
@@ -113,6 +128,11 @@ class RuntimeStore:
                     if self.patch_commits
                     else {"state": after}
                 )
+                if self.read_projection == "tools" and any(
+                    transition.get("changes", {}).get(table)
+                    for table in ("steps", "inputs", "conversation", "compactions")
+                ):
+                    raise ValueError("Tool projection cannot modify execution history")
                 receipt = self.storage.call(
                     "state.patch" if self.patch_commits else "state.commit",
                     user_id=user.storage_id,
@@ -125,14 +145,17 @@ class RuntimeStore:
                 version = snapshot["version"] + 1
                 if self.patch_commits:
                     if receipt["replayed"]:
-                        fresh = self.storage.call(
-                            "state.read", user_id=user.storage_id, compact=True
-                        )
+                        fresh = self._read_snapshot(user)
                         self._snapshots.values[user.storage_id] = (fresh["version"], fresh["state"])
                         return copy.deepcopy(result)
                     version = receipt["version"]
                     for step_id, digest in receipt["archived_requests"].items():
                         after["steps"][step_id].update(request=None, request_archive=digest)
+                    for step_id, digest in receipt.get("archived_drafts", {}).items():
+                        if step_id in after["steps"]:
+                            after["steps"][step_id].update(
+                                request_draft=None, request_draft_archive=digest
+                            )
                 self._snapshots.values[user.storage_id] = (
                     version,
                     after,
@@ -141,10 +164,7 @@ class RuntimeStore:
             except StorageConflict:
                 self._snapshots.values.pop(user.storage_id, None)
                 time.sleep(min(0.005 * (attempt + 1), 0.05))
-                snapshot = cast(
-                    Snapshot,
-                    self.storage.call("state.read", user_id=user.storage_id, compact=True),
-                )
+                snapshot = self._read_snapshot(user)
             except BaseException:
                 self._snapshots.values.pop(user.storage_id, None)
                 raise

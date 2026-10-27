@@ -93,3 +93,26 @@ def test_existing_compaction_updates_hot_state_and_derived_step():
     assert hot["steps"]["step-1"]["request"] is None
     assert derived["request"] is None
     assert derived["request_archive"] == hot["steps"]["step-1"]["request_archive"]
+
+
+def test_inactive_paused_draft_is_archived_and_restores_when_reactivated():
+    db = sqlite3.connect(":memory:")
+    db.execute(
+        "CREATE TABLE request_archives(user_id TEXT,digest TEXT,body BLOB,raw_bytes INTEGER,"
+        "PRIMARY KEY(user_id,digest))"
+    )
+    draft = {"messages": [{"role": "user", "content": "synthetic" * 10000}]}
+    state = {
+        "meta": {"active_step": "new"},
+        "steps": {
+            "old": {"status": "paused", "request": None, "request_draft": draft},
+            "new": {"status": "prepared", "request": None, "request_draft": draft},
+        },
+    }
+    assert compact(db, "synthetic", state)
+    assert state["steps"]["old"]["request_draft"] is None
+    assert state["steps"]["old"]["request_draft_archive"]
+    assert state["steps"]["new"]["request_draft"] == draft
+    state["meta"]["active_step"] = "old"
+    assert compact(db, "synthetic", state)
+    assert state["steps"]["old"]["request_draft"] == draft

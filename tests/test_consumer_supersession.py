@@ -68,7 +68,7 @@ def consumer(state, buffer):
     return ToolConsumer(ctx, None), sink
 
 
-def test_late_tool_result_from_superseded_run_does_not_enter_buffer():
+def test_late_tool_result_from_previous_run_enters_buffer():
     payload = terminal()
     state = {
         "meta": {"run_id": "new-run"},
@@ -80,11 +80,11 @@ def test_late_tool_result_from_superseded_run_does_not_enter_buffer():
 
     tool.receive(User("alice"), item(payload))
 
-    assert buffer.items[QueueName.TOOL] == []
-    assert "已被新用户意图替代" in sink.events[0].payload["error"]
+    assert buffer.items[QueueName.TOOL] == [item(payload)]
+    assert sink.events == []
 
 
-def test_tool_result_arriving_after_buffered_user_message_is_isolated():
+def test_tool_result_arriving_after_buffered_user_message_is_preserved():
     payload = terminal()
     user = Inbound(
         kind=QueueName.USER,
@@ -94,9 +94,16 @@ def test_tool_result_arriving_after_buffered_user_message_is_isolated():
         occur_dt="2026-10-22T12:03:52Z",
     )
     buffer = Buffer([user])
-    tool, sink = consumer({"meta": {"run_id": "same-run"}}, buffer)
+    tool, sink = consumer(
+        {
+            "meta": {"run_id": "same-run"},
+            "calls": {payload["invocation_id"]: {"terminal": payload}},
+            "batches": {payload["batch_id"]: {"buffer_deadline": None}},
+        },
+        buffer,
+    )
 
     tool.receive(User("alice"), item(payload, "2026-10-22T12:04:09Z"))
 
-    assert buffer.items[QueueName.TOOL] == []
-    assert "晚于新的用户意图" in sink.events[0].payload["error"]
+    assert buffer.items[QueueName.TOOL] == [item(payload, "2026-10-22T12:04:09Z")]
+    assert sink.events == []
