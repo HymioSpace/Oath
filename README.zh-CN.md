@@ -97,6 +97,15 @@ oath stop      # 保留数据卷
 
 `--config PATH` 可指定其他配置。调试客户端支持 `/status`、`/retry`、`/cancel`、`/approve ID`、`/deny ID` 和 `/quit`；`--json` 查看原始协议事件。
 
+若独立部署的应用需要被 Prometheus 抓取，启动时传入持久化 file-discovery JSON：
+
+```bash
+oath start --hymio-metrics-target /absolute/path/to/hymio-metrics-targets.json
+```
+
+该路径会写入 Oath 部署记录，并由 `oath restart` 复用；不会因为 shell 环境变量丢失而
+静默退回本机默认目标。
+
 应用指令可用 `oath start --system-prompt ./prompts/assistant.md` 替换，或在 TOML 设置
 `[agent].system_prompt_file` 并删除内联正文。文件按配置目录解析、只读挂载，重启生效。
 Oath 追加实际工作区和技能索引，动态状态不进入固定前缀。
