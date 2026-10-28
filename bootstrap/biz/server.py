@@ -39,11 +39,19 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
         finally:
             TRACE_API_DURATION.labels("list", status).observe(time.monotonic() - started)
 
+    def trace_user(request):
+        user = user_of(service, request)
+        agent_id = request.query_params.get("agent_id", "")
+        if agent_id:
+            service.agent_operation(user, "subagent.get", agent_id=agent_id)
+            return User(user.user_id, agent_id)
+        return user
+
     def trace(request):
         started = time.monotonic()
         status = "ok"
         try:
-            user = user_of(service, request)
+            user = trace_user(request)
             return JSONResponse(
                 service.query_trace(
                     user,
@@ -51,7 +59,7 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
                     summary=request.query_params.get("summary") == "1",
                 )
             )
-        except (Unauthorized, BadQuery) as exc:
+        except (Unauthorized, BadQuery, ValueError) as exc:
             status = "error"
             return error_response(exc)
         finally:
@@ -192,7 +200,7 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
                 )
                 return JSONResponse(result)
             action = request.path_params["action"]
-            if action not in {"spawn", "list", "get", "cancel", "continue"}:
+            if action not in {"spawn", "list", "get", "cancel", "continue", "activity"}:
                 raise ValueError("Unknown action")
             if "user_id" in data or "fence" in data:
                 raise ValueError("Identity is derived from credentials")
