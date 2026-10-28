@@ -37,6 +37,26 @@ class Reviewer(PermissionPolicy):
         )
 
 
+class ManagedReviewer(Reviewer):
+    def check(self, request: PermissionRequest):
+        return PermissionDecision(
+            "ask",
+            reason="Synthetic policy-managed action",
+            policy_version="fixture-v2",
+            grant_key="synthetic-managed-grant",
+            approval={
+                "title": "Run managed fixture?",
+                "summary": "A policy-managed synthetic approval",
+                "risk": "high",
+                "tier": "write",
+                "effects": ["execute"],
+                "target": {"kind": "device", "id": "mac", "label": "Mac"},
+                "scope_options": ["once", "run", "exact_rule"],
+                "policy_managed_grant": True,
+            },
+        )
+
+
 class Probe(Tool):
     def __init__(self):
         self.executions = 0
@@ -223,3 +243,71 @@ def test_tool_client_forwards_the_complete_permission_decision():
     assert recording.params["client_id"] == "iphone"
     assert recording.params["channel"] == "ios"
     assert recording.params["reason"] == "Not this time"
+
+
+def test_policy_managed_exact_rules_are_not_duplicated_in_runtime_grants(service):
+    registry = ToolRegistry(default_timeout_seconds=10)
+    registry.register(Probe())
+    user = User("authorization-managed-rule")
+    tools = ThreadedToolSystem(
+        registry,
+        DurableEventSink(service),
+        ManagedReviewer(),
+        store=RuntimeStore(service, patch_commits=True, read_projection="tools"),
+        queue=StoredQueue(service),
+        traces=StoredTraces(service),
+        max_concurrency=1,
+    )
+    try:
+        tools.submit_batch(
+            user,
+            "managed-first",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "same"},
+                    "managed-first",
+                    invocation_id="managed-first",
+                    run_id="managed-run",
+                )
+            ],
+        )
+        waiting = wait_for(
+            lambda: (
+                value
+                if (value := tools.status(user, "managed-first")).status == "waiting_approval"
+                else None
+            )
+        )
+        assert tools.apply_permission(
+            user,
+            "managed-first",
+            "approved",
+            "managed-decision",
+            scope="exact_rule",
+            action_digest=waiting.approval["action_digest"],
+        )
+        wait_for(lambda: tools.status(user, "managed-first").status == "succeeded")
+        tools.submit_batch(
+            user,
+            "managed-second",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "same"},
+                    "managed-second",
+                    invocation_id="managed-second",
+                    run_id="managed-run",
+                )
+            ],
+        )
+        managed = wait_for(
+            lambda: (
+                value
+                if (value := tools.status(user, "managed-second")).status == "waiting_approval"
+                else None
+            )
+        )
+        assert managed.status == "waiting_approval"
+    finally:
+        tools.shutdown()

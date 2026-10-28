@@ -226,7 +226,9 @@ class PermissionManager:
                 "action_digest": action_digest,
             }
             if verdict == "approved":
-                if scope in {"run", "exact_rule"}:
+                if scope in {"run", "exact_rule"} and not (
+                    scope == "exact_rule" and approval.get("policy_managed_grant") is True
+                ):
                     grant_key = approval.get("grant_key")
                     if isinstance(grant_key, str) and grant_key:
                         grants = state["meta"].setdefault("permission_grants", {})

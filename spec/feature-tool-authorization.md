@@ -61,6 +61,9 @@ through the Tools service retain scope, action digest, deciding client, channel 
 Scopes are `once`, `run` and `exact_rule`. A run grant applies only to the same grant key and run.
 An exact rule is persisted in runtime state with an expiry and can be matched before a later
 action gets a new approval. Revocation and a user-facing grant inventory remain application work.
+Hosted policies that own a revocable whitelist may set `policy_managed_grant=true` in the approval
+view model. Oath still validates the exact-rule decision and action digest, but does not duplicate
+that rule in runtime grants; the application policy remains the source of truth.
 
 ## Events and reconnection
 
