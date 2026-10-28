@@ -9,6 +9,7 @@ OPERATIONS = {
     "subagent.spawn",
     "subagent.list",
     "subagent.get",
+    "subagent.activity",
     "subagent.cancel",
     "subagent.continue",
     "subagent.notify",
