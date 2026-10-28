@@ -111,6 +111,8 @@ class ToolErrorKind:
     UNKNOWN_TOOL: Final = "unknown_tool"
     #: 权限检查拒绝。
     PERMISSION_DENIED: Final = "permission_denied"
+    #: 审批在用户决定前超过有效期。
+    PERMISSION_EXPIRED: Final = "permission_expired"
     #: 权限这一步**没能完成**（存储故障、策略返回了没约定的判定）。与
     #: `permission_denied` 分开：那是「判定为拒绝」，这是「问不出结果」。
     PERMISSION_ERROR: Final = "permission_error"
@@ -131,6 +133,7 @@ class ToolErrorKind:
         {
             UNKNOWN_TOOL,
             PERMISSION_DENIED,
+            PERMISSION_EXPIRED,
             PERMISSION_ERROR,
             INVALID_ARGUMENTS,
             BUSY,
@@ -255,6 +258,8 @@ class ToolInvocation:
     arguments: JsonObject
     deadline: float | None
     channel: str = "unknown"
+    cli_environment: dict[str, str] = field(default_factory=dict)
+    parent_invocation_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +309,11 @@ class ToolExecution:
     batch_id: str = ""
     source: str = "brain"
     event_id: str | None = None
+    child_invocation_ids: tuple[str, ...] = ()
+    approval: JsonObject | None = None
+    permission_decision: JsonObject | None = None
+    late_permission: JsonObject | None = None
+    retry_of: str = ""
 
     @property
     def is_terminal(self) -> bool:

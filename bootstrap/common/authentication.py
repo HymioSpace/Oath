@@ -111,7 +111,7 @@ class UserAuthenticator(Authenticator):
         raise PermissionDeniedError("Unknown credential")
 
 
-def cli_token(config, user):
+def cli_token(config, user, *, parent="", channel="unknown", ttl=300):
     body = (
         base64.urlsafe_b64encode(
             json.dumps(
@@ -119,7 +119,9 @@ def cli_token(config, user):
                     "user_id": user.user_id,
                     "agent_id": user.agent_id,
                     "aud": "cli",
-                    "exp": time.time() + 3600,
+                    "exp": time.time() + min(900, max(1, ttl)),
+                    "parent": parent,
+                    "channel": channel,
                 }
             ).encode()
         )
@@ -128,3 +130,21 @@ def cli_token(config, user):
     )
     signature = hmac.new(service_token(config).encode(), body.encode(), hashlib.sha256).hexdigest()
     return body + "." + signature
+
+
+def cli_claims(config, credential):
+    """Validate execution scope without accepting application-supplied identity."""
+    try:
+        body, signature = credential.split(".")
+        expected = hmac.new(
+            service_token(config).encode(), body.encode(), hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            raise ValueError()
+        data = json.loads(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)))
+        if data["aud"] != "cli" or data["exp"] <= time.time() or not data.get("parent"):
+            raise ValueError()
+        User(data["user_id"], data.get("agent_id", ""))
+        return data
+    except (ValueError, KeyError, TypeError) as exc:
+        raise PermissionDeniedError("Invalid CLI capability") from exc

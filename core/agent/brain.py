@@ -30,7 +30,6 @@ from core.protocol.datatype.trace import (
 )
 from core.protocol.interface.llm import ModelProvider
 from core.runtime import AgentContext
-from core.shell import workspace_note
 from core.trace.attributes import (
     BODY,
     GEN_AI_OPERATION_NAME,
@@ -91,17 +90,9 @@ class AgentBrain:
 
         两段都是启动时的快照，每一步的请求照常被冻结：工作区变了也要等下次启动。
         """
-        from core.agent.runtime_prompt import RUNTIME_PROMPT
+        from core.agent.prompt import system_prompt
 
-        parts = [
-            self._ctx.config.system_prompt,
-            RUNTIME_PROMPT,
-            workspace_note(self._ctx.config.workspace_root)
-            if self._ctx.config.builtin_bash
-            else "",
-            self._ctx.skills.list(self._ctx.config.skill_index_tokens, channel=channel),
-        ]
-        return "\n\n".join(part for part in parts if part)
+        return system_prompt(self._ctx.config, self._ctx.skills, channel)
 
     def _prepare_request(self, user: User, step: State) -> State:
         if step["request"] is not None:

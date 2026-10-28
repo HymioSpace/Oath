@@ -81,8 +81,10 @@ curl -H "Authorization: Bearer $OATH_USER_TOKEN" 'http://127.0.0.1:8766/list_tra
 curl -H "Authorization: Bearer $OATH_USER_TOKEN" 'http://127.0.0.1:8766/query_trace?trace_id=<id>'
 ```
 
-CLI 目录 `/cli_commands`，执行 `POST /cli/<name>`，参数 JSON。工具执行环境注入 oath-cli 的端点与短期用户 capability，
-Biz 获取当前未过期的 user_context 交给扩展。服务级凭据不进入 Bash 环境。
+CLI 使用 `GET /cli/tools`、`POST /cli/invoke`、`POST /cli/status` 与
+`POST /cli/detach`；调用统一进入 ToolSystem，工具状态不另建设备命令通道。工具执行环境
+注入 oath-cli 的端点与绑定 parent invocation 的短期 capability。调用方的真实身份来自
+capability，模型参数中的 user_id 不参与授权。服务级凭据不进入 Bash 环境。
 
 ## 验证
 

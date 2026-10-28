@@ -55,9 +55,15 @@ That observer role is a foundation to build on. Trace-aware checks, recovery dec
 
 ## A shell, small commands, fewer round trips
 
-Oath pairs a core **Bash tool** with **`oath-cli`**, a client for application commands exposed over HTTP. A shell script can compose several commands, pipe and filter their outputs, and return one useful result to the agent. Work that fits a script can take fewer model turns than calling each operation separately.
+Oath pairs a core **Bash tool** with **`oath-cli`**, a client into the same ToolSystem
+capabilities. A shell script can compose several commands, pipe and filter their outputs, and
+return one useful result to the agent. Work that fits a script can take fewer model turns than
+calling each operation separately. Every invocation keeps the normal admission, approval,
+deadline, terminal and trace semantics; `oath-cli status ID` reads that durable state.
 
-The execution environment is an interface; the current implementation runs commands in the Tools container. CLI extensions receive the user's current context from Biz, so applications can add their own behavior and authorization.
+The execution environment is an interface; the current implementation runs commands in the Tools
+container. Deployments can disable host Bash and register a device-backed Bash. CLI clients use a
+short-lived, parent-bound capability and can be installed from a hash-verified cloud asset.
 
 The core also includes tool deadlines and approvals, skills, tool-result truncation with detail retrieval, context compaction, and traces with raw model requests/responses, causal step links and timing metrics.
 

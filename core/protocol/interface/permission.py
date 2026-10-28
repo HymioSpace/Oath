@@ -10,21 +10,25 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.protocol.datatype.user import User
-from core.utils.encoding import JsonObject
+from core.protocol.datatype.permission import (
+    PermissionDecision,
+    PermissionRequest,
+)
 
 
 class PermissionPolicy(ABC):
     """每次工具执行前的权限判定。应用侧实现（Hymio 的策略）。"""
 
     @abstractmethod
-    def check(self, user: User, tool: str, arguments: JsonObject) -> str:
+    def check(self, request: PermissionRequest) -> PermissionDecision | str:
         """返回 `PermissionVerdict` 的三值之一。
 
         **不抛异常表示拒绝。** 「拒绝」是 `PermissionVerdict.DENY` 这个返回值，
         不是异常 —— 因为「要问人」和「拒绝」在这个接口里都是正常结果。
 
-        抛异常意味着**策略实现自己出错了**（读不到配置、连不上策略服务）。
+        Legacy string results are accepted for core-only deployments. Hosted applications
+        should return `PermissionDecision` so approval display and grant scope are trustworthy.
+        Throwing means the policy itself failed (for example, its service is unavailable).
         core 会 fail closed：当作拒绝处理，不放行。宁可误杀也不误放。
         """
         ...
