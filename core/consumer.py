@@ -200,6 +200,11 @@ class SystemConsumer(QueueConsumer):
                 str(item.payload["invocation_id"]),
                 str(item.payload["status"]),
                 item.source_id,
+                scope=str(item.payload.get("scope", "once")),
+                client_id=str(item.payload.get("client_id", "")),
+                channel=str(item.payload.get("channel", "unknown")),
+                reason=str(item.payload.get("reason", "")),
+                action_digest=str(item.payload.get("action_digest", "")),
             )
         elif item.source == "run.cancel":
 

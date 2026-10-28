@@ -233,11 +233,13 @@ def project(db, user_id, before, after, changes):
         )
         old = before["calls"].get(key, {})
         if call["status"] == "waiting_approval" and old.get("status") != "waiting_approval":
+            approval = call.get("approval") if isinstance(call.get("approval"), dict) else {}
             outbox.append(
                 db,
                 user_id,
                 "permission.requested",
                 {
+                    **approval,
                     "invocation_id": key,
                     "batch_id": call["batch_id"],
                     "tool": call["tool"],
@@ -249,11 +251,20 @@ def project(db, user_id, before, after, changes):
         if call.get("permission") in {"approved", "denied", "expired"} and call.get(
             "permission"
         ) != old.get("permission"):
+            permission_decision = (
+                call.get("permission_decision")
+                if isinstance(call.get("permission_decision"), dict)
+                else {}
+            )
             outbox.append(
                 db,
                 user_id,
                 "permission.resolved",
-                {"invocation_id": key, "status": call["permission"]},
+                {
+                    **permission_decision,
+                    "invocation_id": key,
+                    "status": call["permission"],
+                },
                 f"permission:{key}:resolved",
             )
         if call.get("terminal") and not old.get("terminal"):
@@ -261,7 +272,8 @@ def project(db, user_id, before, after, changes):
             item = Inbound(
                 "tool", "tool.terminal", payload, payload["event_id"], call.get("finished_dt") or ""
             )
-            enqueue(db, user_id, item.to_dict())
+            if not call.get("inline"):
+                enqueue(db, user_id, item.to_dict())
             outbox.append(db, user_id, "tool.terminal", payload, payload["event_id"])
 
     from core.subagents.storage import project as project_subagent

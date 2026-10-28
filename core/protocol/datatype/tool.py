@@ -255,6 +255,8 @@ class ToolInvocation:
     arguments: JsonObject
     deadline: float | None
     channel: str = "unknown"
+    cli_environment: dict[str, str] = field(default_factory=dict)
+    parent_invocation_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -304,6 +306,9 @@ class ToolExecution:
     batch_id: str = ""
     source: str = "brain"
     event_id: str | None = None
+    child_invocation_ids: tuple[str, ...] = ()
+    approval: JsonObject | None = None
+    permission_decision: JsonObject | None = None
 
     @property
     def is_terminal(self) -> bool:

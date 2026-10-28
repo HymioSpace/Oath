@@ -10,14 +10,24 @@ def run(config):
     storage = ServiceClient(
         config.services.storage_url, service_token(config), config.services.request_timeout
     )
+    tools = ServiceClient(
+        config.services.tools_url, service_token(config), config.services.request_timeout
+    )
     try:
         app = build_app(
             build_application(config, storage),
             build_application(config, storage, cli=True),
             service_token(config),
         )
+        from bootstrap.biz.tool_cli import routes
+
+        app.router.routes.extend(routes(config, tools))
+        from bootstrap.biz.prompt_preview import prompt_routes
+
+        app.router.routes.extend(prompt_routes(config))
         uvicorn.run(
             app, host=config.services.biz_host, port=config.services.biz_port, access_log=False
         )
     finally:
         storage.close()
+        tools.close()

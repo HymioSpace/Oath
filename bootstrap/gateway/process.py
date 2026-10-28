@@ -66,6 +66,7 @@ async def run_async(config):
         receiver = None
         monitor = None
         channel = "unknown"
+        client_id = ""
 
         async def send(frame):
             async with send_lock:
@@ -79,6 +80,7 @@ async def run_async(config):
                 raise ValueError("First command must be agent.attach")
             credential = command.payload.get("credential", "")
             supplied_user = command.payload.get("user_id")
+            client_id = str(command.payload.get("client_id", ""))[:128]
             candidate = command.payload.get("channel_kind")
             if isinstance(candidate, str) and 0 < len(candidate) <= 32:
                 channel = candidate
@@ -142,6 +144,15 @@ async def run_async(config):
                             validate(command)
                             validate_model(config, command)
                             item = of_command(command)
+                            if item is not None and command.type == CommandType.PERMISSION_DECIDE:
+                                item = replace(
+                                    item,
+                                    payload={
+                                        **item.payload,
+                                        "client_id": client_id,
+                                        "channel": channel,
+                                    },
+                                )
                             trace_id = None
                             if item is not None and command.type == CommandType.USER_MESSAGE:
                                 trace_id = new_trace_id()
@@ -250,6 +261,17 @@ def validate(command):
             command.payload.get("invocation_id"), str
         ):
             raise ValueError("Invalid permission decision")
+        scope = command.payload.get("scope", "once")
+        digest = command.payload.get("action_digest", "")
+        reason = command.payload.get("reason", "")
+        if scope not in {"once", "run", "exact_rule"}:
+            raise ValueError("Invalid approval scope")
+        if not isinstance(digest, str) or (
+            digest and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest))
+        ):
+            raise ValueError("Invalid approval digest")
+        if not isinstance(reason, str) or len(reason) > 500:
+            raise ValueError("Invalid approval reason")
     elif command.type not in {CommandType.RUN_CANCEL, CommandType.STEP_RETRY}:
         raise ValueError("Unsupported command")
 

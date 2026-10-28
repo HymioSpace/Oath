@@ -51,6 +51,29 @@ def read(db, user_id):
             (user_id,),
         )
     }
+    approvals = {}
+    for approval_row in db.execute(
+        "SELECT invocation_id,status,body_json FROM tool_invocations WHERE user_id=? "
+        "AND (status='waiting_approval' "
+        "OR json_extract(body_json,'$.permission_decision.decided_at') IS NOT NULL) "
+        "ORDER BY rowid DESC LIMIT 200",
+        (user_id,),
+    ):
+        body = json.loads(approval_row["body_json"])
+        approval = body.get("approval") if isinstance(body.get("approval"), dict) else {}
+        decision = (
+            body.get("permission_decision")
+            if isinstance(body.get("permission_decision"), dict)
+            else None
+        )
+        approvals[approval_row["invocation_id"]] = {
+            "invocation_id": approval_row["invocation_id"],
+            "status": decision["status"] if decision else "pending",
+            "tool": body.get("tool", ""),
+            "expires_at": body.get("approval_deadline"),
+            "approval": approval,
+            "decision": decision,
+        }
     return {
         "user_id": user_id,
         "event_seq": row["event_seq"],
@@ -62,6 +85,7 @@ def read(db, user_id):
         },
         "steps": steps,
         "calls": calls,
+        "approvals": approvals,
         "busy": any(step_counts.get(k, 0) for k in ("prepared", "running"))
         or any(call_counts.get(k, 0) for k in ("admitting", "queued", "running")),
         "counts": {"steps": step_counts, "calls": call_counts},

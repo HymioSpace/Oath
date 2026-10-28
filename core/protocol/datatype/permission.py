@@ -129,6 +129,30 @@ class PermissionEvent(AgentEvent):
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PermissionRequest:
+    """The exact action presented to an application policy implementation."""
+
+    user: User
+    tool: str
+    arguments: JsonObject
+    invocation_id: str
+    batch_id: str
+    run_id: str
+    channel: str
+
+
+@dataclass(frozen=True, slots=True)
+class PermissionDecision:
+    """Policy verdict plus the trusted display and grant data for an approval."""
+
+    verdict: str
+    reason: str = ""
+    approval: JsonObject | None = None
+    grant_key: str = ""
+    policy_version: str = ""
+
+
 # --------------------------------------------------------------------------
 # 存储与返回值
 # --------------------------------------------------------------------------
@@ -216,9 +240,11 @@ __all__ = [
     "PERMISSION_RESOLVED_KEY_PREFIX",
     "PermissionEvent",
     "PermissionEventType",
+    "PermissionDecision",
     "PermissionRecord",
     "PermissionRecordDict",
     "PermissionRecordType",
+    "PermissionRequest",
     "PermissionStatus",
     "PermissionVerdict",
     "expired",

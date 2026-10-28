@@ -84,6 +84,9 @@ class AgentConfig:
     #: 工作区根目录。bash 的默认 cwd，进 system prompt 的工作区段落。
     workspace_root: Path = Path("./workspace")
     builtin_bash: bool = True
+    exposed_tools: tuple[str, ...] = ()
+    cli_public_url: str = ""
+    permission_policy_url: str = ""
     #: 挂 `oath-cli` 的目录，前置到 bash 子进程的 PATH 上。
     cli_bin_dir: Path = Path("./scripts")
 
@@ -100,6 +103,22 @@ class AgentConfig:
     tool_round_timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
+        if not isinstance(self.exposed_tools, (tuple, list)) or any(
+            not isinstance(n, str) or not n or len(n) > 64 for n in self.exposed_tools
+        ):
+            raise ValueError("exposed_tools must contain tool names")
+        object.__setattr__(self, "exposed_tools", tuple(self.exposed_tools))
+        if self.permission_policy_url:
+            policy = urlsplit(self.permission_policy_url)
+            if (
+                policy.scheme not in {"http", "https"}
+                or not policy.hostname
+                or policy.username
+                or policy.password
+                or policy.query
+                or policy.fragment
+            ):
+                raise ValueError("permission_policy_url must be an HTTP(S) service URL")
         if not isinstance(self.selectable_models, (list, tuple)) or any(
             not isinstance(m, str) or not m.strip() or len(m) > 128 for m in self.selectable_models
         ):

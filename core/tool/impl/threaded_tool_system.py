@@ -80,6 +80,8 @@ class ThreadedToolSystem(ToolSystem):
         policy: PermissionPolicy,
         *,
         store: RuntimeStore,
+        execution_environment=None,
+        exposed_tools=(),
         queue: EventQueue,
         traces: TraceStore,
         max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
@@ -101,6 +103,8 @@ class ThreadedToolSystem(ToolSystem):
         self.store, self._queue, self._traces = store, queue, traces
         self._registry, self._sink = registry, sink
         self._shrinker = shrinker
+        self._execution_environment = execution_environment
+        self.exposed_tools = frozenset(exposed_tools)
         self._max_pending, self._ttl, self._admission_timeout = (
             max_pending,
             approval_ttl,
@@ -121,7 +125,11 @@ class ThreadedToolSystem(ToolSystem):
     def definitions(
         self, *, delegated=False, channel: str | None = None
     ) -> tuple[ToolDefinition, ...]:
-        return self._registry.definitions(delegated=delegated, channel=channel)
+        return tuple(
+            d
+            for d in self._registry.definitions(delegated=delegated, channel=channel)
+            if not self.exposed_tools or d.name in self.exposed_tools
+        )
 
     # -- 终态发布 ------------------------------------------------------------
 
@@ -155,7 +163,13 @@ class ThreadedToolSystem(ToolSystem):
         return self.submit_batch(user, batch_id, calls)
 
     def submit_batch(
-        self, user: User, batch_id: str, requests: Sequence[ToolCallRequest]
+        self,
+        user: User,
+        batch_id: str,
+        requests: Sequence[ToolCallRequest],
+        *,
+        parent_invocation_id="",
+        inline=False,
     ) -> BatchExecution:
         if self._stop.is_set():
             raise ToolRequestError("工具系统已关闭")
@@ -191,6 +205,30 @@ class ThreadedToolSystem(ToolSystem):
                 return False
             if any(i in state["calls"] for i in ids):
                 raise ToolRequestError("invocation_id 已属于其他批次")
+            parent = None
+            if parent_invocation_id:
+                parent = state["calls"].get(parent_invocation_id)
+                if (
+                    not parent
+                    or parent["tool"] not in {"bash", "cli"}
+                    or parent["status"] != "running"
+                ):
+                    raise ToolRequestError("CLI parent is not an active Bash invocation")
+                if (
+                    sum(
+                        c.get("parent_invocation_id") == parent_invocation_id
+                        for c in state["calls"].values()
+                    )
+                    >= 100
+                ):
+                    raise ToolRequestError("CLI parent call budget exhausted")
+                if any(
+                    r.run_id != parent["run_id"] or r.channel != parent.get("channel", "unknown")
+                    for r in requests
+                ):
+                    raise ToolRequestError("CLI execution scope mismatch")
+            if parent is not None:
+                parent.setdefault("cli_children", []).extend(ids)
             now = time.time()
             state["batches"][batch_id] = {
                 "manifest": manifest,
@@ -198,15 +236,17 @@ class ThreadedToolSystem(ToolSystem):
                 "initial_submitted": [],
                 "admission_deadline": now + self._admission_timeout,
                 "admitted": False,
-                "presented_by_step": None,
+                "presented_by_step": parent["batch_id"] if parent else None,
                 #: 这一批的真结果进过模型的上下文。占位符不算。
-                "delivered": False,
+                "delivered": bool(parent),
             }
             for item in manifest:
                 state["calls"][item["invocation_id"]] = {
                     **item,
                     "status": "admitting",
-                    "source": "brain",
+                    "source": "cli" if parent else "brain",
+                    "parent_invocation_id": parent_invocation_id,
+                    "inline": bool(inline and parent),
                     "admission": None,
                     "terminal": None,
                     "permission": None,
@@ -258,9 +298,16 @@ class ThreadedToolSystem(ToolSystem):
                 and channel not in registered.tool.expose_channels
             ):
                 raise ValueError("Tool is unavailable on this client channel")
-            verdict = self.permissions.authorize(
-                user, call["tool"], copy.deepcopy(call["arguments"])
+            decision = self.permissions.authorize(
+                user,
+                call["tool"],
+                copy.deepcopy(call["arguments"]),
+                invocation_id=call["invocation_id"],
+                batch_id=call["batch_id"],
+                run_id=call["run_id"],
+                channel=channel,
             )
+            verdict = decision.verdict
             if user.agent_id and verdict == "ask":
                 verdict = "deny"
             if verdict not in {"allow", "ask", "deny"}:
@@ -271,6 +318,10 @@ class ThreadedToolSystem(ToolSystem):
                 "verdict": verdict,
                 "timeout": registered.timeout_seconds,
                 "definition": registered.definition.to_dict(),
+                "reason": decision.reason,
+                "approval": decision.approval,
+                "policy_version": decision.policy_version,
+                **({"error": decision.reason} if verdict == "deny" and decision.reason else {}),
             }
             self._classified(user, invocation_id, admission)
         except Exception as exc:
@@ -324,6 +375,7 @@ class ThreadedToolSystem(ToolSystem):
                         status="waiting_approval",
                         permission="pending",
                         approval_deadline=now + self._ttl,
+                        approval=admission.get("approval"),
                     )
                 elif verdict == "allow":
                     active = sum(
@@ -336,7 +388,13 @@ class ThreadedToolSystem(ToolSystem):
                         initial.append(call["invocation_id"])
                 else:
                     self._collect(
-                        out, state, call, "failed", error=admission.get("error", "权限拒绝")
+                        out,
+                        state,
+                        call,
+                        "failed",
+                        error=admission.get("error")
+                        or admission.get("reason")
+                        or "权限拒绝",
                     )
             batch.update(admitted=True, initial_submitted=initial)
 
@@ -350,7 +408,7 @@ class ThreadedToolSystem(ToolSystem):
         )
 
     def status(self, user: User, invocation_id: str) -> ToolExecution | None:
-        call = self.store.read(user)["calls"].get(invocation_id)
+        call = self.store.entries(user, "calls", [invocation_id]).get(invocation_id)
         if call is None:
             return None
         result = call["terminal"] or {}
@@ -370,12 +428,35 @@ class ThreadedToolSystem(ToolSystem):
             batch_id=call["batch_id"],
             source=call["source"],
             event_id=result.get("event_id"),
+            child_invocation_ids=tuple(call.get("cli_children", [])),
+            approval=call.get("approval"),
+            permission_decision=call.get("permission_decision"),
         )
 
     def apply_permission(
-        self, user: User, invocation_id: str, decision: str, command_id: str
+        self,
+        user: User,
+        invocation_id: str,
+        decision: str,
+        command_id: str,
+        *,
+        scope: str = "once",
+        client_id: str = "",
+        channel: str = "",
+        reason: str = "",
+        action_digest: str = "",
     ) -> bool:
-        result, produced = self.permissions.decide(user, invocation_id, decision, command_id)
+        result, produced = self.permissions.decide(
+            user,
+            invocation_id,
+            decision,
+            command_id,
+            scope=scope,
+            client_id=client_id,
+            channel=channel,
+            reason=reason,
+            action_digest=action_digest,
+        )
         self._publish(user, list(produced))
         self.maintain(user)
         return result
@@ -500,7 +581,8 @@ class ThreadedToolSystem(ToolSystem):
                     self._collect(out, state, call, "timeout", error="排队超时，工具未执行")
                     return None
                 call.update(status="running", started_dt=utc_now_iso())
-                step = state["steps"].get(call["batch_id"], {})
+                origin = state["calls"].get(call.get("parent_invocation_id"), call)
+                step = state["steps"].get(origin["batch_id"], {})
                 observed.update(
                     trace_id=step.get("trace_id", ""),
                     step_id=step.get("step_id", call["batch_id"]),
@@ -534,12 +616,35 @@ class ThreadedToolSystem(ToolSystem):
                             call["admission"]["timeout"],
                         ),
                         call.get("channel", "unknown"),
+                        self._execution_environment(user, call)
+                        if self._execution_environment
+                        else {},
+                        call.get("parent_invocation_id", ""),
                     )
                 )
                 if self._stop.is_set():
                     return
                 if not isinstance(result, ToolResult):
                     raise TypeError("工具必须返回 ToolResult")
+                if call["tool"] in {"bash", "cli"}:
+                    latest = self.store.entries(user, "calls", [invocation_id])[invocation_id]
+                    children = self.store.entries(user, "calls", latest.get("cli_children", []))
+                    refs = []
+                    for child in children.values():
+                        child_content = (child.get("terminal") or {}).get("content")
+                        if isinstance(child_content, dict):
+                            refs.extend(
+                                r for r in child_content.get("image_refs", []) if isinstance(r, str)
+                            )
+                    if refs:
+                        content = (
+                            result.content
+                            if isinstance(result.content, dict)
+                            else {"output": result.content}
+                        )
+                        result = ToolResult(
+                            {**content, "image_refs": list(dict.fromkeys(refs))[:12]}
+                        )
                 canonical_json(result.content)
                 # 截断在事务之外完成：写 detail 是文件 I/O，不能在 user 锁里做。
                 content, detail = (

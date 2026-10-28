@@ -33,6 +33,13 @@ def terminal(
     if call["status"] in TERMINAL:
         return None
     call.update(status=outcome, finished_dt=utc_now_iso())
+    if call["tool"] in {"bash", "cli"}:
+        for child in state["calls"].values():
+            if (
+                child.get("parent_invocation_id") == call["invocation_id"]
+                and child["status"] not in TERMINAL
+            ):
+                child["inline"] = False
     payload = {
         "invocation_id": call["invocation_id"],
         "tool_call_id": call["tool_call_id"],

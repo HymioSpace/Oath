@@ -1,210 +1,89 @@
-"""`oath-cli` 这个可执行文件：参数怎么变成请求，失败怎么变成退出码。
+"""Execution client: typed arguments, authoritative status and safe transport."""
 
-不打真网络 —— `urlopen` 换掉，端点、请求头、请求 body 都看得见。要验的正是
-「执行环境里那条命令打出去的请求对不对」，不是 Oath server 的行为（那在
-`test_cli_server.py`）。
-"""
-
-from __future__ import annotations
-
-import email.message
 import importlib.machinery
 import importlib.util
-import io
 import json
 from pathlib import Path
-from types import ModuleType
-from typing import Any
-from urllib.error import HTTPError
+from unittest.mock import patch
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "oath-cli"
-SERVER = "http://127.0.0.1:8766"
-TOKEN = "synthetic-test-token"
 
-BODY = b'{"error": "bad_query"}'
-
-LISTING = {
-    "commands": [
-        {
-            "name": "echo",
-            "description": "Echo the text back.",
-            "parameters": {
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "要回显的文本"}},
-                "required": ["text"],
-                "additionalProperties": False,
-            },
-        },
-        {
-            # 两条参数，用来验位置参数与 `--key=value` 抢位置的行为。
-            "name": "probe",
-            "description": "Inspect the call.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "description": "文本"},
-                    "limit": {"type": "integer", "description": "最多几条"},
-                },
-                "required": ["text"],
-                "additionalProperties": False,
-            },
-        },
-    ]
-}
-
-
-def load_cli() -> ModuleType:
-    """按路径导入 —— 它没有 .py 后缀，是给执行环境用的可执行文件。"""
-    loader = importlib.machinery.SourceFileLoader("oath_cli", str(SCRIPT))
+def load_client():
+    loader = importlib.machinery.SourceFileLoader(
+        "execution_cli", str(Path(__file__).parents[1] / "scripts/oath-cli")
+    )
     spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
     module = importlib.util.module_from_spec(spec)
     loader.exec_module(module)
     return module
 
 
-class _Response:
-    """`urlopen` 的返回值要够用：能当上下文管理器，能读出正文。"""
+def test_structured_args_and_original_submission_id(capsys):
+    cli = load_client()
+    seen = []
 
-    def __init__(self, body: bytes) -> None:
-        self._body = body
+    def call(path, payload=None):
+        seen.append((path, payload))
+        if path.endswith("invoke"):
+            return {"invocation_id": "child"}
+        return {"status": "succeeded", "result": {"content": {"ok": True}}}
 
-    def read(self) -> bytes:
-        return self._body
-
-    def __enter__(self) -> _Response:
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        return None
-
-
-@pytest.fixture
-def cli(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
-    module = load_cli()
-    monkeypatch.setenv("OATH_CLI_SERVER", SERVER)
-    monkeypatch.setenv("OATH_CLI_TOKEN", TOKEN)
-    return module
-
-
-@pytest.fixture
-def asked(cli: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """替掉 `urlopen`，把每次请求按顺序记下来，按 path 回响应。"""
-    seen: list[Any] = []
-
-    def fake_urlopen(request: Any, timeout: float = 0.0) -> _Response:
-        seen.append(request)
-        body = LISTING if request.full_url.endswith("/cli_commands") else {"hits": []}
-        return _Response(json.dumps(body).encode())
-
-    monkeypatch.setattr(cli, "urlopen", fake_urlopen)
-    return seen
-
-
-def sent(asked: list[Any]) -> Any:
-    """第二次请求才是命令本身（第一次是查命令表）。"""
-    return asked[1]
-
-
-def test_a_positional_argument_lands_on_the_first_declared_parameter(
-    cli: ModuleType, asked: list[Any]
-) -> None:
-    """`oath-cli echo 工作区` 里 `工作区` 是 text —— 位置就是声明顺序。"""
-    cli.main(["echo", "工作区"])
-
-    assert json.loads(sent(asked).data.decode()) == {"text": "工作区"}
-
-
-def test_a_named_argument_does_not_take_up_a_position(cli: ModuleType, asked: list[Any]) -> None:
-    """`--limit=2 工作区`：limit 写了自己的名字，位置留给 text。"""
-    cli.main(["probe", "--limit=2", "工作区"])
-
-    assert json.loads(sent(asked).data.decode()) == {"text": "工作区", "limit": "2"}
-
-
-def test_the_command_is_posted_with_the_arguments_in_the_body(
-    cli: ModuleType, asked: list[Any]
-) -> None:
-    """命令是动作 —— GET 的缓存与重试语义不对。"""
-    cli.main(["echo", "工作区"])
-
-    assert (sent(asked).get_method(), sent(asked).full_url) == ("POST", f"{SERVER}/cli/echo")
-
-
-def test_the_credential_from_the_environment_goes_into_the_request(
-    cli: ModuleType, asked: list[Any]
-) -> None:
-    """脚本不判断 credential 有没有用 —— 它只是把它原样带过去。"""
-    cli.main(["echo", "工作区"])
-
-    assert sent(asked).get_header("Authorization") == f"Bearer {TOKEN}"
-
-
-def test_running_it_without_arguments_lists_the_commands(
-    cli: ModuleType, asked: list[Any], capsys: pytest.CaptureFixture[str]
-) -> None:
-    assert cli.main([]) == 0
-
-    out = capsys.readouterr().out
-    assert "echo" in out
-    assert "text（必填）" in out
-
-
-def test_an_unknown_command_is_a_usage_error(cli: ModuleType, asked: list[Any]) -> None:
-    with pytest.raises(SystemExit) as exit:
-        cli.main(["nope"])
-
-    assert exit.value.code == cli.EXIT_USAGE
-
-
-def test_an_unknown_parameter_is_a_usage_error(cli: ModuleType, asked: list[Any]) -> None:
-    with pytest.raises(SystemExit) as exit:
-        cli.payload_of(["echo", "--fields=all"])
-
-    assert exit.value.code == cli.EXIT_USAGE
-
-
-def test_more_positional_arguments_than_the_command_takes(
-    cli: ModuleType, asked: list[Any]
-) -> None:
-    with pytest.raises(SystemExit) as exit:
-        cli.payload_of(["echo", "工作区", "5", "多余"])
-
-    assert exit.value.code == cli.EXIT_USAGE
-
-
-def test_a_rejected_request_fails_with_the_body_the_server_gave(
-    cli: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """命令自己知道错在哪：正文就是错误说明，原样打出去。"""
-
-    def refuse(request: Any, timeout: float = 0.0) -> _Response:
-        if request.full_url.endswith("/cli_commands"):
-            return _Response(json.dumps(LISTING).encode())
-        assert request.full_url.endswith("/cli/echo")
-        raise HTTPError(
-            request.full_url, 400, "Bad Request", email.message.Message(), io.BytesIO(BODY)
+    with patch.object(cli, "call", side_effect=call):
+        assert (
+            cli.main(
+                [
+                    "tasks",
+                    "--action",
+                    "create",
+                    "--json",
+                    '{"schedule":{"mode":"once"}}',
+                    "--request-id",
+                    "stable",
+                ]
+            )
+            == 0
         )
-
-    monkeypatch.setattr(cli, "urlopen", refuse)
-
-    with pytest.raises(SystemExit) as exit:
-        cli.main(["echo", "工作区"])
-
-    assert exit.value.code == cli.EXIT_FAILED
-    assert "bad_query" in capsys.readouterr().err
+    assert seen[0][1]["arguments"] == {"action": "create", "schedule": {"mode": "once"}}
+    assert seen[0][1]["request_id"] == "stable"
+    assert seen[1] == ("/cli/status", {"invocation_id": "child"})
+    assert json.loads(capsys.readouterr().out)["result"]["content"]["ok"]
 
 
-def test_without_a_server_to_call_it_refuses_to_run(
-    cli: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """在执行环境外直接跑它没有端点 —— 说清楚，不要连一个猜出来的主机。"""
-    monkeypatch.delenv("OATH_CLI_SERVER", raising=False)
+def test_async_does_not_wait_or_repeat():
+    cli = load_client()
+    with patch.object(cli, "call", return_value={"invocation_id": "child"}) as call:
+        assert cli.main(["image_generate", "--async", "--prompt", "an otter"]) == 0
+    assert call.call_count == 1
+    assert call.call_args.args[1]["async"] is True
 
-    with pytest.raises(SystemExit) as exit:
-        cli.main(["echo", "工作区"])
 
-    assert exit.value.code == cli.EXIT_USAGE
-    assert "OATH_CLI_SERVER" in capsys.readouterr().err
+def test_expired_wait_detaches_instead_of_losing_completion():
+    cli = load_client()
+    with patch.object(cli, "call", return_value={"invocation_id": "child"}) as call:
+        cli.main(["tasks", "--action", "list", "--wait", "0"])
+    assert call.call_args_list[-1].args == ("/cli/detach", {"invocation_id": "child"})
+
+
+def test_failure_and_approval_are_not_success(capsys):
+    cli = load_client()
+    for status in ("failed", "timeout", "outcome_unknown", "waiting_approval"):
+        effects = [{"invocation_id": "child"}, {"status": status}]
+        if status == "waiting_approval":
+            effects.append({"status": "detached"})
+        with patch.object(
+            cli, "call", side_effect=effects
+        ):
+            assert cli.main(["tasks", "--action", "list"]) == 1
+
+
+def test_device_transport_rejects_cleartext_and_embedded_credentials(monkeypatch):
+    cli = load_client()
+    for url in (
+        "http://remote.example",
+        "https://user:pass@example.com",
+        "https://example.com?token=secret",
+    ):
+        monkeypatch.setenv("OATH_CLI_SERVER", url)
+        with pytest.raises(ValueError):
+            cli.call("/cli/tools")

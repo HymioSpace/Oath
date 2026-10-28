@@ -11,6 +11,7 @@ COPY bootstrap bootstrap
 COPY biz biz
 COPY extensions extensions
 COPY scripts/oath-cli scripts/oath-cli
+COPY scripts/install-oath-cli scripts/install-oath-cli
 RUN useradd --create-home --uid 10001 oath && mkdir -p /data /workspace && chown oath:oath /data /workspace && chmod +x scripts/oath-cli
 USER oath
 ENTRYPOINT ["python", "-m", "bootstrap"]

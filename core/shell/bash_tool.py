@@ -92,7 +92,7 @@ class BashTool(Tool):
                 command,
                 cwd=Path(cwd) if isinstance(cwd, str) and cwd else self._root,
                 timeout=self._timeout(invocation.deadline),
-                env=self._cli_env(invocation.user),
+                env=invocation.cli_environment or self._cli_env(invocation.user),
             )
         except OSError as exc:
             # 环境不可用，不是命令的错。

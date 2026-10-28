@@ -4,6 +4,8 @@ Oath 是 personal agent runtime，三个核心特性：事件驱动、持久化�
 
 应用可禁用内置 Bash，接入显式执行目标工具；设备业务留在应用层，见
 [可替换执行工具](feature-execution-targets.md)。
+工具授权由应用策略回答 `allow / ask / deny`，Oath 持久化 action digest、审批与终态，见
+[工具授权](feature-tool-authorization.md)。
 
 当前架构与 schema 以 [持续运行的 Personal Agent 基座](feature-distributed-personal-agent.md) 为准。
 所有权归 `user_id`；主 Agent 与有界子 Agent 分别执行，见 [异步委派](feature-subagents.md)。
