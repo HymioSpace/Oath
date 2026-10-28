@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import asdict
 from pathlib import Path
 
+from bootstrap.clients.permission_notifier import PermissionNotifier
 from bootstrap.clients.permission_policy import RemotePermissionPolicy
 from bootstrap.clients.service_client import ServiceClient
 from bootstrap.common.authentication import cli_claims, cli_token, service_token
@@ -105,9 +106,7 @@ class ToolService:
                     + hashlib.sha256((claims["parent"] + ":" + key).encode()).hexdigest()[:40]
                 )
                 existing = self.tools.store.entries(user, "calls", [child]).get(child)
-                if existing and (
-                    existing["tool"] != name or existing["arguments"] != arguments
-                ):
+                if existing and (existing["tool"] != name or existing["arguments"] != arguments):
                     raise ValueError("CLI request_id conflicts with an existing invocation")
                 result = self.tools.submit_batch(
                     user,
@@ -228,10 +227,22 @@ def run(config):
         if config.agent.permission_policy_url
         else AllowAllPolicy(storage)
     )
+    notifier = (
+        PermissionNotifier(config.agent.permission_notification_url, token)
+        if config.agent.permission_notification_url
+        else None
+    )
     tools = ThreadedToolSystem(
         registry,
         DurableEventSink(storage),
         policy,
+        approval_notifier=(
+            lambda user, payload: (
+                notifier.notify(user.user_id, payload, str(payload["invocation_id"]))
+                if notifier
+                else None
+            )
+        ),
         execution_environment=execution_environment,
         exposed_tools=config.agent.exposed_tools,
         store=RuntimeStore(storage, patch_commits=True, read_projection="tools"),

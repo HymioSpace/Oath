@@ -69,6 +69,7 @@ builtin_bash = true
 # Optional application-owned permission service. It receives the exact invocation and returns
 # allow / ask / deny plus trusted approval metadata. Requests use services.internal_token.
 permission_policy_url = ""
+permission_notification_url = ""
 # oath-cli 所在的目录，执行命令时前置到 PATH 上 —— bash 里能直接 `oath-cli echo ...`。
 # 与 workspace_root 一样在装配期解析成绝对路径，相对路径按配置文件目录算，
 # 不是按命令的 cwd（命令默认在 workspace 下）。

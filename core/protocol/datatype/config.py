@@ -87,6 +87,7 @@ class AgentConfig:
     exposed_tools: tuple[str, ...] = ()
     cli_public_url: str = ""
     permission_policy_url: str = ""
+    permission_notification_url: str = ""
     #: 挂 `oath-cli` 的目录，前置到 bash 子进程的 PATH 上。
     cli_bin_dir: Path = Path("./scripts")
 
@@ -119,6 +120,17 @@ class AgentConfig:
                 or policy.fragment
             ):
                 raise ValueError("permission_policy_url must be an HTTP(S) service URL")
+        if self.permission_notification_url:
+            notification = urlsplit(self.permission_notification_url)
+            if (
+                notification.scheme not in {"http", "https"}
+                or not notification.hostname
+                or notification.username
+                or notification.password
+                or notification.query
+                or notification.fragment
+            ):
+                raise ValueError("permission_notification_url must be an HTTP(S) service URL")
         if not isinstance(self.selectable_models, (list, tuple)) or any(
             not isinstance(m, str) or not m.strip() or len(m) > 128 for m in self.selectable_models
         ):

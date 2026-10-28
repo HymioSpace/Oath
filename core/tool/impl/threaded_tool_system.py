@@ -13,7 +13,7 @@ import math
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from typing import Any, cast
 
@@ -54,7 +54,7 @@ from core.trace.attributes import (
     OATH_TOOL_QUEUE_MS,
 )
 from core.utils.deadlines import Deadlines
-from core.utils.encoding import canonical_json, utc_now_iso
+from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
 
 _log = logging.getLogger(__name__)
 DEFAULT_MAX_CONCURRENCY = 8
@@ -89,6 +89,7 @@ class ThreadedToolSystem(ToolSystem):
         approval_ttl: float = 300,
         admission_timeout: float = 5,
         shrinker: ResultShrinker | None = None,
+        approval_notifier: Callable[[User, JsonObject], None] | None = None,
     ) -> None:
         for name, value in (
             ("max_concurrency", max_concurrency),
@@ -103,6 +104,7 @@ class ThreadedToolSystem(ToolSystem):
         self.store, self._queue, self._traces = store, queue, traces
         self._registry, self._sink = registry, sink
         self._shrinker = shrinker
+        self._approval_notifier = approval_notifier
         self._execution_environment = execution_environment
         self.exposed_tools = frozenset(exposed_tools)
         self._max_pending, self._ttl, self._admission_timeout = (
@@ -373,7 +375,14 @@ class ThreadedToolSystem(ToolSystem):
         self.store.transact(user, "tool.classified", change)
         self.maintain(user)
 
-    def _activate(self, user: User, state: State, now: float, out: list[Inbound]) -> None:
+    def _activate(
+        self,
+        user: User,
+        state: State,
+        now: float,
+        out: list[Inbound],
+        notices: list[JsonObject],
+    ) -> None:
         for batch in state["batches"].values():
             if batch["admitted"]:
                 continue
@@ -406,6 +415,17 @@ class ThreadedToolSystem(ToolSystem):
                         permission="pending",
                         approval_deadline=now + self._ttl,
                         approval=admission.get("approval"),
+                    )
+                    approval = (
+                        call.get("approval") if isinstance(call.get("approval"), dict) else {}
+                    )
+                    notices.append(
+                        {
+                            "user_id": user.user_id,
+                            "invocation_id": call["invocation_id"],
+                            "title": str(approval.get("title", ""))[:180],
+                            "summary": str(approval.get("summary", ""))[:180],
+                        }
                     )
                 elif verdict == "allow":
                     active = sum(
@@ -520,10 +540,11 @@ class ThreadedToolSystem(ToolSystem):
         if self._stop.is_set():
             return
         out: list[Inbound] = []
+        notices: list[JsonObject] = []
 
         def tick(state: State) -> State:
             now = time.time()
-            self._activate(user, state, now, out)
+            self._activate(user, state, now, out, notices)
             for call in state["calls"].values():
                 if (
                     call["status"] in {"queued", "running"}
@@ -571,6 +592,12 @@ class ThreadedToolSystem(ToolSystem):
 
         state = self.store.transact(user, "tool.deadlines", tick)
         self._publish(user, out)
+        if self._approval_notifier:
+            for notice in notices:
+                try:
+                    self._approval_notifier(user, notice)
+                except Exception:
+                    _log.warning("Approval notification failed for %s", notice.get("invocation_id"))
         for batch_id, batch in state["batches"].items():
             if batch["admitted"]:
                 self._deadlines.forget((user, batch_id, "admission"))

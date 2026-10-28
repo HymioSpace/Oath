@@ -234,6 +234,9 @@ def project(db, user_id, before, after, changes):
         old = before["calls"].get(key, {})
         if call["status"] == "waiting_approval" and old.get("status") != "waiting_approval":
             approval = call.get("approval") if isinstance(call.get("approval"), dict) else {}
+            trace_id = (after.get("steps", {}).get(call.get("batch_id", "")) or {}).get(
+                "trace_id", ""
+            )
             outbox.append(
                 db,
                 user_id,
@@ -245,6 +248,7 @@ def project(db, user_id, before, after, changes):
                     "tool": call["tool"],
                     "arguments": call["arguments"],
                     "expires_at": call["approval_deadline"],
+                    "trace_id": trace_id,
                 },
                 f"permission:{key}",
             )
@@ -256,6 +260,9 @@ def project(db, user_id, before, after, changes):
                 if isinstance(call.get("permission_decision"), dict)
                 else {}
             )
+            trace_id = (after.get("steps", {}).get(call.get("batch_id", "")) or {}).get(
+                "trace_id", ""
+            )
             outbox.append(
                 db,
                 user_id,
@@ -264,6 +271,7 @@ def project(db, user_id, before, after, changes):
                     **permission_decision,
                     "invocation_id": key,
                     "status": call["permission"],
+                    "trace_id": trace_id,
                 },
                 f"permission:{key}:resolved",
             )

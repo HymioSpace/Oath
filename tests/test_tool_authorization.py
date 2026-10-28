@@ -230,6 +230,7 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
     registry.register(probe)
     user = User("authorization-late-approval")
     queue = RecordingQueue()
+    notifications = []
     tools = ThreadedToolSystem(
         registry,
         DurableEventSink(service),
@@ -239,6 +240,7 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
         traces=StoredTraces(service),
         max_concurrency=1,
         approval_ttl=10,
+        approval_notifier=lambda _, payload: notifications.append(payload),
     )
     try:
         tools.submit_batch(
@@ -261,6 +263,14 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
                 else None
             )
         )
+        assert notifications == [
+            {
+                "user_id": "authorization-late-approval",
+                "invocation_id": "late-call",
+                "title": "Run fixture?",
+                "summary": "A synthetic approval",
+            }
+        ]
         assert tools.apply_permission(
             user,
             "late-call",

@@ -65,4 +65,11 @@ class CliTool(Tool):
             content = json.loads(text)
         except ValueError:
             content = {"exit_code": result.returncode, "output": text}
+        pending = isinstance(content, dict) and content.get("status") in {
+            "waiting_approval",
+            "pending",
+        }
+        if result.returncode != 0 and not pending:
+            detail = text.strip() or f"exit status {result.returncode}"
+            raise ToolExecutionError(f"CLI failed: {detail[:480]}")
         return ToolResult(content)

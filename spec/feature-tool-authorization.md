@@ -96,6 +96,10 @@ starts execution.
 `PermissionRequest` with `services.internal_token`; transport is HTTPS or private service HTTP,
 without redirects or proxy environment. Timeouts, malformed responses and unknown verdicts fail
 closed. With no URL, the built-in `AllowAllPolicy` remains available only for core development.
+`agent.permission_notification_url` optionally sends an `attention` notification when an approval
+is created. This callback is independent of an attached client socket, so a suspended App can
+still be woken. The callback uses the same scoped internal service identity and is deduplicated by
+`approval:<invocation_id>`.
 
 ## Failure and recovery
 

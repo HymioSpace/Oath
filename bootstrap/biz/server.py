@@ -19,7 +19,7 @@ from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.user import User, is_valid_user_id
 
 
-def build_app(service, cli_service, admin_token=""):
+def build_app(service, cli_service, admin_token="", additional_routes=()):
     def traces(request):
         started = time.monotonic()
         status = "ok"
@@ -214,6 +214,7 @@ def build_app(service, cli_service, admin_token=""):
 
     app = Starlette(
         routes=[
+            *additional_routes,
             Route("/heartbeat", heartbeat),
             Route("/metrics", metrics),
             Route("/admin/traces", admin_traces),

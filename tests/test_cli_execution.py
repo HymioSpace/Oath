@@ -11,13 +11,21 @@ import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
+from bootstrap.biz.server import build_app
 from bootstrap.biz.tool_cli import routes
 from bootstrap.common.authentication import cli_claims, cli_token
 from bootstrap.tools.process import ToolService
 from core.journal.runtime_store import RuntimeStore
-from core.protocol.datatype import ToolCallRequest, ToolDefinition, ToolResult, User
-from core.protocol.error import PermissionDeniedError
+from core.protocol.datatype import (
+    ToolCallRequest,
+    ToolDefinition,
+    ToolInvocation,
+    ToolResult,
+    User,
+)
+from core.protocol.error import PermissionDeniedError, ToolExecutionError
 from core.protocol.interface import Tool
+from core.shell.cli_tool import CliTool
 from core.storage.adapters import DurableEventSink, StoredQueue, StoredTraces
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
@@ -145,6 +153,45 @@ def test_public_assets_contain_no_credentials_and_calls_require_capability():
     data = client.get("/cli/client").content
     assert hashlib.sha256(data).hexdigest() == client.get("/cli/manifest").json()["sha256"]
     assert config.services.internal_token.encode() not in data
+
+
+def test_static_tool_cli_routes_precede_business_command_catch_all():
+    config = SimpleNamespace(services=SimpleNamespace(internal_token="synthetic-private-token" * 3))
+
+    class Service:
+        def list_commands(self):
+            return ()
+
+    class Remote:
+        def call(self, *args, **kwargs):
+            raise AssertionError("Must not dispatch")
+
+    client = TestClient(
+        build_app(
+            Service(),
+            Service(),
+            additional_routes=routes(config, Remote()),
+        )
+    )
+    response = client.post("/cli/status", json={"invocation_id": "probe"})
+    assert response.status_code == 401
+    assert response.json() == {"error": "unauthorized"}
+
+
+def test_cli_nonzero_exit_is_a_failure(tmp_path):
+    client = tmp_path / "oath-cli"
+    client.write_text(
+        "import sys\nprint('CLI request failed: HTTPError', file=sys.stderr)\nraise SystemExit(2)\n"
+    )
+    tool = CliTool(client)
+    invocation = ToolInvocation(
+        User("cli-failure"),
+        "cli-failure",
+        {"command": "status missing"},
+        time.monotonic() + 5,
+    )
+    with pytest.raises(ToolExecutionError, match="CLI failed"):
+        tool.execute(invocation)
 
 
 def test_installer_verifies_before_replacing_and_keeps_credentials_out(tmp_path):
