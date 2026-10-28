@@ -392,9 +392,8 @@ class ThreadedToolSystem(ToolSystem):
                         state,
                         call,
                         "failed",
-                        error=admission.get("error")
-                        or admission.get("reason")
-                        or "权限拒绝",
+                        error=admission.get("error") or admission.get("reason") or "权限拒绝",
+                        error_kind="permission_denied",
                     )
             batch.update(admitted=True, initial_submitted=initial)
 

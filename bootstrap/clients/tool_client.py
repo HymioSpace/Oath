@@ -32,13 +32,30 @@ class ToolClient:
         )
         return BatchExecution(tuple(ToolHandle(**h) for h in result["handles"]))
 
-    def apply_permission(self, user, invocation_id, decision, command_id):
+    def apply_permission(
+        self,
+        user,
+        invocation_id,
+        decision,
+        command_id,
+        *,
+        scope="once",
+        client_id="",
+        channel="",
+        reason="",
+        action_digest="",
+    ):
         return self.client.call(
             "tools.permission",
             user_id=user.storage_id,
             invocation_id=invocation_id,
             decision=decision,
             command_id=command_id,
+            scope=scope,
+            client_id=client_id,
+            channel=channel,
+            reason=reason,
+            action_digest=action_digest,
         )
 
     def cancel(self, user, run_id=None):

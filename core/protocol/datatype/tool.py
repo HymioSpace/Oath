@@ -111,6 +111,8 @@ class ToolErrorKind:
     UNKNOWN_TOOL: Final = "unknown_tool"
     #: 权限检查拒绝。
     PERMISSION_DENIED: Final = "permission_denied"
+    #: 审批在用户决定前超过有效期。
+    PERMISSION_EXPIRED: Final = "permission_expired"
     #: 权限这一步**没能完成**（存储故障、策略返回了没约定的判定）。与
     #: `permission_denied` 分开：那是「判定为拒绝」，这是「问不出结果」。
     PERMISSION_ERROR: Final = "permission_error"
@@ -131,6 +133,7 @@ class ToolErrorKind:
         {
             UNKNOWN_TOOL,
             PERMISSION_DENIED,
+            PERMISSION_EXPIRED,
             PERMISSION_ERROR,
             INVALID_ARGUMENTS,
             BUSY,

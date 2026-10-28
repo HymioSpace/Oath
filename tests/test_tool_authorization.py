@@ -2,6 +2,7 @@ import time
 
 import pytest
 
+from bootstrap.clients.tool_client import ToolClient
 from core.journal.runtime_store import RuntimeStore
 from core.protocol.datatype import (
     PermissionDecision,
@@ -116,9 +117,7 @@ def test_approval_binds_digest_and_run_grant_reuses_exact_action(service):
         )
         first = wait_for(
             lambda: (
-                value
-                if (value := tools.status(user, "first-call")).status == "succeeded"
-                else None
+                value if (value := tools.status(user, "first-call")).status == "succeeded" else None
             )
         )
         assert first.permission_decision["scope"] == "run"
@@ -145,3 +144,82 @@ def test_approval_binds_digest_and_run_grant_reuses_exact_action(service):
         assert second.result.content == {"executions": 2}
     finally:
         tools.shutdown()
+
+
+def test_expired_approval_becomes_a_terminal_permission_expiry(service):
+    registry = ToolRegistry(default_timeout_seconds=10)
+    probe = Probe()
+    registry.register(probe)
+    user = User("authorization-expiry")
+    tools = ThreadedToolSystem(
+        registry,
+        DurableEventSink(service),
+        Reviewer(),
+        store=RuntimeStore(service, patch_commits=True, read_projection="tools"),
+        queue=StoredQueue(service),
+        traces=StoredTraces(service),
+        max_concurrency=1,
+        approval_ttl=0.05,
+    )
+    try:
+        tools.submit_batch(
+            user,
+            "expiry-batch",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "run"},
+                    "expiry-call",
+                    invocation_id="expiry-call",
+                    run_id="expiry-run",
+                )
+            ],
+        )
+        wait_for(lambda: tools.status(user, "expiry-call").status == "waiting_approval")
+        time.sleep(0.1)
+        assert tools.apply_permission(
+            user,
+            "expiry-call",
+            "expired",
+            "approval-expired",
+        )
+        expired = wait_for(
+            lambda: (
+                value if (value := tools.status(user, "expiry-call")).status == "failed" else None
+            )
+        )
+        assert expired.permission_decision["status"] == "expired"
+        assert expired.error is not None
+        assert expired.error.kind == "permission_expired"
+        assert probe.executions == 0
+    finally:
+        tools.shutdown()
+
+
+def test_tool_client_forwards_the_complete_permission_decision():
+    class RecordingClient:
+        def __init__(self):
+            self.operation = ""
+            self.params = {}
+
+        def call(self, operation, **params):
+            self.operation, self.params = operation, params
+            return True
+
+    recording = RecordingClient()
+    ToolClient(recording).apply_permission(  # type: ignore[arg-type]
+        User("permission-user"),
+        "invocation",
+        "denied",
+        "command",
+        scope="once",
+        client_id="iphone",
+        channel="ios",
+        reason="Not this time",
+        action_digest="a" * 64,
+    )
+    assert recording.operation == "tools.permission"
+    assert recording.params["action_digest"] == "a" * 64
+    assert recording.params["client_id"] == "iphone"
+    assert recording.params["channel"] == "ios"
+    assert recording.params["reason"] == "Not this time"

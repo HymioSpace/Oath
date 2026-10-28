@@ -70,9 +70,7 @@ class PermissionManager:
         approval = dict(decision.approval or {})
         grant_key = decision.grant_key or approval.get("grant_key")
         if not isinstance(grant_key, str) or not 1 <= len(grant_key) <= 256:
-            grant_key = hashlib.sha256(
-                canonical_json([tool, arguments]).encode()
-            ).hexdigest()
+            grant_key = hashlib.sha256(canonical_json([tool, arguments]).encode()).hexdigest()
         digest = hashlib.sha256(
             canonical_json(
                 [
@@ -245,7 +243,13 @@ class PermissionManager:
                         }
                 call.update(status="queued", deadline=now + call["admission"]["timeout"])
             else:
-                collected = terminal(state, call, "failed", error=f"审批{verdict}，工具未执行")
+                collected = terminal(
+                    state,
+                    call,
+                    "failed",
+                    error=f"审批{verdict}，工具未执行",
+                    error_kind=f"permission_{verdict}",
+                )
                 if collected is not None:
                     produced.append(collected)
             return True

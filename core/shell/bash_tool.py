@@ -34,6 +34,11 @@ _SCHEMA: Final[JsonObject] = {
         },
         "command": {"type": "string", "description": "要执行的命令，按 shell 语法解析"},
         "cwd": {"type": "string", "description": "工作目录；不传就是工作区"},
+        "description": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "用一句简短的话说明本次命令要完成什么，作为用户看到的操作标题",
+        },
     },
     "required": ["command"],
     "additionalProperties": False,
@@ -74,6 +79,7 @@ class BashTool(Tool):
                 "在执行环境里跑一条命令并返回 exit_code、stdout、stderr 与耗时。"
                 f"默认工作目录是 {root}。runtime 自己的命令行工具也在 PATH 上，"
                 "用 oath-cli（不带参数可列出可用命令）调用。"
+                "每次调用都要提供不超过 80 字的 description，简洁说明本次命令的目的。"
             ),
             input_schema=_SCHEMA,
         )

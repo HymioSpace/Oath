@@ -68,7 +68,17 @@ class ToolSystem(ABC):
 
     @abstractmethod
     def apply_permission(
-        self, user: User, invocation_id: str, decision: str, command_id: str
+        self,
+        user: User,
+        invocation_id: str,
+        decision: str,
+        command_id: str,
+        *,
+        scope: str = "once",
+        client_id: str = "",
+        channel: str = "",
+        reason: str = "",
+        action_digest: str = "",
     ) -> bool:
         """原子裁定并提交原调用；裁定和执行意图不能分开提交。"""
         ...
