@@ -22,3 +22,10 @@ requests cannot execute. Child submission is idempotent under a client request i
 The installer uses HTTPS outside loopback, verifies a pinned SHA-256 and installs atomically in
 a user-owned executable directory. It contains no deployment address or credential. Updates use
 the same process. CLI credentials are per-execution environment data, not installation content.
+
+## Extension authoring
+
+Register atomic application operations as ToolSystem handlers and discover their schemas with
+`oath-cli help NAME`. Return structured results. Skills describe intent and composition; they
+do not duplicate execution state or authorization. The shipped extension namespace contains no
+demo tools or commands. Tests define synthetic handlers independently of installed capabilities.

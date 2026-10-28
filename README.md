@@ -137,7 +137,7 @@ the first limit reached wins. See [the contract](spec/feature-prompt-and-tool-bu
 
 ## Bring your own capabilities
 
-Core owns execution semantics and essential tools. Application capabilities live in extensions: **Python tools, HTTP-backed CLI commands and Markdown skills**. Keep them in your own repository and pass their directories at startup:
+Core owns execution semantics and essential tools. Application capabilities live in extensions: **ToolSystem handlers exposed through oath-cli, and Markdown skills**. Keep them in your own repository and pass their directories at startup:
 
 ```bash
 oath start \
@@ -146,7 +146,7 @@ oath start \
   --cli /path/to/cli
 ```
 
-Each option can be repeated. Built-in extensions load by default; additional directories are mounted read-only into the services that use them. Duplicate tool or command names fail at startup. See the [extension contracts](spec/feature-oath-command.md).
+Each option can be repeated. The built-in extension namespace contains no demo tools or commands; additional directories are mounted read-only into the services that use them. Duplicate tool or command names fail at startup. See the [extension contracts](spec/feature-oath-command.md).
 
 ## Current scope
 

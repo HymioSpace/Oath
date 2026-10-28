@@ -9,7 +9,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -407,19 +406,8 @@ class Greeter(Tool):
 # -- 仓库里那一份 -----------------------------------------------------------
 
 
-def test_the_committed_extensions_are_loaded_as_written() -> None:
-    """仓库里那份就是照这套规则写的 —— 它自己得先过得了。"""
+def test_shipped_extensions_do_not_register_demo_capabilities() -> None:
     found = load_extensions([Path(__file__).resolve().parents[1] / "extensions"])
 
-    assert "echo" in [tool.definition.name for tool in found.tools]
-    assert "echo" in [command.name for command in found.commands]
-
-
-def test_the_examples_are_synthetic_or_reference_something_real() -> None:
-    """仓库里的工具不许带出真实数据：定义要么描述一个真动作，要么只是一条验证链路。"""
-    found = load_extensions([Path(__file__).resolve().parents[1] / "extensions"])
-
-    for tool in found.tools:
-        definition: Any = tool.definition
-        assert definition.description
-        assert definition.input_schema.get("type") == "object"
+    assert not found.tools
+    assert not found.commands
