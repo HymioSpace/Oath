@@ -1,14 +1,4 @@
-"""业务工具。
+"""Application ToolSystem handlers. Mount external capabilities explicitly with --tool.
 
-一个工具一个文件，模块里定义的 `Tool` 子类就是一条声明 —— **零参构造**，装配器负责
-在启动时把它们注册进 `ToolRegistry`，规则见 `spec/feature-oath-command.md`。删掉这个目录，
-runtime 仍能启动，只是没有业务能力。
-
-参考实现，也是扩展作者的第一个模板。刻意只有纯本地、无外部依赖的工具：能发 HTTP 请求
-的工具必须同时解决出网限制、SSRF、响应体大小上限、重定向策略与超时，这些在权限策略成型
-之前写进仓库就是留洞。
-
-需要依赖的工具通过自定义装配代码注册。
-
-**这里刻意不 import 子模块**，理由见 `extensions/cli/__init__.py`。
+No demonstration tools ship by default. Registered handlers are callable through oath-cli.
 """
