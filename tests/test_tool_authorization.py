@@ -70,6 +70,14 @@ class Probe(Tool):
         return ToolResult({"executions": self.executions})
 
 
+class RecordingQueue:
+    def __init__(self):
+        self.items = []
+
+    def add(self, user, item):
+        self.items.append(item)
+
+
 def wait_for(fn):
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
@@ -212,6 +220,128 @@ def test_expired_approval_becomes_a_terminal_permission_expiry(service):
         assert expired.error is not None
         assert expired.error.kind == "permission_expired"
         assert probe.executions == 0
+    finally:
+        tools.shutdown()
+
+
+def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
+    registry = ToolRegistry(default_timeout_seconds=10)
+    probe = Probe()
+    registry.register(probe)
+    user = User("authorization-late-approval")
+    queue = RecordingQueue()
+    tools = ThreadedToolSystem(
+        registry,
+        DurableEventSink(service),
+        Reviewer(),
+        store=RuntimeStore(service, patch_commits=True, read_projection="tools"),
+        queue=queue,
+        traces=StoredTraces(service),
+        max_concurrency=1,
+        approval_ttl=10,
+    )
+    try:
+        tools.submit_batch(
+            user,
+            "late-batch",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "run"},
+                    "late-call",
+                    invocation_id="late-call",
+                    run_id="late-run",
+                )
+            ],
+        )
+        waiting = wait_for(
+            lambda: (
+                value
+                if (value := tools.status(user, "late-call")).status == "waiting_approval"
+                else None
+            )
+        )
+        assert tools.apply_permission(
+            user,
+            "late-call",
+            "expired",
+            "late-expired",
+        )
+        expired = wait_for(
+            lambda: value if (value := tools.status(user, "late-call")).status == "failed" else None
+        )
+        assert expired.error is not None
+        assert expired.error.kind == "permission_expired"
+        assert probe.executions == 0
+
+        assert tools.apply_permission(
+            user,
+            "late-call",
+            "approved",
+            "late-approved",
+            scope="once",
+            client_id="iphone",
+            channel="ios",
+            action_digest=waiting.approval["action_digest"],
+        )
+        corrected = tools.status(user, "late-call")
+        assert corrected is not None
+        assert corrected.status == "failed"
+        assert corrected.error.kind == "permission_expired"
+        assert corrected.late_permission["status"] == "approved"
+        assert probe.executions == 0
+        assert queue.items[-1].source == "permission.late_resolved"
+        assert queue.items[-1].payload["executed"] is False
+        assert queue.items[-1].payload["retry_safe"] is True
+        queued_notifications = len(queue.items)
+        assert not tools.apply_permission(
+            user,
+            "late-call",
+            "denied",
+            "late-conflict",
+            scope="once",
+            client_id="web",
+            channel="web",
+            action_digest=waiting.approval["action_digest"],
+        )
+        assert len(queue.items) == queued_notifications
+
+        tools.submit_batch(
+            user,
+            "retry-batch",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "run"},
+                    "retry-call",
+                    invocation_id="retry-call",
+                    run_id="late-run",
+                )
+            ],
+        )
+        retried = wait_for(
+            lambda: (
+                value if (value := tools.status(user, "retry-call")).status == "succeeded" else None
+            )
+        )
+        assert retried.result.content == {"executions": 1}
+        assert retried.retry_of == "late-call"
+
+        tools.submit_batch(
+            user,
+            "second-retry-batch",
+            [
+                ToolCallRequest(
+                    "probe",
+                    {"action": "run"},
+                    "second-retry-call",
+                    invocation_id="second-retry-call",
+                    run_id="late-run",
+                )
+            ],
+        )
+        wait_for(lambda: tools.status(user, "second-retry-call").status == "waiting_approval")
+        assert probe.executions == 1
     finally:
         tools.shutdown()
 

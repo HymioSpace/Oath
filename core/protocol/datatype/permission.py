@@ -44,7 +44,7 @@ class PermissionStatus:
     #: 有效期到了没人管。
     EXPIRED: Final = "expired"
 
-    #: 已终结。到这里之后任何裁定都不再生效。
+    #: 审批请求已终结。之后到达的决定只能记录为迟到决定，不能恢复原调用。
     RESOLVED: Final = frozenset({APPROVED, DENIED, EXPIRED})
     ALL: Final = frozenset({PENDING}) | RESOLVED
 
@@ -62,8 +62,11 @@ class PermissionEventType:
 
     REQUESTED: Final = "permission.requested"
     RESOLVED: Final = "permission.resolved"
+    #: A decision that arrived after `permission_expired`. It is an Agent input,
+    #: not a new approval workflow and never revives the original call.
+    LATE_RESOLVED: Final = "permission.late_resolved"
 
-    ALL: Final = frozenset({REQUESTED, RESOLVED})
+    ALL: Final = frozenset({REQUESTED, RESOLVED, LATE_RESOLVED})
 
 
 #: 幂等键前缀。刻意取短：键长上限是 journal 定的，而 `invocation_id` 的长度上限
@@ -151,6 +154,8 @@ class PermissionDecision:
     approval: JsonObject | None = None
     grant_key: str = ""
     policy_version: str = ""
+    retry_of: str = ""
+    consume_grant: bool = False
 
 
 # --------------------------------------------------------------------------

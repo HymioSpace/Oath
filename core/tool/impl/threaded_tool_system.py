@@ -321,6 +321,8 @@ class ThreadedToolSystem(ToolSystem):
                 "reason": decision.reason,
                 "approval": decision.approval,
                 "policy_version": decision.policy_version,
+                **({"retry_of": decision.retry_of} if decision.retry_of else {}),
+                **({"consume_grant": True} if decision.consume_grant else {}),
                 **({"error": decision.reason} if verdict == "deny" and decision.reason else {}),
             }
             self._classified(user, invocation_id, admission)
@@ -340,7 +342,33 @@ class ThreadedToolSystem(ToolSystem):
         def change(state: State) -> None:
             call = state["calls"][invocation_id]
             if call["status"] == "admitting" and call["admission"] is None:
-                call["admission"] = admission
+                actual = dict(admission)
+                if actual.pop("consume_grant", False):
+                    grants = state["meta"].get("permission_grants", {})
+                    approval = actual.get("approval")
+                    grant_key = approval.get("grant_key", "") if isinstance(approval, dict) else ""
+                    grant = grants.get(grant_key) if isinstance(grants, dict) else None
+                    remaining = grant.get("remaining", 1) if isinstance(grant, dict) else 0
+                    if (
+                        actual.get("verdict") == "allow"
+                        and isinstance(grant, dict)
+                        and grant.get("scope") == "once"
+                        and grant.get("run_id") == call["run_id"]
+                        and (not grant.get("expires_at") or grant["expires_at"] > time.time())
+                        and isinstance(remaining, int)
+                        and remaining > 0
+                    ):
+                        if remaining == 1:
+                            grants.pop(grant_key, None)
+                        else:
+                            grant["remaining"] = remaining - 1
+                    else:
+                        actual.update(
+                            verdict="ask",
+                            reason="Approval retry credit is no longer available",
+                            error=None,
+                        )
+                call["admission"] = actual
 
         self.store.transact(user, "tool.classified", change)
         self.maintain(user)
@@ -366,6 +394,8 @@ class ThreadedToolSystem(ToolSystem):
                     continue
                 admission = call["admission"] or {"verdict": "deny", "error": "接纳超时"}
                 call["admission"] = admission
+                if admission.get("retry_of"):
+                    call["retry_of"] = admission["retry_of"]
                 if state["meta"].get(f"cancelled:{call['run_id']}"):
                     self._collect(out, state, call, "cancelled", error="运行已取消，工具未执行")
                     continue
@@ -430,6 +460,8 @@ class ThreadedToolSystem(ToolSystem):
             child_invocation_ids=tuple(call.get("cli_children", [])),
             approval=call.get("approval"),
             permission_decision=call.get("permission_decision"),
+            late_permission=call.get("late_permission"),
+            retry_of=call.get("retry_of", ""),
         )
 
     def apply_permission(

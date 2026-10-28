@@ -312,6 +312,8 @@ class ToolExecution:
     child_invocation_ids: tuple[str, ...] = ()
     approval: JsonObject | None = None
     permission_decision: JsonObject | None = None
+    late_permission: JsonObject | None = None
+    retry_of: str = ""
 
     @property
     def is_terminal(self) -> bool:
