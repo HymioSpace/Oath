@@ -29,6 +29,7 @@ READ_OPERATIONS = frozenset(
         "snapshot.get",
         "subagent.list",
         "subagent.get",
+        "subagent.activity",
     }
 )
 

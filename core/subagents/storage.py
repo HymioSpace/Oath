@@ -76,8 +76,7 @@ def finish(db, row, status, result):
         "SELECT version,state_json FROM users WHERE user_id=?", (row["storage_id"],)
     ).fetchone()
     turn = db.execute(
-        "SELECT turn_id FROM subagent_turns WHERE agent_id=? "
-        "ORDER BY created_at DESC LIMIT 1",
+        "SELECT turn_id FROM subagent_turns WHERE agent_id=? ORDER BY created_at DESC LIMIT 1",
         (row["agent_id"],),
     ).fetchone()
     turn_id = turn["turn_id"] if turn else ""
@@ -233,8 +232,7 @@ def resume(db, uid, p):
     ):
         raise ValueError("At most eight active subagents per user")
     known = db.execute(
-        "SELECT content,success_criteria FROM subagent_turns "
-        "WHERE agent_id=? AND turn_id=?",
+        "SELECT content,success_criteria FROM subagent_turns WHERE agent_id=? AND turn_id=?",
         (agent_id, turn_id),
     ).fetchone()
     if known:
@@ -270,8 +268,7 @@ def resume(db, uid, p):
         agent_id + ":" + turn_id,
     )
     db.execute(
-        "INSERT OR IGNORE INTO inbox_events(user_id,kind,identity,item_json) "
-        "VALUES(?,?,?,?)",
+        "INSERT OR IGNORE INTO inbox_events(user_id,kind,identity,item_json) VALUES(?,?,?,?)",
         (row["storage_id"], "user", item.identity, encode(item.to_dict())),
     )
     db.execute(
@@ -280,6 +277,61 @@ def resume(db, uid, p):
     )
     scheduling.wake(db, row["storage_id"])
     return get(db, uid, agent_id)
+
+
+def activity(db, uid, p):
+    agent = db.execute(
+        "SELECT agent_id,storage_id,status,result FROM subagents WHERE user_id=? AND agent_id=?",
+        (uid, p.get("agent_id")),
+    ).fetchone()
+    if not agent:
+        raise ValueError("Subagent not found")
+    row = agent
+    limit, after = p.get("limit", 60), p.get("after")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be 1..100")
+    if after is not None and (type(after) is not int or after < 0):
+        raise ValueError("Invalid activity cursor")
+    rows = db.execute(
+        "SELECT seq,type,payload_json,created_at FROM conversation_events "
+        "WHERE user_id=? AND seq>? AND type IN "
+        "('assistant.message','tool.terminal','step.status','permission.requested') "
+        + ("ORDER BY seq DESC LIMIT ?" if after is None else "ORDER BY seq LIMIT ?"),
+        (row["storage_id"], after or 0, limit),
+    ).fetchall()
+    rows = sorted(rows, key=lambda r: r["seq"])
+    entries = []
+    traces = {}
+    for event in rows:
+        data = json.loads(event["payload_json"])
+        step = data.get("step_id", "")
+        if data.get("trace_id"):
+            traces[step] = data["trace_id"]
+        calls = data.get("tool_calls", [])
+        content = data.get("content", "")
+        entries.append(
+            {
+                "id": event["seq"],
+                "kind": event["type"],
+                "created_at": event["created_at"],
+                "step_id": step,
+                "status": data.get("status", data.get("outcome", "")),
+                "tool": data.get("tool", ""),
+                "tools": [c.get("tool", "") for c in calls if isinstance(c, dict)],
+                "content": content[:2000] if isinstance(content, str) else "",
+                "trace_id": data.get("trace_id", ""),
+                "invocation_id": data.get("invocation_id", ""),
+            }
+        )
+    for entry in entries:
+        entry["trace_id"] = entry["trace_id"] or traces.get(entry["step_id"], "")
+    return {
+        "agent_id": agent["agent_id"],
+        "status": agent["status"],
+        "result": agent["result"],
+        "entries": entries,
+        "next_cursor": rows[-1]["seq"] if rows else after or 0,
+    }
 
 
 def call(db, uid, operation, p):
@@ -320,6 +372,8 @@ def call(db, uid, operation, p):
         return {"delivered": True}
     if user.agent_id:
         raise ValueError("Subagents cannot manage delegated executions")
+    if operation == "subagent.activity":
+        return activity(db, uid, p)
     if operation == "subagent.spawn":
         return spawn(db, uid, p)
     if operation == "subagent.continue":
