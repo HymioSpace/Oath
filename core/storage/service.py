@@ -27,6 +27,9 @@ READ_OPERATIONS = frozenset(
         "trace.get",
         "journal.read",
         "snapshot.get",
+        "task.context",
+        "task.list",
+        "task.get",
         "subagent.list",
         "subagent.get",
         "subagent.activity",
@@ -75,6 +78,10 @@ class StorageService:
             fence = p.get("fence")
             if fence:
                 scheduling.check(db, uid, fence)
+            if operation.startswith("task."):
+                from core.tasks.storage import call as task_call
+
+                return task_call(db, uid, operation, p)
             if operation.startswith("subagent."):
                 return subagents.call(db, uid, operation, p)
             if operation == "tools.replay_results":
@@ -279,6 +286,9 @@ class StorageService:
                 )
                 return None
             if operation == "supervisor.tick":
+                from core.tasks.storage import tick as task_tick
+
+                task_tick(db)
                 subagents.expire(db)
                 now = time.time()
                 rows = db.execute(

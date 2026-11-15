@@ -31,6 +31,9 @@ def build_context(config, storage, queue, tools, fence=None):
         child = storage.call(
             "subagent.get", user_id=child_user.user_id, agent_id=child_user.agent_id
         )
+        task_binding = storage.call("task.context", user_id=child_user.storage_id)
+        if task_binding:
+            agent_config = replace(agent_config, context_provider_url="")
         agent_config = replace(
             agent_config,
             max_run_steps=child["max_steps"],

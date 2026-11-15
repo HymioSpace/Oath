@@ -148,6 +148,39 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
             data = json.loads(raw) if raw else {}
             if not isinstance(data, dict):
                 raise ValueError("Expected object")
+            if request.url.path == "/task-signals":
+                if not request.headers.get("authorization", "").startswith("Bearer hymio-service."):
+                    raise Unauthorized()
+                if any(k in data for k in ("user_id", "fence")):
+                    raise ValueError("Identity is derived from credentials")
+                return JSONResponse(
+                    await asyncio.to_thread(service.agent_operation, user, "task.signal", **data)
+                )
+            if request.url.path.startswith("/task-deliveries/"):
+                if not request.headers.get("authorization", "").startswith("Bearer hymio-service."):
+                    raise Unauthorized()
+                action = request.path_params["action"]
+                if action not in {"claim", "ack"} or any(k in data for k in ("user_id", "fence")):
+                    raise ValueError("Invalid delivery action")
+                result = await asyncio.to_thread(
+                    service.agent_operation, user, "task.delivery." + action, **data
+                )
+                return JSONResponse(result)
+            if request.url.path.startswith("/tasks/"):
+                action = request.path_params["action"]
+                if action not in {"list", "get", "pause", "resume", "cancel", "review"}:
+                    raise ValueError("Unknown task action")
+                if any(k in data for k in ("user_id", "request_id", "fence")):
+                    raise ValueError("Identity is derived from credentials")
+                if action not in {"list", "get"}:
+                    key = request.headers.get("idempotency-key")
+                    if not key or len(key) > 256:
+                        raise ValueError("Idempotency-Key is required")
+                    data["request_id"] = key
+                result = await asyncio.to_thread(
+                    service.agent_operation, user, "task." + action, **data
+                )
+                return JSONResponse(result)
             if request.url.path == "/executions/get":
                 invocation_id = data.get("invocation_id")
                 if not isinstance(invocation_id, str) or not 1 <= len(invocation_id) <= 256:
@@ -210,7 +243,21 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
             return JSONResponse(result)
         except (Unauthorized, BadQuery) as exc:
             return error_response(exc)
-        except (ValueError, KeyError, TypeError):
+        except (ValueError, KeyError, TypeError) as exc:
+            if request.url.path.startswith("/tasks/"):
+                try:
+                    detail = json.loads(str(exc))
+                    if isinstance(detail, dict) and detail.get("code"):
+                        status = {
+                            "NOT_FOUND": 404,
+                            "FORBIDDEN": 403,
+                            "REVISION_CONFLICT": 409,
+                            "INVALID_STATE": 409,
+                            "LEASE_LOST": 412,
+                        }.get(detail["code"], 400)
+                        return JSONResponse({"ok": False, "error": detail}, status)
+                except (ValueError, TypeError):
+                    pass
             return JSONResponse({"error": "bad_request"}, 400)
 
     def heartbeat(request):
@@ -232,6 +279,9 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
             Route("/messages/react", agent_operation, methods=["POST"]),
             Route("/executions/get", agent_operation, methods=["POST"]),
             Route("/subagents/{action}", agent_operation, methods=["POST"]),
+            Route("/tasks/{action}", agent_operation, methods=["POST"]),
+            Route("/task-signals", agent_operation, methods=["POST"]),
+            Route("/task-deliveries/{action}", agent_operation, methods=["POST"]),
             Route("/conversation_history", history),
             Route("/list_traces", traces),
             Route("/query_trace", trace),

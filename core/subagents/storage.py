@@ -125,7 +125,12 @@ def spawn(db, owner, p):
         return result
     if (
         db.execute(
-            "SELECT COUNT(*) FROM subagents WHERE user_id=? AND status='running'", (owner,)
+            (
+                "SELECT COUNT(*) FROM subagents a WHERE user_id=? AND "
+                "status='running' AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE "
+                "r.context_id=a.storage_id AND r.status!='running')"
+            ),
+            (owner,),
         ).fetchone()[0]
         >= 8
     ):
@@ -225,7 +230,11 @@ def resume(db, uid, p):
         raise ValueError("Cancelled subagent context cannot be resumed")
     if row["status"] != "running" and (
         db.execute(
-            "SELECT COUNT(*) FROM subagents WHERE user_id=? AND status='running'",
+            (
+                "SELECT COUNT(*) FROM subagents a WHERE user_id=? AND "
+                "status='running' AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE "
+                "r.context_id=a.storage_id AND r.status!='running')"
+            ),
             (uid,),
         ).fetchone()[0]
         >= 8
@@ -413,6 +422,9 @@ def call(db, uid, operation, p):
 def project(db, uid, changes, state=None):
     row = lookup(db, uid)
     if not row or row["status"] not in ACTIVE:
+        return
+    task = db.execute("SELECT status FROM task_runs WHERE context_id=?", (uid,)).fetchone()
+    if task and task["status"] in {"waiting", "paused", "cancelled", "succeeded"}:
         return
     if changes.get("meta", {}).get("tool_wake_pause"):
         finish(db, row, "failed", "Tool continuation budget exhausted")

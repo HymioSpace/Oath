@@ -212,6 +212,9 @@ def metrics_response() -> tuple[bytes, str]:
 
 def start_metrics_server(port: int = 8780) -> None:
     """Expose this process's registry for Prometheus pull scraping."""
+    import os
+
+    port = int(os.environ.get("OATH_METRICS_PORT", port))
     start_http_server(port, addr="0.0.0.0", registry=REGISTRY)
 
 

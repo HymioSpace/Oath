@@ -71,7 +71,43 @@ class Model(BaseHTTPRequestHandler):
         if "slow" in content:
             time.sleep(2)
         has_result = any(m["role"] == "tool" for m in body["messages"])
-        if "bash" in content and not has_result:
+        task_probe = any(
+            "TASK_PIPELINE_PROBE" in str(m.get("content", "")) for m in body["messages"]
+        )
+        if task_probe and not has_result:
+            delta = {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "task-report-probe",
+                        "type": "function",
+                        "function": {
+                            "name": "task_report",
+                            "arguments": json.dumps(
+                                {
+                                    "decision": "complete",
+                                    "checkpoint": {
+                                        "progress": "Verified the supplied deterministic input"
+                                    },
+                                    "result": {
+                                        "summary": "TASK_PIPELINE_PROBE completed",
+                                        "refs": [],
+                                        "evidence": [
+                                            {
+                                                "kind": "external",
+                                                "ref": "test_fixture",
+                                                "summary": "Synthetic fixture from test",
+                                            }
+                                        ],
+                                    },
+                                }
+                            ),
+                        },
+                    }
+                ]
+            }
+            finish = "tool_calls"
+        elif "bash" in content and not has_result:
             delta = {
                 "tool_calls": [
                     {
@@ -298,7 +334,7 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
         await command(
             ws,
             "user.message",
-            {"content": "compact " + "x" * 6500, "user_context": {}},
+            {"content": "compact " + "x" * 16000, "user_context": {}},
             f"compact-{n}",
         )
         await eventually(
@@ -307,6 +343,15 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
                 == n + 1
             )
         )
+    await eventually(
+        lambda: bool(
+            state("charlie")["compactions"].get("pending")
+            or state("charlie")["compactions"].get("applied")
+        )
+    )
+    await command(
+        ws, "user.message", {"content": "apply pending digest", "user_context": {}}, "compact-final"
+    )
     await eventually(lambda: bool(state("charlie")["compactions"].get("applied")))
     await ws.close()
     print(
@@ -318,6 +363,55 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
     await asyncio.sleep(1)
     assert len(Model.requests) == before
     print("PASS: idle supervisor does not call model", flush=True)
+
+    from tests.test_tasks_e2e import specification
+
+    params = specification("agent")
+    params["objective"] = (
+        "TASK_PIPELINE_PROBE: summarize the deterministic fixture and report completion."
+    )
+    params["intent_key"] = "task_pipeline_probe"
+    task = storage.call("task.create", user_id="alice", request_id="task_probe_create", **params)[
+        "task"
+    ]
+    tid = task["task_id"]
+    storage.call("task.tick")
+    await eventually(
+        lambda: (
+            storage.call("task.get", user_id="alice", task_id=tid, view="detail")["run"]["stage"]
+            == "verify"
+        )
+    )
+    detail = storage.call("task.get", user_id="alice", task_id=tid, view="detail")
+    storage.call(
+        "task.review",
+        user_id="alice",
+        task_id=tid,
+        expected_revision=task["revision"],
+        run_id=detail["run"]["run_id"],
+        accepted=True,
+        reason="Fixture evidence checked",
+        request_id="task_probe_review",
+    )
+    delivery = storage.call("task.delivery.claim", user_id="alice", owner="e2e_sink")
+    storage.call(
+        "task.delivery.ack",
+        user_id="alice",
+        delivery_id=delivery["delivery_id"],
+        owner="e2e_sink",
+        lease_token=delivery["lease_token"],
+        status="accepted",
+        receipt={"provider_id": "e2e_sink", "accepted_at": "2026-11-15T12:00:00Z"},
+        error=None,
+    )
+    assert (
+        storage.call("task.get", user_id="alice", task_id=tid, view="detail")["run"]["status"]
+        == "succeeded"
+    )
+    print(
+        "PASS: Task → Supervisor → Core worker → report → review → receipt",
+        flush=True,
+    )
 
 
 def main():
@@ -338,6 +432,7 @@ def main():
     internal = secrets.token_urlsafe(32)
     env = {
         **os.environ,
+        "OATH_AUTH_MODE": "static",
     }
     config = root / "oath.toml"
     config.write_text(
@@ -351,7 +446,7 @@ def main():
         + f'internal_token = "{internal}"\nbroker_url = "{args.amqp_url}"\n'
         + f'users = {{ "{token}" = "alice", "{token}b" = "bob", '
         + f'"{token}c" = "charlie" }}\n'
-        + "[agent]\nmax_output_tokens = 512\ncontext_window = 8000\n"
+        + "[agent]\nmax_output_tokens = 512\ncontext_window = 32000\n"
         + "compress_keep_recent = 2\ncompress_summary_tokens = 64\n"
         + f'extension_dirs = []\nskill_dir = "{root}/skills"\n'
         + f'skill_scan_dirs = []\nworkspace_root = "{root}"\ncli_bin_dir = "{ROOT}/scripts"\n'
@@ -377,7 +472,7 @@ def main():
         return subprocess.Popen(
             [sys.executable, "-m", "bootstrap", name, "--config", str(config)],
             cwd=ROOT,
-            env=env,
+            env={**env, "OATH_METRICS_PORT": str(free_port())},
             stdout=log,
             stderr=subprocess.STDOUT,
         )
