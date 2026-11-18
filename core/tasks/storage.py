@@ -686,6 +686,15 @@ def call(db, uid, operation, params):
 def tick(db):
     now = time.time()
     count = 0
+    # Older v4 executions could finish their TaskRun while leaving its dedicated
+    # agent active. Settle those owners using the persisted result, without
+    # replaying the task or its notification.
+    for run in db.execute(
+        "SELECT r.* FROM task_runs r JOIN subagents a ON r.agent_id=a.agent_id "
+        "WHERE r.status='succeeded' AND a.status='running' AND r.result_json IS NOT NULL "
+        "LIMIT 128"
+    ).fetchall():
+        finish_agent(db, run, json.loads(run["result_json"]))
     for delivery_row in db.execute(
         "SELECT * FROM task_deliveries WHERE status='inflight' AND lease_until<=?", (now,)
     ).fetchall():
@@ -1006,6 +1015,18 @@ def tick(db):
     return count
 
 
+def finish_agent(db, run, result):
+    if not run["agent_id"]:
+        return
+    from core.subagents.storage import finish
+
+    actor = db.execute(
+        "SELECT * FROM subagents WHERE agent_id=?", (run["agent_id"],)
+    ).fetchone()
+    if actor and actor["status"] == "running":
+        finish(db, actor, "succeeded", result["summary"])
+
+
 def complete(db, t, r, result, notification=None):
     now = time.time()
     db.execute(
@@ -1032,6 +1053,7 @@ def complete(db, t, r, result, notification=None):
             ),
             (now, t["task_id"]),
         )
+    finish_agent(db, r, result)
     event(
         db,
         t,

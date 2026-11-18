@@ -47,7 +47,7 @@ flowchart TB
 2. Supervisor 到期建立 Run，绑定专属 TaskAgent，注入目标、完成标准、资料、计划和长期笔记。
 3. TaskAgent 自己推进，或委派一层 Subagent；等待时明确报告 `wait`，不持续占用模型。
 4. 协作者结果先进入所属 TaskAgent 的持久收件箱。Supervisor 满足等待条件后继续同一个 Run。
-5. TaskAgent 按目标完成所需检查，报告 `complete`。系统校验身份、状态、权限、版本及结构，然后将 Run 标为成功。
+5. TaskAgent 按目标完成所需检查，报告 `complete`。系统校验身份、状态、权限、版本及结构，在同一事务内将 Run 和专属 TaskAgent 标为成功，停止该上下文继续执行。Supervisor 也会修复旧版本中 Run 已成功但 Agent 仍显示运行的记录，不重复通知。
 6. 如配置结果通知，在同一事务内创建通知记录；发送和回执独立推进。主会话收到完成事件，不需要再审批一次。
 
 ### 2.2 状态机

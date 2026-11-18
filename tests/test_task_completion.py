@@ -36,8 +36,29 @@ def test_completion_needs_neither_invented_progress_nor_parent_review(service):
     assert detail["run"]["delivery_status"] == "pending"
     assert "stage" not in detail["run"]
     assert detail["execution"]["task_agent"]["result"] == "Computed result: 4"
+    assert detail["execution"]["task_agent"]["status"] == "succeeded"
+    assert detail["execution"]["task_agent"]["finished_at"] is not None
     assert "task_review" not in {t.definition.name for t in tools(service)}
     assert not any(e["type"] == "review_required" for e in detail["execution"]["events"])
+
+
+def test_supervisor_settles_previously_completed_task_agent_once(service):
+    task = create(service, "agent")["task"]
+    detail = done(service, task)
+    agent_id = detail["run"]["agent_id"]
+    with service.transaction() as db:
+        db.execute(
+            "UPDATE subagents SET status='running',finished_at=NULL,result='' WHERE agent_id=?",
+            (agent_id,),
+        )
+    service.call("supervisor.tick", interval=1)
+    repaired = service.call("subagent.get", user_id="u1", agent_id=agent_id)
+    assert repaired["status"] == "succeeded"
+    assert repaired["result"] == detail["run"]["result"]["summary"]
+    service.call("supervisor.tick", interval=1)
+    assert service.call("subagent.get", user_id="u1", agent_id=agent_id) == repaired
+    with service.transaction() as db:
+        assert db.execute("SELECT count(*) FROM task_deliveries").fetchone()[0] == 1
 
 
 def test_missing_notification_receipt_does_not_reopen_completed_task(service):
