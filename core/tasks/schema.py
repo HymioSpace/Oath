@@ -31,3 +31,22 @@ def schema(name: str) -> dict:
 
 def validate(name: str, value: object) -> None:
     Draft202012Validator(schema(name), format_checker=FormatChecker()).validate(value)
+
+
+def tool_schema(name: str) -> dict:
+    """Expose concrete fields to model providers; keep server validation canonical."""
+
+    def expand(value):
+        if isinstance(value, list):
+            return [expand(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        if "$ref" in value:
+            target = value["$ref"].removeprefix("#/$defs/")
+            return {
+                **expand(DEFINITIONS[target]),
+                **{k: expand(v) for k, v in value.items() if k != "$ref"},
+            }
+        return {k: expand(v) for k, v in value.items() if k != "$defs"}
+
+    return expand({"$ref": "#/$defs/" + name})

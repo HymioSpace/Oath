@@ -311,11 +311,8 @@
         "minimum": 1
       },
       "max_cost_microusd": {
-        "type": [
-          "integer",
-          "null"
-        ],
-        "minimum": 0
+        "type": "null",
+        "description": "Monetary limits are not configured. Must be null."
       }
     },
     "required": [

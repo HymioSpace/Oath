@@ -82,6 +82,12 @@ def test_notification_flow_requires_receipt_and_does_not_spawn_model(service):
     assert status["task"]["lifecycle"] == "closed"
     assert service.call("task.delivery.claim", user_id="u1", owner="hymio") is None
     assert service.call("buffer.peek", user_id="u1", kind="system") == []
+    for _ in range(3):
+        service.call("supervisor.tick", interval=1)
+    assert service.call("brain.claim", owner="should_not_run", ttl=30) is None
+    with service.transaction() as db:
+        assert db.execute("SELECT count(*) FROM steps").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM subagents").fetchone()[0] == 0
 
 
 def test_owner_version_and_pause_controls(service):

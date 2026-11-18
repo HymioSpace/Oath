@@ -313,7 +313,7 @@ CREATE INDEX task_delegations_run ON task_delegations(run_id);
 
 ## 5. 工具 API 与实际 schema
 
-工具与 Storage 共用 `core/tasks/contracts.json`，按 `schema.py` 展开可达定义；服务端再次校验，不相信模型一定遵守 schema。owner 来自身份，模型不能传入别人的 user_id。
+工具与 Storage 共用 `core/tasks/contracts.json`，由 `schema.py` 为服务端保留规范定义、为模型展开具体参数字段；服务端再次校验，不相信模型一定遵守 schema。owner 来自身份，模型不能传入别人的 user_id。
 
 | 工具 | 主要参数与效果 |
 |---|---|
@@ -392,7 +392,7 @@ flowchart TB
 
 | 验证 | 实际覆盖 |
 |---|---|
-| Oath 回归 | 327 项通过；新增直接完成、无语义字段、通知未知不回滚、关闭任务继续通知、关闭通知、周期完成、v3 结果恢复及保留用户决定。 |
+| Oath 回归 | 328 项通过；新增直接完成、无语义字段、通知未知不回滚、关闭任务继续通知、关闭通知、周期完成、v3 结果恢复及保留用户决定。 |
 | 跨仓库 HTTP | 实际 Hymio 路由 + Oath Storage；完成先于通知确认、详情协作树、列表按需加载、回执与重启补确认。 |
 | 真实多进程 | RabbitMQ、Storage、Queue、Manager、Worker、Tools、Gateway、Biz：9 个场景通过；含委派、睡眠/唤醒、完成与独立通知、worker 崩溃、Storage 重启、旧租约拒绝。 |
 | DeepSeek | 实际模型调用通过；即时问题不建任务，后台提醒自主创建，Agent 委派与等待后直接完成，不再调用 review。测试由程序驱动工具步骤；多进程运行循环独立使用确定模型验证，不能据此宣称任意任务语义判断都已验证。 |

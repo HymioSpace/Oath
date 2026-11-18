@@ -121,6 +121,24 @@ def main():
         assert not immediate.tool_calls and "4" in immediate.content
         print("PASS: role prompt handles immediate question without creating a task")
 
+        reminder = invoke(
+            "create",
+            "每天20:00（Asia/Shanghai）提醒我喝水，固定提醒文字是 Drink water。"
+            "请直接登记后台任务，使用合理且有限的默认预算。",
+            choose=True,
+        )
+        reminder_detail = storage.call(
+            "task.get", user_id="live_user", task_id=reminder["task"]["task_id"], view="detail"
+        )
+        assert reminder_detail["spec"]["executor"]["kind"] == "program"
+        assert reminder_detail["spec"]["executor"]["action"] == "notify"
+        assert reminder_detail["spec"]["trigger"]["mode"] == "daily"
+        assert reminder_detail["spec"]["trigger"]["time"] == "20:00"
+        assert not storage.call("subagent.list", user_id="live_user")
+        print("PASS: natural-language water reminder selects program/notify, with no TaskAgent")
+        if os.environ.get("OATH_LIVE_ROUTING_ONLY") == "1":
+            return
+
         requested = specification()
         requested["intent_key"] = "live_reminder"
         made = invoke(

@@ -57,3 +57,20 @@ def test_report_accepts_correlated_event_wait():
             },
         },
     )
+
+
+def test_model_tool_schema_has_explicit_fields_and_matches_server_contract():
+    import json
+
+    from core.tasks.schema import tool_schema
+    from tests.test_tasks_e2e import specification
+
+    exposed = tool_schema("Create")
+    assert "$ref" not in json.dumps(exposed)
+    assert exposed["properties"]["acceptance"]["type"] == "object"
+    Draft202012Validator(exposed).validate(specification())
+    bad = {**specification(), "acceptance": "criteria: send reminder"}
+    with pytest.raises(ValidationError):
+        Draft202012Validator(exposed).validate(bad)
+    with pytest.raises(ValidationError):
+        validate("Create", bad)

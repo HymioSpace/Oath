@@ -3,14 +3,15 @@
 from core.protocol.datatype.tool import ToolDefinition, ToolResult
 from core.protocol.error import ToolExecutionError
 from core.protocol.interface.tool import Tool
-from core.tasks.schema import schema
+from core.tasks.schema import tool_schema
 from core.tasks.storage import SPECS
 
 DESCRIPTIONS = {
     "create": (
         "Create accepted background work with goal, context, "
         "trigger, executor and budget. Reuse intent_key; fixed "
-        "reminders use program notify. Returns immediately."
+        "reminders use program notify and must not allocate a TaskAgent or subagent. "
+        "Returns immediately."
     ),
     "list": (
         "List relevant durable tasks and attention requests. Query "
@@ -68,7 +69,7 @@ class TaskTool(Tool):
         return ToolDefinition(
             "task_" + self.action,
             DESCRIPTIONS[self.action],
-            schema(SPECS[self.action]),
+            tool_schema(SPECS[self.action]),
         )
 
     def execute(self, invocation):
