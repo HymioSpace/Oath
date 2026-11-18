@@ -462,24 +462,14 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
     storage.call("task.tick")
     await eventually(
         lambda: (
-            storage.call("task.get", user_id="alice", task_id=tid, view="detail")["run"]["stage"]
-            == "verify"
+            storage.call("task.get", user_id="alice", task_id=tid, view="detail")["run"]["status"]
+            == "succeeded"
         )
     )
     detail = storage.call("task.get", user_id="alice", task_id=tid, view="detail")
     assert len(detail["execution"]["subagents"]) == 1
     assert detail["execution"]["subagents"][0]["status"] == "succeeded"
     assert "LEAF_JOIN_RESULT" in detail["run"]["result"]["summary"]
-    storage.call(
-        "task.review",
-        user_id="alice",
-        task_id=tid,
-        expected_revision=task["revision"],
-        run_id=detail["run"]["run_id"],
-        accepted=True,
-        reason="Fixture evidence checked",
-        request_id="task_probe_review",
-    )
     delivery = storage.call("task.delivery.claim", user_id="alice", owner="e2e_sink")
     storage.call(
         "task.delivery.ack",
@@ -496,7 +486,8 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
         == "succeeded"
     )
     print(
-        "PASS: Task → TaskAgent → leaf → sleep/wake/join → report → review → receipt",
+        "PASS: Task → TaskAgent → leaf → sleep/wake/join → complete "
+        "→ independent notification receipt",
         flush=True,
     )
 

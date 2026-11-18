@@ -168,7 +168,7 @@ def build_app(service, cli_service, admin_token="", additional_routes=()):
                 return JSONResponse(result)
             if request.url.path.startswith("/tasks/"):
                 action = request.path_params["action"]
-                if action not in {"list", "get", "pause", "resume", "cancel", "review"}:
+                if action not in {"list", "get", "pause", "resume", "cancel"}:
                     raise ValueError("Unknown task action")
                 if any(k in data for k in ("user_id", "request_id", "fence")):
                     raise ValueError("Identity is derived from credentials")

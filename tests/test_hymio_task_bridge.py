@@ -139,3 +139,32 @@ def test_hymio_reads_controls_and_delivers_oath_tasks(service, tmp_path):
             if t["id"] == graph_task["task_id"]
         )
         assert summary["execution"] == {}
+
+        from core.subagents.storage import finish
+
+        with service.transaction() as db:
+            leaf = db.execute(
+                "SELECT * FROM subagents WHERE agent_id=?", (child["agent_id"],)
+            ).fetchone()
+            finish(db, leaf, "succeeded", "Fixture checked")
+        service.call(
+            "task.report",
+            user_id=actor,
+            request_id="graph_complete",
+            decision="complete",
+            result={"summary": "Fixture checked", "refs": [], "evidence": []},
+        )
+        completed = client.post(
+            "/tasks", headers=headers, json={"action": "get", "task_id": graph_task["task_id"]}
+        ).json()
+        assert completed["runs"][0]["status"] == "succeeded"
+        assert completed["runs"][0]["notification_status"] == "pending"
+        assert completed["runs"][0]["progress"] == ""
+        assert "phase" not in completed["runs"][0]
+        assert "needs_attention" not in completed
+        asyncio.run(bridge.deliver(uid))
+        notified = client.post(
+            "/tasks", headers=headers, json={"action": "get", "task_id": graph_task["task_id"]}
+        ).json()
+        assert notified["runs"][0]["status"] == "succeeded"
+        assert notified["runs"][0]["notification_status"] == "accepted"

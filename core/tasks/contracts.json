@@ -33,22 +33,10 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 4000
-      },
-      "review": {
-        "type": "string",
-        "enum": [
-          "automatic",
-          "user"
-        ]
-      },
-      "require_delivery": {
-        "type": "boolean"
       }
     },
     "required": [
-      "criteria",
-      "review",
-      "require_delivery"
+      "criteria"
     ],
     "additionalProperties": false
   },
@@ -373,7 +361,8 @@
         "enum": [
           "result",
           "changes",
-          "attention"
+          "attention",
+          "none"
         ]
       },
       "destination_ref": {
@@ -1047,8 +1036,7 @@
         "items": {
           "$ref": "#/$defs/Evidence"
         },
-        "maxItems": 30,
-        "minItems": 1
+        "maxItems": 30
       }
     },
     "required": [
@@ -1077,11 +1065,7 @@
         "maxLength": 4000
       }
     },
-    "required": [
-      "progress"
-    ],
-    "additionalProperties": false,
-    "minProperties": 1
+    "additionalProperties": false
   },
   "Report": {
     "type": "object",
@@ -1111,8 +1095,7 @@
       }
     },
     "required": [
-      "decision",
-      "checkpoint"
+      "decision"
     ],
     "additionalProperties": false,
     "allOf": [
@@ -1134,7 +1117,10 @@
                 "next_step"
               ]
             }
-          }
+          },
+          "required": [
+            "checkpoint"
+          ]
         }
       },
       {
@@ -1935,20 +1921,6 @@
           }
         ]
       },
-      "next_review_at": {
-        "anyOf": [
-          {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 40,
-            "format": "date-time",
-            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
-          },
-          {
-            "type": "null"
-          }
-        ]
-      },
       "updated_at": {
         "type": "string",
         "format": "date-time"
@@ -1967,8 +1939,7 @@
       "close_reason",
       "needs_attention",
       "title",
-      "next_due_at",
-      "next_review_at"
+      "next_due_at"
     ],
     "additionalProperties": false
   },
@@ -2007,17 +1978,8 @@
           "cancelled"
         ]
       },
-      "stage": {
-        "type": "string",
-        "enum": [
-          "execute",
-          "verify",
-          "deliver"
-        ]
-      },
       "progress": {
         "type": "string",
-        "minLength": 1,
         "maxLength": 4000
       },
       "wait_reason": {
@@ -2116,7 +2078,6 @@
       "task_revision",
       "version",
       "status",
-      "stage",
       "progress",
       "wait_reason",
       "next_check_at",
@@ -2595,43 +2556,6 @@
         "additionalProperties": false
       }
     ]
-  },
-  "Review": {
-    "type": "object",
-    "properties": {
-      "task_id": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 128,
-        "pattern": "^[A-Za-z0-9_-]+$"
-      },
-      "expected_revision": {
-        "type": "integer",
-        "minimum": 1
-      },
-      "run_id": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 128,
-        "pattern": "^[A-Za-z0-9_-]+$"
-      },
-      "accepted": {
-        "type": "boolean"
-      },
-      "reason": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 4000
-      }
-    },
-    "required": [
-      "task_id",
-      "expected_revision",
-      "run_id",
-      "accepted",
-      "reason"
-    ],
-    "additionalProperties": false
   },
   "ExecutionAgent": {
     "type": "object",

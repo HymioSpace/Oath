@@ -20,7 +20,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
         )
     store = Database(path)
     with store.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         assert db.execute("SELECT user_id FROM users").fetchone()[0] == "owner"
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         tables = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'task%'")
@@ -28,7 +28,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
     store._owner.close()
     reopened = Database(path)
     with reopened.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
     reopened._owner.close()
 
 
@@ -109,5 +109,5 @@ def test_upgrade_task_v2_preserves_existing_task_run(tmp_path):
     assert after["run"]["agent_id"] == before["run"]["agent_id"]
     assert after["run"]["status"] == "running"
     with restored.transaction() as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

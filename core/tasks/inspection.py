@@ -36,6 +36,8 @@ def inspect_execution(db, task, run):
         actor.update(
             role="task_agent", execution_status=run["status"], objective=snapshot["objective"]
         )
+        if run["result_json"]:
+            actor["result"] = json.loads(run["result_json"])["summary"]
         actor["activity"] = activity(
             db, task["user_id"], {"agent_id": run["agent_id"], "limit": 40}
         )

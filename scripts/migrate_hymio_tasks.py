@@ -52,8 +52,6 @@ def migrate(source, destination, apply=False):
                 "completion": "maintain" if mode in {"daily", "weekly"} else "achieve",
                 "acceptance": {
                     "criteria": row["success_criteria"],
-                    "review": "automatic",
-                    "require_delivery": True,
                 },
                 "trigger": trigger,
                 "executor": {

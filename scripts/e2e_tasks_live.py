@@ -153,9 +153,9 @@ def main():
 
         requested = specification("agent")
         requested["intent_key"] = "live_math_analysis"
+        requested["title"] = "核对计算结果"
         requested["objective"] = (
-            "Compute 2 + 2 from the provided input. Report the answer and "
-            "cite provided_math_input as external evidence."
+            "核对输入 2 + 2 的计算结果，用中文简短说明结论，并引用输入来源 provided_math_input。"
         )
         requested["acceptance"]["criteria"] = (
             "Answer is 4 and evidence refers to the provided input."
@@ -173,7 +173,7 @@ def main():
             "subagent.spawn",
             "Delegate to one bounded leaf. Its objective must include the actual input: "
             "Provided arithmetic fixture: 2 + 2. Source: provided_math_input. "
-            "Title: arithmetic check. Success criteria: answer 4 with fixture reference.",
+            "Title: 计算核对. Success criteria: answer 4 with fixture reference.",
             run["context_id"],
         )
         waiting = invoke(
@@ -217,25 +217,11 @@ def main():
             + json.dumps(requested),
             run["context_id"],
         )
-        assert report["status"] == "waiting"
+        assert report["status"] == "succeeded"
         detail = storage.call("task.get", user_id="live_user", task_id=tid, view="detail")
-        reviewed = invoke(
-            "review",
-            (
-                "Verify the answer is 4 using provided_math_input=2+2. If "
-                "correct accept it, otherwise reject. "
-            )
-            + json.dumps(
-                {
-                    "task_id": tid,
-                    "expected_revision": detail["task"]["revision"],
-                    "run_id": run["run_id"],
-                    "result": detail["run"]["result"],
-                }
-            ),
-        )
         d = storage.call("task.delivery.claim", user_id="live_user", owner="test_sink")
-        assert d is not None, reviewed
+        assert d is not None
+        assert detail["run"]["status"] == "succeeded"
         storage.call(
             "task.delivery.ack",
             user_id="live_user",
@@ -254,8 +240,24 @@ def main():
         )
         print(
             "PASS: real model creates agent task → leaf delegation → sleep/wake/join → report → "
-            "real model verification → accepted delivery"
+            "completion → independent notification receipt"
         )
+        if output := os.environ.get("OATH_TASK_REVIEW_OUTPUT"):
+            import asyncio
+            import sys
+
+            sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "Hymio/backend"))
+            from hymio_backend.tasks.remote import RemoteTasks
+
+            bridge = object.__new__(RemoteTasks)
+
+            async def oath(uid, path, data, request_id=None):
+                return storage.call("task." + path.rsplit("/", 1)[1], user_id=uid, **data)
+
+            bridge.oath = oath
+            value = asyncio.run(bridge.get("live_user", tid))
+            Path(output).write_text(json.dumps(value, ensure_ascii=False))
+            print("PASS: exported actual live-model task through Hymio's task adapter")
 
 
 if __name__ == "__main__":

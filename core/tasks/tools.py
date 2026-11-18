@@ -51,12 +51,8 @@ DESCRIPTIONS = {
     "report": (
         "Report meaningful progress, continuation, a concrete wait, "
         "completion evidence or a blocker for your own task. "
-        "Completion is reviewed before success."
-    ),
-    "review": (
-        "Verify a reported result against task requirements and "
-        "actual evidence. Accept or reject with reasons. For user "
-        "review, obtain the explicit user decision first."
+        "Complete when your goal is achieved; report a result and its supporting references. "
+        "Use an explicit user wait when a decision is required. Notification delivery is separate."
     ),
 }
 

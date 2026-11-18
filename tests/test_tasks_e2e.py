@@ -13,8 +13,6 @@ def specification(kind="program"):
         "completion": "achieve",
         "acceptance": {
             "criteria": "Channel accepts notification",
-            "review": "automatic",
-            "require_delivery": True,
         },
         "trigger": {"mode": "now"},
         "executor": (
@@ -170,7 +168,7 @@ def test_agent_has_isolated_context_and_waits_for_input(service):
     )
 
 
-def test_complete_report_is_verified_then_delivered(service):
+def test_completion_does_not_wait_for_notification(service):
     made = create(service, "agent")
     tid = made["task"]["task_id"]
     service.call("task.tick")
@@ -192,17 +190,22 @@ def test_complete_report_is_verified_then_delivered(service):
         result=result,
     )
     value = service.call("task.get", user_id="u1", task_id=tid, view="detail")
-    assert value["run"]["stage"] == "verify"
-    service.call(
-        "task.review",
-        user_id="u1",
-        task_id=tid,
-        expected_revision=1,
-        run_id=r["run_id"],
-        accepted=True,
-        reason="Checked source and requirements",
-        request_id="review_1",
-    )
+    assert value["run"]["status"] == "succeeded"
+    assert value["task"]["lifecycle"] == "closed"
+    assert "stage" not in value["run"]
+    assert value["run"]["delivery_status"] == "pending"
+    validate("GetResult", value)
+    with pytest.raises(ValueError, match="FORBIDDEN"):
+        service.call(
+            "task.review",
+            user_id="u1",
+            task_id=tid,
+            expected_revision=1,
+            run_id=r["run_id"],
+            accepted=True,
+            reason="obsolete",
+            request_id="old_review",
+        )
     d = service.call("task.delivery.claim", user_id="u1", owner="hymio")
     assert d["payload"]["text"] == result["summary"]
     service.call(
@@ -512,10 +515,7 @@ def test_no_progress_is_reported_once_without_model_polling(service):
     with service.transaction() as db:
         assert db.execute("SELECT status FROM task_runs").fetchone()[0] == "paused"
         assert (
-            db.execute("SELECT count(*) FROM task_events WHERE type='review_required'").fetchone()[
-                0
-            ]
-            == 1
+            db.execute("SELECT count(*) FROM task_events WHERE type='blocked'").fetchone()[0] == 1
         )
 
 

@@ -29,7 +29,6 @@ SPECS = {
     "cancel": "Control",
     "retry": "Retry",
     "report": "Report",
-    "review": "Review",
 }
 OPEN = "('queued','running','waiting','paused')"
 FIELDS = (
@@ -86,7 +85,6 @@ def view(row):
         **{k: row[k] for k in ("task_id", "revision", "lifecycle", "close_reason", "title")},
         "needs_attention": bool(row["needs_attention"]),
         "next_due_at": iso(row["next_due_at"]),
-        "next_review_at": iso(row["next_review_at"]),
         "updated_at": iso(row["updated_at"]),
         "parent_task_id": row["parent_task_id"],
     }
@@ -101,7 +99,7 @@ def runview(db, row):
     ).fetchone()
     wait = json.loads(row["wait_json"]) if row["wait_json"] else None
     return {
-        **{k: row[k] for k in ("run_id", "task_id", "task_revision", "version", "status", "stage")},
+        **{k: row[k] for k in ("run_id", "task_id", "task_revision", "version", "status")},
         "progress": json.loads(row["progress_json"]).get("progress", ""),
         "due_at": iso(row["due_at"]),
         "started_at": iso(row["started_at"]),
@@ -148,16 +146,12 @@ def event(db, task, kind, payload, run=None, wake=False):
         **payload,
     }
     if kind == "completed":
-        data["delivery_handled"] = True
+        data["notifier_owns_result"] = bool(payload.get("notification"))
         data["instruction"] = (
-            "The result was already delivered by the task system. Update "
-            "related plans silently; do not send the same report again."
-        )
-    elif kind == "review_required" and "result" in payload:
-        data["instruction"] = (
-            "Read the task requirements and verify the evidence. Use "
-            "task_review to accept or reject. Obtain the user decision "
-            "if acceptance.review is user."
+            "The executor reported completion. This is not independently verified. "
+            "The task panel contains the result. If notifier_owns_result is true, "
+            "the notification service owns result delivery; do not send a duplicate. "
+            "Otherwise respect the task notification policy and update context quietly."
         )
     from core.storage.runtime_transactions import append_journal
 
@@ -198,10 +192,6 @@ def check_spec(value):
         error("INVALID_ARGUMENTS", "Maintain requires recurring or event trigger")
     if value["completion"] == "achieve" and trigger["mode"] in {"daily", "weekly"}:
         error("INVALID_ARGUMENTS", "Recurring tasks require maintain")
-    if value["executor"]["kind"] == "program" and (
-        value["acceptance"]["review"] != "automatic" or not value["acceptance"]["require_delivery"]
-    ):
-        error("INVALID_ARGUMENTS", "Program notifications require automatic delivery acceptance")
     if value["executor"]["kind"] == "agent" and value["executor"]["tool_profile"] not in {
         "research_readonly",
         "default",
@@ -228,7 +218,7 @@ def newrun(db, task, key, due, retry=None):
         (
             "INSERT INTO task_runs(run_id,user_id,task_id,task_revision,spec_s"
             "napshot_json,occurrence_key,retry_of_run_id,status,due_at,deadlin"
-            "e_at,created_at,signal_floor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+            "e_at,created_at,signal_floor,progress_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"
         ),
         (
             rid,
@@ -243,6 +233,7 @@ def newrun(db, task, key, due, retry=None):
             due + deadline if deadline else None,
             now,
             floor,
+            encode({}),
         ),
     )
     return db.execute("SELECT * FROM task_runs WHERE run_id=?", (rid,)).fetchone()
@@ -367,7 +358,7 @@ def mutate(db, uid, action, p, request):
                 (
                     task["revision"],
                     encode(value),
-                    encode({"progress": "Requirements updated", "next_step": value["objective"]}),
+                    encode({}),
                     run["run_id"],
                 ),
             )
@@ -496,33 +487,6 @@ def mutate(db, uid, action, p, request):
             error("ACTIVE_RUN_EXISTS", "Task already has an open run")
         run = newrun(db, task, "retry:" + request, now, old["run_id"])
         event(db, task, "retried", {"reason": p["reason"]}, run)
-    elif action == "review":
-        if (
-            not run
-            or run["run_id"] != p["run_id"]
-            or run["stage"] != "verify"
-            or run["status"] != "waiting"
-        ):
-            error("INVALID_STATE", "Run is not awaiting review")
-        db.execute("UPDATE tasks SET needs_attention=0 WHERE task_id=?", (task["task_id"],))
-        if p["accepted"]:
-            result = json.loads(run["result_json"])
-            if json.loads(run["spec_snapshot_json"])["acceptance"]["require_delivery"]:
-                request_delivery(db, task, run, result)
-            else:
-                complete(db, task, run, result)
-        else:
-            db.execute(
-                (
-                    "UPDATE task_runs SET stage='execute',status='queued',wait_json=NU"
-                    "LL,version=version+1,progress_json=? WHERE run_id=?"
-                ),
-                (
-                    encode({"progress": p["reason"], "next_step": "Revise result based on review"}),
-                    run["run_id"],
-                ),
-            )
-        event(db, task, "reviewed", {"accepted": p["accepted"], "reason": p["reason"]}, run)
     elif action == "message":
         if task["lifecycle"] == "closed":
             error("INVALID_STATE", "Task is closed")
@@ -547,11 +511,7 @@ def mutate(db, uid, action, p, request):
             )
         if run and run["status"] == "waiting":
             wait = json.loads(run["wait_json"])
-            if (
-                wait["condition"]["kind"] == "user"
-                and p.get("reply_to") == wait["wait_id"]
-                and run["stage"] != "verify"
-            ):
+            if wait["condition"]["kind"] == "user" and p.get("reply_to") == wait["wait_id"]:
                 db.execute(
                     (
                         "UPDATE task_runs SET status='queued',wait_json=NULL,version=versi"
@@ -734,20 +694,19 @@ def tick(db):
             (delivery_row["delivery_id"],),
         )
         task = owned(db, delivery_row["user_id"], delivery_row["task_id"])
-        db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (task["task_id"],))
         run = db.execute(
             "SELECT * FROM task_runs WHERE run_id=?", (delivery_row["run_id"],)
         ).fetchone()
         event(
             db,
             task,
-            "review_required",
+            "notification_unknown",
             {
-                "reason": "Delivery receipt missing; verify before retrying",
+                "reason": "Notification receipt missing; reconcile before retrying",
                 "delivery_id": delivery_row["delivery_id"],
             },
             run,
-            True,
+            False,
         )
     for t in db.execute(
         "SELECT * FROM tasks WHERE lifecycle='active' AND next_due_at<=? LIMIT 128", (now,)
@@ -791,6 +750,13 @@ def tick(db):
     ).fetchall():
         t = owned(db, r["user_id"], r["task_id"])
         value = json.loads(r["spec_snapshot_json"])
+        if (
+            value["executor"]["kind"] == "agent"
+            and r["stage"] in {"verify", "deliver"}
+            and r["result_json"]
+        ):
+            complete_agent(db, t, r, json.loads(r["result_json"]))
+            continue
         if r["deadline_at"] and now > r["deadline_at"]:
             db.execute(
                 (
@@ -1003,11 +969,11 @@ def tick(db):
                     "SELECT * FROM subagents WHERE agent_id=?", (r["agent_id"],)
                 ).fetchone()
                 if child["status"] == "running":
-                    finish(db, child, "failed", "Task needs progress review")
+                    finish(db, child, "failed", "Task stopped after progress timeout")
                 event(
                     db,
                     t,
-                    "review_required",
+                    "blocked",
                     {
                         "reason": (
                             "No progress within the configured interval and no active external work"
@@ -1032,7 +998,7 @@ def tick(db):
                 event(
                     db,
                     t,
-                    "review_required",
+                    "blocked",
                     {"reason": "Agent ended without an accepted report"},
                     r,
                     True,
@@ -1040,11 +1006,12 @@ def tick(db):
     return count
 
 
-def complete(db, t, r, result):
+def complete(db, t, r, result, notification=None):
     now = time.time()
     db.execute(
         (
-            "UPDATE task_runs SET status='succeeded',wait_json=NULL,result_jso"
+            "UPDATE task_runs SET status='succeeded',stage='execute',next_check_at=NULL,"
+            "wait_json=NULL,result_jso"
             "n=?,finished_at=?,version=version+1 WHERE run_id=?"
         ),
         (encode(result), now, r["run_id"]),
@@ -1066,8 +1033,21 @@ def complete(db, t, r, result):
             (now, t["task_id"]),
         )
     event(
-        db, t, "completed", {"result": result}, r, json.loads(t["executor_json"])["kind"] == "agent"
+        db,
+        t,
+        "completed",
+        {"result": result, "notification": notification},
+        r,
+        json.loads(t["executor_json"])["kind"] == "agent",
     )
+
+
+def complete_agent(db, task, run, result):
+    policy = json.loads(run["spec_snapshot_json"])["policy"]["notify"]
+    notification = None
+    if policy["mode"] in {"result", "changes"}:
+        notification = request_delivery(db, task, run, result)
+    complete(db, task, run, result, notification)
 
 
 def delivery(db, uid, action, p):
@@ -1076,7 +1056,8 @@ def delivery(db, uid, action, p):
         row = db.execute(
             (
                 "SELECT d.* FROM task_deliveries d JOIN tasks t USING(task_id) WHE"
-                "RE d.user_id=? AND t.lifecycle='active' AND d.status='pending' OR"
+                "RE d.user_id=? AND (t.lifecycle='active' OR (t.lifecycle='closed' "
+                "AND t.close_reason='achieved')) AND d.status='pending' OR"
                 "DER BY d.created_at LIMIT 1"
             ),
             (uid,),
@@ -1127,7 +1108,13 @@ def delivery(db, uid, action, p):
     )
     r = db.execute("SELECT * FROM task_runs WHERE run_id=?", (row["run_id"],)).fetchone()
     t = owned(db, uid, row["task_id"])
-    if p["status"] == "accepted" and t["lifecycle"] == "active" and (r["status"] == "waiting"):
+    event(db, t, "notification_" + p["status"], {"delivery_id": row["delivery_id"]}, r)
+    if (
+        p["status"] == "accepted"
+        and t["lifecycle"] == "active"
+        and r["status"] == "waiting"
+        and json.loads(r["spec_snapshot_json"])["executor"]["kind"] == "program"
+    ):
         result = (
             json.loads(r["result_json"])
             if r["result_json"]
@@ -1160,7 +1147,11 @@ def report(db, storage_id, p):
     question = None
     db.execute(
         "UPDATE task_runs SET progress_json=?,last_progress_at=?,version=version+1 WHERE run_id=?",
-        (encode(args["checkpoint"]), time.time(), r["run_id"]),
+        (
+            encode({**json.loads(r["progress_json"]), **args.get("checkpoint", {})}),
+            time.time(),
+            r["run_id"],
+        ),
     )
     if (
         decision == "complete"
@@ -1181,38 +1172,7 @@ def report(db, storage_id, p):
             ).fetchone():
                 error("FORBIDDEN", "Cannot wait for unrelated subagent")
     if decision == "complete":
-        db.execute(
-            (
-                "UPDATE task_runs SET status='waiting',stage='verify',result_json="
-                "?,wait_json=? WHERE run_id=?"
-            ),
-            (
-                encode(args["result"]),
-                encode(
-                    {
-                        "wait_id": uuid.uuid4().hex,
-                        "condition": {
-                            "kind": "user",
-                            "reason": "Review required",
-                            "question": "Does this result satisfy the task?",
-                        },
-                        "signal_floor": r["signal_floor"],
-                        "next_check_at": None,
-                    }
-                ),
-                r["run_id"],
-            ),
-        )
-        if json.loads(r["spec_snapshot_json"])["acceptance"]["review"] == "user":
-            db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (t["task_id"],))
-        event(
-            db,
-            t,
-            "review_required",
-            {"result": args["result"], "reason": "Result needs verification"},
-            r,
-            True,
-        )
+        complete_agent(db, t, r, args["result"])
     elif decision == "wait":
         question = uuid.uuid4().hex
         wait = {
@@ -1271,7 +1231,7 @@ def report(db, storage_id, p):
             (r["run_id"],),
         )
         db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (t["task_id"],))
-        event(db, t, "review_required", {"reason": args["block_reason"]}, r, True)
+        event(db, t, "blocked", {"reason": args["block_reason"]}, r, True)
     event(db, t, "progress", args, r)
     updated = db.execute("SELECT * FROM task_runs WHERE run_id=?", (r["run_id"],)).fetchone()
     return {
@@ -1285,6 +1245,12 @@ def report(db, storage_id, p):
 
 
 def request_delivery(db, task, run, result):
+    existing = db.execute(
+        "SELECT delivery_id,status FROM task_deliveries WHERE user_id=? AND dedupe_key=?",
+        (task["user_id"], run["run_id"] + ":result"),
+    ).fetchone()
+    if existing:
+        return dict(existing)
     did = uuid.uuid4().hex
     value = json.loads(run["spec_snapshot_json"])
     db.execute(
@@ -1306,24 +1272,8 @@ def request_delivery(db, task, run, result):
             time.time(),
         ),
     )
-    wait = {
-        "wait_id": uuid.uuid4().hex,
-        "condition": {
-            "kind": "delivery",
-            "reason": "Waiting for channel receipt",
-            "delivery_id": did,
-        },
-        "signal_floor": run["signal_floor"],
-        "next_check_at": None,
-    }
-    db.execute(
-        (
-            "UPDATE task_runs SET stage='deliver',status='waiting',wait_json=?"
-            ",version=version+1 WHERE run_id=?"
-        ),
-        (encode(wait), run["run_id"]),
-    )
-    event(db, task, "delivery_requested", {"delivery_id": did}, run)
+    event(db, task, "notification_queued", {"delivery_id": did}, run)
+    return {"delivery_id": did, "status": "pending"}
 
 
 def guard(db, uid, p):

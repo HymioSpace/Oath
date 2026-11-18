@@ -17,10 +17,14 @@ def execute_script(db, script):
 
 def migrate(db):
     version = [row[0] for row in db.execute("SELECT version FROM schema_version")]
+    if version == [4]:
+        return
     if version == [3]:
+        upgrade_completion(db)
         return
     if version == [2]:
         upgrade_delegation(db)
+        upgrade_completion(db)
         return
     if version != [1]:
         raise RuntimeError("Unsupported database schema")
@@ -33,6 +37,7 @@ def migrate(db):
     db.execute("INSERT INTO schema_version VALUES(1,2)")
     db.execute("DROP TABLE schema_version_v1")
     upgrade_delegation(db)
+    upgrade_completion(db)
 
 
 def upgrade_delegation(db):
@@ -52,3 +57,32 @@ CREATE INDEX task_delegations_run ON task_delegations(run_id);
 """,
     )
     db.execute("UPDATE schema_version SET version=3 WHERE id=1")
+
+
+def upgrade_completion(db):
+    # Preserve a previously requested user decision as a genuine wait, not a
+    # universal review gate. The existing question and wait ID remain usable.
+    db.execute(
+        "UPDATE task_runs SET stage='execute',version=version+1 "
+        "WHERE stage='verify' AND status IN ('waiting','paused') "
+        "AND json_extract(spec_snapshot_json,'$.acceptance.review')='user'"
+    )
+    db.execute(
+        "UPDATE tasks SET acceptance_json=json_remove(acceptance_json,"
+        "'$.review','$.require_delivery')"
+    )
+    db.execute(
+        "UPDATE task_runs SET spec_snapshot_json=json_remove(spec_snapshot_json,"
+        "'$.acceptance.review','$.acceptance.require_delivery')"
+    )
+    db.execute(
+        "UPDATE task_runs SET progress_json='{}' WHERE progress_json=? "
+        "AND NOT EXISTS(SELECT 1 FROM task_events e WHERE e.run_id=task_runs.run_id "
+        "AND e.type='progress')",
+        ('{"progress":"待执行"}',),
+    )
+    db.execute(
+        "UPDATE task_requests SET response_json=json_remove(response_json,"
+        "'$.run.stage','$.task.next_review_at')"
+    )
+    db.execute("UPDATE schema_version SET version=4 WHERE id=1")

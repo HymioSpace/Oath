@@ -53,7 +53,7 @@ CREATE TABLE task_runs (
   control_epoch INTEGER NOT NULL DEFAULT 1 CHECK(control_epoch > 0),
   agent_id TEXT REFERENCES subagents(agent_id),
   context_id TEXT REFERENCES users(user_id),
-  progress_json TEXT NOT NULL DEFAULT '{"progress":"待执行"}' CHECK(json_valid(progress_json)),
+  progress_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(progress_json)),
   wait_json TEXT CHECK(wait_json IS NULL OR json_valid(wait_json)),
   resume_status TEXT CHECK(resume_status IN ('queued','running','waiting')),
   pending_revision INTEGER,
