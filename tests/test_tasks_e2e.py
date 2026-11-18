@@ -140,6 +140,12 @@ def test_agent_has_isolated_context_and_waits_for_input(service):
         wait={"kind": "user", "reason": "Need input", "question": "Which source?"},
     )
     assert report["status"] == "waiting"
+    waiting = service.call(
+        "task.get", user_id="u1", task_id=tid, view="detail", include_execution=False
+    )
+    assert waiting["task"]["needs_attention"]
+    assert waiting["run"]["wait_kind"] == "user"
+    assert "execution" not in waiting
     with pytest.raises(ValueError, match="FORBIDDEN"):
         service.call("task.list", user_id=child)
     service.call(
@@ -154,6 +160,7 @@ def test_agent_has_isolated_context_and_waits_for_input(service):
     )
     status = service.call("task.get", user_id="u1", task_id=tid, view="detail")
     assert status["run"]["run_id"] == rid
+    assert status["task"]["needs_attention"] is False
     assert status["run"]["status"] == "queued"
     service.call("task.tick")
     assert (

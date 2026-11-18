@@ -1,11 +1,89 @@
 # Oath Task System：设计与实现方案
 
-实现与验收中的技术方案。更新：2026-11-15。开发分支：`feature/task-system`；未修改生产数据。
+实现与验收中的技术方案。更新：2026-11-18。开发分支：`feature/task-system`；未修改生产数据。
 
-**本次重构将“持续负责一件事”作为 Oath 的基础能力：主 agent 接受并管理任务，程序或 subagent 独立执行，Supervisor 按目标和状态持续跟进。Hymio 提供交互与结果展示，Nostalgia 提供相关记忆。**
+**本次重构将“持续负责一件事”作为 Oath 的基础能力：交互 Agent 接受并管理任务，程序或专属 TaskAgent 独立执行，Supervisor 按目标和状态持续跟进。Hymio 提供交互与结果展示，Nostalgia 提供相关记忆。**
 
 文档分为两个层次：**第 1–4 节说明背景、目标和设计；第 5–9 节落实架构、数据库、接口、事务及迁移。** 完整 DDL 和 JSON Schema 保留在本文的可展开区块中，第 10 节列出调研依据。
 
+
+## 本轮 review：实体、边界与实现
+
+**结论：保留既有任务系统，补齐专属 TaskAgent、一层协作、持久消息和可视化详情。** 主会话负责交互，Task 负责长期目标，TaskRun 负责一次执行；三种 Agent 共用 Oath Core，通过上下文、工具和预算隔离。
+
+```mermaid
+flowchart TB
+  U[用户] --> I[交互 Agent]
+  I -->|创建 / 查询 / 修改 / 补充| T[Task：目标与长期进展]
+  T --> R[TaskRun：本次状态与检查点]
+  R --> P[程序执行器：确定动作]
+  R --> A[专属 TaskAgent：自主推进]
+  A --> L1[Subagent：有边界的协作]
+  A --> L2[Subagent：有边界的协作]
+  L1 -->|结果与消息| A
+  L2 -->|结果与消息| A
+  R -->|重要进展 / 问题 / 结果| I
+  S[Supervisor：健康检查、恢复、唤醒] -.-> I
+  S -.-> R
+  J[(SQLite：Journal + 状态 + 持久收件箱)] --- T
+  J --- R
+  J --- I
+  J --- A
+```
+
+| 实体 | 保存 / 负责什么 | 明确边界 |
+|---|---|---|
+| InteractionAgent | 主会话上下文、用户意图、任务工具 | 即时简单工作直接完成；未来、长时间、可独立推进的工作才创建 Task |
+| Task | 目标、完成标准、触发规则、长期笔记、版本、权限及总预算 | 用户级长期委托；主 Agent 管理，GUI 不提供创建入口 |
+| TaskRun | 本次执行、初始要求快照、检查点、等待条件、用量、结果 | 睡眠/恢复续用同一 Run；周期任务每期建立独立 Run，读取 Task 长期笔记 |
+| TaskAgent | 专属 Core 上下文和工具、委派与整合 | 每个 Run 绑定一个专属上下文；不会借用主会话工作历史；可委派一层 Subagent |
+| Subagent | 有限的输入、任务、结果、活动记录 | 只能服务所属 TaskAgent；不能再委派、创建 Task 或替父任务报告完成；继承任务权限和预算 |
+| ProgramExecutor | 规则触发与确定动作 | 当前支持 `notify`，不调用模型；扩展动作须显式注册 |
+| Supervisor | 主会话待处理输入、执行租约、TaskRun 的到期/等待/停滞 | 普通检查不调用模型；过期租约恢复由现有 Core 调度接管；不重复唤醒空闲会话 |
+| TaskMessage / Journal | 定向消息、任务事件、Core 执行历史 | 状态、审计、消息在同一 SQLite 事务提交；恢复不依赖进程内回调 |
+
+**一次复杂任务的执行：**
+
+1. 主 Agent 持久创建 Task 后立即回应，告知可在任务面板查看。
+2. Supervisor 创建/推进 Run；程序动作直接执行，复杂动作绑定专属 TaskAgent。
+3. TaskAgent 可直接工作或委派叶子 Subagent，随后 `task_report(wait=subagents)` 睡眠，不轮询模型。
+4. 子任务终态写入所属 TaskAgent 的持久收件箱；Supervisor 检查指定协作者全部结束，再唤醒同一 Run。
+5. TaskAgent 整合结果并报告证据；交互 Agent 验收后交付。重要事件可唤醒主会话，普通活动留在任务详情。
+
+**实现落点：**
+
+- `core/tasks/entities.py` 定义 AgentRole / ExecutionBinding；`delegation.py` 校验归属、一层委派及级联控制；`inbox.py` 是内部 TaskMessage 通道；`inspection.py` 返回归属隔离的执行关系图。
+- 数据库升级到 **v3**：原六张任务表之外增加 `task_delegations(user_id, task_id, run_id, parent_agent_id, agent_id, state, created_at)`，外键绑定 Run 和 Core agent，索引支持父节点与 Run 查询。v1/v2 均在 Storage 独占锁下事务升级。
+- Core journal 新增 `task.event`：`task_id / run_id / kind / revision / data`，附带提交后的状态和执行版本。Agent 输入、模型响应、工具动作仍使用既有 Core journal。SQLite 状态与待处理消息为恢复投影；不是每次启动重放整个数据库。
+- `task_get(view=detail/run)` 默认增加 `execution`（`include_execution=false` 可省略活动图，列表使用此模式）：执行器、TaskAgent、叶子协作者、检查点、等待、用量、计划及最近 50 条事件；活动每节点最多 40 条。完整事件仍可通过原分页接口读取。精确机器契约以 `core/tasks/contracts.json` 为准，工具和 Storage 使用同一 schema。
+- `task_message` 对运行中任务立即写入收件箱，不替换正在工作的租约；暂停期间补充消息保存至恢复。执行尚未启动或上一期已结束时，补充消息只绑定下一次执行，并记录 `message_bound` 防止重复交接；长期改变目标仍用 `task_update`。Task 暂停/恢复/取消同步控制协作者；叶子调用也受所属 Run 的状态、控制 epoch、权限与累计预算约束。
+- 运行时组合三套角色 prompt：是否创建任务、TaskAgent 委派/等待/整合、叶子边界；不依赖部署者手动修改某份 prompt 才生效。委派必须携带实际输入与完成标准，不能只给一个资料名。
+- 内部协作消息独立于 `tool.terminal`：真实进程测试发现后者会按工具回执校验并丢弃协作消息，已改为 Storage 内部持久收件箱；外部工具输入的真实性检查保持有效。
+
+**任务面板采用渐进展开：**
+
+```mermaid
+flowchart TB
+  V[第一层：目标 + 阶段图 + 当前进展 + 等待/下一步] --> N[第二层：任务 Agent 与协作者关系树]
+  N --> O[点开一个节点：该节点的成果]
+  O --> D[再展开：过程、要求、活动]
+  V --> X[执行细节：上下文、计划、用量、事件记录]
+```
+
+默认不铺开日志、上下文或工具参数；状态用图标、阶段连线和节点层次表达。Web/iOS 均保留独立任务面板，用户通过主会话补充和调整要求。
+
+### 本轮验收（2026-11-18）
+
+| 验证 | 结果与边界 |
+|---|---|
+| Oath 回归 | 321 项通过；含一层委派、归属隔离、睡眠/重启/合并、级联控制、消息交接、journal 解析、v1/v2→v3 迁移 |
+| 跨仓库 HTTP | Hymio 实际路由连接 Oath Storage；详情返回协作树，列表省略活动；交付与重启补确认通过 |
+| 真实进程链路 | RabbitMQ + Storage / Queue / Manager / Worker / Tools / Gateway / Biz；9 个场景通过，含 TaskAgent→Subagent→睡眠/唤醒/整合→验收/回执，以及 worker 崩溃和 Storage 重启 |
+| 真实模型 | DeepSeek 实际调用通过：即时问答不建任务；后台提醒自主选择创建；专属任务委派叶子、等待/恢复、整合与验收。隔离测试库和接收端，不发送真实用户通知；该模型测试由测试程序驱动步骤，多进程测试独立使用确定模型验证完整运行循环 |
+| Hymio 回归 | 后端 171 项通过、3 项跳过；Web 类型检查与构建通过 |
+| iOS | Xcode 构建及任务相关 4 项界面测试通过；验证细节默认收起、节点展开结果、任务视图切换与缓存恢复。截图使用合成数据，不代表已经连接真实用户后端 |
+
+边界：程序执行器目前只有 `notify`；模型 profile 目前只支持 `default` 继承。主 Agent 的语义验收、精确费用预算及授权转交边界继续采用下节说明。
 
 ## 实现状态与设计调整
 
@@ -14,9 +92,9 @@
 | 功能 | 当前实现 |
 |---|---|
 | 任务管理 | 创建、查询、分页、修改、补充、暂停、恢复、取消、失败重试；父子任务控制及版本冲突检查 |
-| 执行与持续跟进 | 程序提醒、独立 Core 上下文、周期执行、时间/事件/用户/工具等待、进度停滞检查；主聊天保持可用 |
+| 执行与持续跟进 | 程序提醒、独立 Core 上下文、周期执行、时间/事件/用户/工具/协作者等待、进度停滞检查；主聊天保持可用 |
 | 验收与交付 | `task_report` 报告结果，主 agent 用 `task_review` 校验；Hymio 保存交付收件箱与回执，重启后补确认 |
-| 存储与迁移 | SQLite v1→v2 原子迁移；旧 Hymio 任务离线导入，默认暂停并保留历史，防止未知动作重跑 |
+| 存储与迁移 | SQLite v1/v2→v3 原子迁移；旧 Hymio 任务离线导入，默认暂停并保留历史，防止未知动作重跑 |
 | 产品收敛 | Kits 服务、工具、技能、页面及部署移除；任务 GUI 保留查看与控制，创建/修改通过主 agent |
 
 **测试后收敛的实现选择：**
@@ -180,7 +258,7 @@ stateDiagram-v2
 
 ## 5. 实现架构与复用边界
 
-**实现采用现有 SQLite，由 Storage Service 统一写入；新增六张业务表、十个主 agent 工具、任务汇报和只读资料获取工具。复用 Core、上下文、工具执行、租约与持久事件。**
+**实现采用现有 SQLite，由 Storage Service 统一写入；新增七张业务表、十个主 agent 工具、任务汇报和只读资料获取工具。复用 Core、上下文、工具执行、租约与持久事件。**
 
 下图展开第 2 节的任务系统，给出服务调用与状态写入关系；第 6 节继续展开数据库结构。
 
@@ -221,13 +299,15 @@ flowchart TB
 
 ## 6. 存储结构
 
-### 6.1 六张表及已有上下文
+### 6.1 六张基础任务表、协作关系表及已有上下文
 
 ```mermaid
 erDiagram
   tasks ||--o{ task_runs : executes
   tasks ||--o{ task_events : records
   task_runs ||--o{ task_deliveries : delivers
+  task_runs ||--o{ task_delegations : delegates
+  subagents ||--o{ task_delegations : parent_or_leaf
   task_signals o|--o{ task_events : consumed_as
   users ||--o{ tasks : owns
   users ||--o{ task_requests : deduplicates
@@ -3235,7 +3315,7 @@ WHERE user_id=:user AND run_id=:run AND status='running'
 
 ### 9.2 数据库与旧任务迁移
 
-1. **先补迁移器**：现有 schema_version 有 `CHECK(version=1)`，不能直接 UPDATE 成 2。迁移器重建版本记录、在一次事务内应用增量 DDL 并写 version=2；数据库初始化也改成按版本迁移，不再每次强制检查等于 1。
+1. **先补迁移器**：现有 schema_version 有 `CHECK(version=1)`，不能直接 UPDATE 成 2。迁移器重建版本记录、在一次事务内应用基础 DDL 并写 version=2，再应用协作关系表升级到 version=3；数据库初始化也改成按版本迁移，不再每次强制检查等于 1。
 2. **保留单 owner**：持有现有 owner lock；先备份 SQLite 及 Hymio 旧任务库。迁移执行使用显式事务，避免在 `Database.transaction()` 内调用会隐式提交的 `executescript` 破坏原子性。
 3. **迁旧任务**：停止 Hymio 旧调度器；原 tasks→新 Task，generation→revision，原 runs→新 Run；request_id/intent_key、agent 关联、等待、历史结果和交付情况保留。已执行但结果不明的工作标 waiting/needs_attention，不重新派发。
 4. **切换验收**：影子比较触发时间及状态，不执行动作；切换唯一调度入口，再启用工具与 GUI。旧 app.task.due / subagent.completed 适配器按旧编号去重，不让新旧工具同时创建。

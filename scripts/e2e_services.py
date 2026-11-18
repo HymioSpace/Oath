@@ -30,6 +30,19 @@ sys.path.insert(0, str(ROOT))
 from bootstrap.clients.service_client import ServiceClient  # noqa: E402
 
 
+def probe_call(name, arguments):
+    return {
+        "tool_calls": [
+            {
+                "index": 0,
+                "id": "probe-" + name + "-" + str(time.time_ns()),
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ]
+    }
+
+
 class Model(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     requests: ClassVar[list] = []
@@ -74,7 +87,77 @@ class Model(BaseHTTPRequestHandler):
         task_probe = any(
             "TASK_PIPELINE_PROBE" in str(m.get("content", "")) for m in body["messages"]
         )
-        if task_probe and not has_result:
+        delegation_probe = any(
+            "TASK_DELEGATION_PROBE" in str(m.get("content", "")) for m in body["messages"]
+        )
+        leaf_probe = any(
+            "LEAF_JOIN_PROBE" in str(m.get("content", "")) for m in body["messages"]
+        ) and any(
+            "## Leaf subagent role" in str(m.get("content", ""))
+            for m in body["messages"]
+            if m["role"] == "system"
+        )
+        called = {
+            call["function"]["name"] for m in body["messages"] for call in m.get("tool_calls", [])
+        }
+        if leaf_probe:
+            exposed = {t["function"]["name"] for t in body.get("tools", [])}
+            assert "subagent_spawn" not in exposed and "task_report" not in exposed
+            time.sleep(0.5)
+            delta, finish = {"content": "LEAF_JOIN_RESULT: verified fixture fact"}, "stop"
+        elif delegation_probe and "subagent_spawn" not in called:
+            delta = probe_call(
+                "subagent_spawn",
+                {
+                    "title": "Fixture checker",
+                    "objective": "LEAF_JOIN_PROBE: verify fixture",
+                    "success_criteria": "Return the fixture fact with evidence",
+                },
+            )
+            finish = "tool_calls"
+        elif delegation_probe and "task_report" not in called:
+            import re
+
+            payload = " ".join(
+                str(m.get("content", "")) for m in body["messages"] if m["role"] == "tool"
+            )
+            child = re.search(r'"agent_id"\s*:\s*"([a-f0-9]{32})"', payload)
+            assert child, payload
+            delta = probe_call(
+                "task_report",
+                {
+                    "decision": "wait",
+                    "checkpoint": {"progress": "Awaiting fixture checker"},
+                    "wait": {
+                        "kind": "subagents",
+                        "reason": "Collect child result",
+                        "agent_ids": [child[1]],
+                    },
+                },
+            )
+            finish = "tool_calls"
+        elif delegation_probe:
+            assert any("LEAF_JOIN_RESULT" in str(m.get("content", "")) for m in body["messages"])
+            delta = probe_call(
+                "task_report",
+                {
+                    "decision": "complete",
+                    "checkpoint": {"progress": "Integrated leaf result"},
+                    "result": {
+                        "summary": "TaskAgent integrated LEAF_JOIN_RESULT",
+                        "refs": [],
+                        "evidence": [
+                            {
+                                "kind": "external",
+                                "ref": "test_fixture",
+                                "summary": "Checked child fixture result",
+                            }
+                        ],
+                    },
+                },
+            )
+            finish = "tool_calls"
+        elif task_probe and not has_result:
             delta = {
                 "tool_calls": [
                     {
@@ -368,7 +451,8 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
 
     params = specification("agent")
     params["objective"] = (
-        "TASK_PIPELINE_PROBE: summarize the deterministic fixture and report completion."
+        "TASK_DELEGATION_PROBE: delegate fixture verification, "
+        "sleep, integrate and report completion."
     )
     params["intent_key"] = "task_pipeline_probe"
     task = storage.call("task.create", user_id="alice", request_id="task_probe_create", **params)[
@@ -383,6 +467,9 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
         )
     )
     detail = storage.call("task.get", user_id="alice", task_id=tid, view="detail")
+    assert len(detail["execution"]["subagents"]) == 1
+    assert detail["execution"]["subagents"][0]["status"] == "succeeded"
+    assert "LEAF_JOIN_RESULT" in detail["run"]["result"]["summary"]
     storage.call(
         "task.review",
         user_id="alice",
@@ -409,7 +496,7 @@ async def exercise(ports, storage, token, children, launch, broker_container=Non
         == "succeeded"
     )
     print(
-        "PASS: Task → Supervisor → Core worker → report → review → receipt",
+        "PASS: Task → TaskAgent → leaf → sleep/wake/join → report → review → receipt",
         flush=True,
     )
 

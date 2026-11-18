@@ -44,6 +44,10 @@ def get(db, user_id, agent_id):
 
 
 def notify(db, row, type_, payload, key):
+    from core.tasks.delegation import notify_parent
+
+    if notify_parent(db, row, type_, payload, key):
+        return
     if not row["notify_parent"]:
         return
     from core.storage.runtime_transactions import enqueue
@@ -380,7 +384,9 @@ def call(db, uid, operation, p):
         )
         return {"delivered": True}
     if user.agent_id:
-        raise ValueError("Subagents cannot manage delegated executions")
+        from core.tasks.delegation import scoped_call
+
+        return scoped_call(db, uid, operation, p)
     if operation == "subagent.activity":
         return activity(db, uid, p)
     if operation == "subagent.spawn":
@@ -455,7 +461,10 @@ def project(db, uid, changes, state=None):
 
 def expire(db):
     for row in db.execute(
-        "SELECT * FROM subagents WHERE status='running' AND deadline<=?", (time.time(),)
+        "SELECT a.* FROM subagents a WHERE status='running' AND deadline<=? "
+        "AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.context_id=a.storage_id "
+        "AND r.status IN ('waiting','paused','queued'))",
+        (time.time(),),
     ).fetchall():
         finish(db, row, "failed", "Execution deadline exceeded")
         db.execute(

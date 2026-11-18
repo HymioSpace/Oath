@@ -30,6 +30,7 @@ class EventType:
     特殊类别 —— 和 `user.message` 一样是一种 type，一样的登记流程，一样的字段约束。
     """
 
+    TASK_EVENT: Final = "task.event"
     RUNTIME_COMMIT: Final = "runtime.commit"
     USER_MESSAGE: Final = "user.message"
     ASSISTANT_MESSAGE: Final = "assistant.message"
@@ -44,6 +45,7 @@ class EventType:
     #: 全部合法的 type。
     ALL: Final = frozenset(
         {
+            TASK_EVENT,
             RUNTIME_COMMIT,
             USER_MESSAGE,
             ASSISTANT_MESSAGE,
@@ -142,6 +144,11 @@ class PayloadSchema:
 #: v1 的 payload schema。键是 `(type, version)`，版本从 1 开始。
 #: 每种 type 都有 schema，没有例外。
 PAYLOAD_SCHEMAS: Final[dict[tuple[str, int], PayloadSchema]] = {
+    (EventType.TASK_EVENT, 1): PayloadSchema(
+        required=frozenset({"task_id", "kind", "revision", "data"}),
+        nullable=frozenset({"run_id"}),
+        optional=frozenset({"state"}),
+    ),
     (EventType.RUNTIME_COMMIT, 1): PayloadSchema(
         required=frozenset({"version", "reason", "changes"})
     ),

@@ -6,7 +6,9 @@ from core.storage.database import encode
 
 
 def admit_step(db, context_id):
-    run = db.execute("SELECT * FROM task_runs WHERE context_id=?", (context_id,)).fetchone()
+    from core.tasks.entities import execution
+
+    run = execution(db, context_id)
     if not run:
         return True
     value = json.loads(run["spec_snapshot_json"])
@@ -14,7 +16,14 @@ def admit_step(db, context_id):
     usage = json.loads(run["usage_json"])
     # Provider usage recorded in durable completed steps is the source of token accounting.
     tokens = 0
-    for row in db.execute("SELECT body_json FROM steps WHERE user_id=?", (context_id,)):
+    for row in db.execute(
+        (
+            "SELECT body_json FROM steps WHERE user_id=? OR user_id IN "
+            "(SELECT a.storage_id FROM subagents a JOIN task_delegations "
+            "d USING(agent_id) WHERE d.run_id=?)"
+        ),
+        (run["context_id"], run["run_id"]),
+    ):
         response = json.loads(row[0]).get("response") or {}
         u = response.get("usage") or {}
         tokens += u.get("total_tokens", u.get("prompt_tokens", 0) + u.get("completion_tokens", 0))
@@ -62,6 +71,9 @@ def admit_step(db, context_id):
             (encode({"code": "BUDGET_EXHAUSTED"}), run["run_id"]),
         )
         db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (run["task_id"],))
+        from core.tasks.storage import event
+
+        event(db, task, "budget_exhausted", {"code": "BUDGET_EXHAUSTED"}, run, wake=True)
         return False
     usage["steps"] += 1
     db.execute("UPDATE task_runs SET usage_json=? WHERE run_id=?", (encode(usage), run["run_id"]))
@@ -69,9 +81,9 @@ def admit_step(db, context_id):
 
 
 def finish_step(db, context_id, elapsed):
-    row = db.execute(
-        "SELECT run_id,usage_json FROM task_runs WHERE context_id=?", (context_id,)
-    ).fetchone()
+    from core.tasks.entities import execution
+
+    row = execution(db, context_id)
     if row:
         usage = json.loads(row["usage_json"])
         usage["active_seconds"] += max(0, elapsed)

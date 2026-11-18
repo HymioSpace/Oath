@@ -635,6 +635,11 @@
         "type": "integer",
         "minimum": 1,
         "maximum": 100
+      },
+      "include_execution": {
+        "type": "boolean",
+        "default": true,
+        "description": "Include the execution graph and recent activity. Disable for list summaries."
       }
     },
     "required": [
@@ -961,6 +966,35 @@
           "kind",
           "reason",
           "invocation_id"
+        ],
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "subagents"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{32}$"
+            },
+            "minItems": 1,
+            "maxItems": 8,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "kind",
+          "reason",
+          "agent_ids"
         ],
         "additionalProperties": false
       }
@@ -2065,6 +2099,15 @@
           "string",
           "null"
         ]
+      },
+      "wait_kind": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "next_step": {
+        "type": "string"
       }
     },
     "required": [
@@ -2279,6 +2322,9 @@
           "null"
         ],
         "maxLength": 1024
+      },
+      "execution": {
+        "$ref": "#/$defs/TaskExecution"
       }
     },
     "required": [
@@ -2586,5 +2632,192 @@
       "reason"
     ],
     "additionalProperties": false
+  },
+  "ExecutionAgent": {
+    "type": "object",
+    "required": [
+      "agent_id",
+      "role",
+      "title",
+      "status",
+      "objective",
+      "success_criteria",
+      "result",
+      "notes",
+      "activity"
+    ],
+    "properties": {
+      "agent_id": {
+        "type": "string"
+      },
+      "parent_agent_id": {
+        "type": "string"
+      },
+      "role": {
+        "enum": [
+          "task_agent",
+          "subagent"
+        ]
+      },
+      "title": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string"
+      },
+      "execution_status": {
+        "type": "string"
+      },
+      "objective": {
+        "type": "string"
+      },
+      "success_criteria": {
+        "type": "string"
+      },
+      "result": {
+        "type": "string"
+      },
+      "notes": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": [
+            "note_id",
+            "content",
+            "created_at"
+          ],
+          "properties": {
+            "note_id": {
+              "type": "string"
+            },
+            "content": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "number"
+            }
+          }
+        }
+      },
+      "activity": {
+        "type": "object",
+        "required": [
+          "entries",
+          "next_cursor"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "kind",
+                "created_at",
+                "content"
+              ],
+              "properties": {
+                "id": {
+                  "type": "integer"
+                },
+                "kind": {
+                  "type": "string"
+                },
+                "created_at": {
+                  "type": "number"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                },
+                "status": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  },
+  "TaskExecution": {
+    "type": "object",
+    "required": [
+      "executor",
+      "task_agent",
+      "subagents",
+      "events"
+    ],
+    "properties": {
+      "executor": {
+        "enum": [
+          "program",
+          "agent"
+        ]
+      },
+      "task_agent": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "$ref": "#/$defs/ExecutionAgent"
+          }
+        ]
+      },
+      "subagents": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/ExecutionAgent"
+        }
+      },
+      "events": {
+        "type": "array",
+        "maxItems": 50,
+        "items": {
+          "type": "object",
+          "required": [
+            "id",
+            "type",
+            "created_at",
+            "data"
+          ],
+          "properties": {
+            "id": {
+              "type": "integer"
+            },
+            "type": {
+              "type": "string"
+            },
+            "created_at": {
+              "type": "number"
+            },
+            "data": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "checkpoint": {
+        "type": "object"
+      },
+      "wait": {
+        "type": [
+          "object",
+          "null"
+        ]
+      },
+      "usage": {
+        "type": "object"
+      },
+      "plan": {
+        "type": "array"
+      }
+    }
   }
 }

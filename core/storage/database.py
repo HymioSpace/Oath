@@ -49,7 +49,7 @@ class Database:
                     "ALTER TABLE subagents "
                     "ADD COLUMN notify_parent INTEGER NOT NULL DEFAULT 1"
                 )
-            if [r[0] for r in db.execute("SELECT version FROM schema_version")] != [2]:
+            if [r[0] for r in db.execute("SELECT version FROM schema_version")] != [3]:
                 raise RuntimeError("Unsupported database schema")
         from core.storage import conversation_history
         from core.storage.request_archives import compact_existing

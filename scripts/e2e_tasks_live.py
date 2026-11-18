@@ -18,6 +18,9 @@ from core.protocol.datatype.tool import ToolInvocation
 from core.protocol.datatype.user import User
 from core.storage.database import Database
 from core.storage.service import StorageService
+from core.subagents.storage import finish
+from core.subagents.tools import SubagentTool
+from core.tasks.prompts import INTERACTION, LEAF, TASK_AGENT
 from core.tasks.tools import TaskTool
 from tests.test_tasks_e2e import specification
 
@@ -40,16 +43,31 @@ def main():
             EnvironmentSecret(),
         )
 
-        def invoke(action, content, user="live_user"):
-            tool = TaskTool(storage, action)
+        def invoke(action, content, user="live_user", *, choose=False):
+            tool = (
+                SubagentTool(storage, action.split(".")[1])
+                if action.startswith("subagent.")
+                else TaskTool(storage, action)
+            )
+            role = storage.call("task.context", user_id=user)
+            prompt = TASK_AGENT if role and role["role"] == "task_agent" else INTERACTION
             response = provider.complete(
                 LlmRequest(
                     messages=[
                         Message(
                             "system",
                             (
-                                "You are testing the Oath task API. Call the specified tool "
-                                "once, with valid arguments. Do not invent tool results."
+                                (
+                                    "Choose whether this request needs durable work. "
+                                    "Use tools when appropriate.\n"
+                                    if choose
+                                    else (
+                                        "You are testing the Oath task API. "
+                                        "Call the specified tool once, "
+                                        "with valid arguments. Do not invent tool results.\n"
+                                    )
+                                )
+                                + prompt
                             ),
                         ),
                         Message("user", content),
@@ -57,10 +75,16 @@ def main():
                     tools=(tool.definition,),
                     max_output_tokens=2500,
                     extra_params={
-                        "tool_choice": {
-                            "type": "function",
-                            "function": {"name": tool.definition.name},
-                        },
+                        **(
+                            {}
+                            if choose
+                            else {
+                                "tool_choice": {
+                                    "type": "function",
+                                    "function": {"name": tool.definition.name},
+                                }
+                            }
+                        ),
                         "thinking": {"type": "disabled"},
                     },
                 )
@@ -83,9 +107,28 @@ def main():
             )
             return result
 
+        immediate = provider.complete(
+            LlmRequest(
+                messages=[
+                    Message("system", INTERACTION),
+                    Message("user", "What is 2+2? Give just the answer."),
+                ],
+                tools=(TaskTool(storage, "create").definition,),
+                max_output_tokens=80,
+                extra_params={"thinking": {"type": "disabled"}},
+            )
+        )
+        assert not immediate.tool_calls and "4" in immediate.content
+        print("PASS: role prompt handles immediate question without creating a task")
+
         requested = specification()
         requested["intent_key"] = "live_reminder"
-        made = invoke("create", "Create this exact user-authorized task: " + json.dumps(requested))
+        made = invoke(
+            "create",
+            "Please schedule this background reminder and return immediately. "
+            "Use these exact task requirements: " + json.dumps(requested),
+            choose=True,
+        )
         tid = made["task"]["task_id"]
         storage.call("task.tick")
         d = storage.call("task.delivery.claim", user_id="live_user", owner="test_sink")
@@ -126,9 +169,51 @@ def main():
         storage.call("task.tick")
         with storage.database.transaction(readonly=True) as db:
             run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (tid,)).fetchone()
+        child = invoke(
+            "subagent.spawn",
+            "Delegate to one bounded leaf. Its objective must include the actual input: "
+            "Provided arithmetic fixture: 2 + 2. Source: provided_math_input. "
+            "Title: arithmetic check. Success criteria: answer 4 with fixture reference.",
+            run["context_id"],
+        )
+        waiting = invoke(
+            "report",
+            "Report decision wait with checkpoint progress awaiting arithmetic check, "
+            "wait.kind=subagents, wait.reason=collect verified fact, wait.agent_ids="
+            + json.dumps([child["agent_id"]]),
+            run["context_id"],
+        )
+        assert waiting["status"] == "waiting"
+        leaf = provider.complete(
+            LlmRequest(
+                messages=[
+                    Message("system", LEAF),
+                    Message(
+                        "user",
+                        child["objective"] + "\nReturn the answer as an Arabic digit with source.",
+                    ),
+                ],
+                tools=(),
+                max_output_tokens=300,
+                extra_params={"thinking": {"type": "disabled"}},
+            )
+        )
+        assert "4" in leaf.content, leaf.content
+        with storage.database.transaction() as db:
+            row = db.execute(
+                "SELECT * FROM subagents WHERE agent_id=?", (child["agent_id"],)
+            ).fetchone()
+            finish(db, row, "succeeded", leaf.content)
+        storage.call("supervisor.tick", interval=1)
+        storage.call("supervisor.tick", interval=1)
+        resumed = storage.call("task.get", user_id="live_user", task_id=tid, view="detail")
+        assert resumed["run"]["status"] == "running"
+        assert resumed["execution"]["subagents"][0]["result"] == leaf.content
         report = invoke(
             "report",
-            "Execute this task from the supplied input and report decision complete: "
+            "Integrate verified leaf result "
+            + leaf.content
+            + " and report decision complete for: "
             + json.dumps(requested),
             run["context_id"],
         )
@@ -168,7 +253,7 @@ def main():
             == "succeeded"
         )
         print(
-            "PASS: real model creates agent task → isolated context report → "
+            "PASS: real model creates agent task → leaf delegation → sleep/wake/join → report → "
             "real model verification → accepted delivery"
         )
 

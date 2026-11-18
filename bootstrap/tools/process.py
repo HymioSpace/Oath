@@ -146,10 +146,32 @@ class ToolService:
 
                 binding = self.tools.store.storage.call("task.context", user_id=target.storage_id)
                 if binding:
+                    role = binding["role"]
+                    management = {
+                        "subagent_spawn",
+                        "subagent_list",
+                        "subagent_get",
+                        "subagent_cancel",
+                        "subagent_continue",
+                    }
                     definitions = tuple(
                         d
                         for d in definitions
-                        if allowed(binding["spec"]["executor"]["tool_profile"], d.name)
+                        if (
+                            (role == "task_agent" and d.name in management)
+                            or (role == "subagent" and d.name == "subagent_notify")
+                            or (
+                                allowed(binding["spec"]["executor"]["tool_profile"], d.name)
+                                and d.name not in management
+                                and not (role == "subagent" and d.name == "task_report")
+                            )
+                        )
+                    )
+                else:
+                    definitions = tuple(
+                        d
+                        for d in definitions
+                        if not d.name.startswith("subagent_") or d.name == "subagent_notify"
                     )
             return [d.to_dict() for d in definitions]
         user = User.from_storage_id(p["user_id"])

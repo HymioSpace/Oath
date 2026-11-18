@@ -111,3 +111,31 @@ def test_hymio_reads_controls_and_delivers_oath_tasks(service, tmp_path):
         )
         assert recovered["run"]["status"] == "succeeded"
         assert notifications.notify.call_count == 2
+
+        # The HTTP detail preserves the real execution tree; list summaries stay small.
+        bridge.oath = oath
+        args = specification("agent")
+        args["intent_key"] = "collaboration_graph"
+        graph_task = service.call("task.create", user_id=uid, request_id="graph", **args)["task"]
+        service.call("task.tick")
+        graph = service.call("task.get", user_id=uid, task_id=graph_task["task_id"], view="detail")
+        actor = uid + ":" + graph["run"]["agent_id"]
+        child = service.call(
+            "subagent.spawn",
+            user_id=actor,
+            request_id="graph_leaf",
+            title="Fixture",
+            objective="Check supplied fixture",
+            success_criteria="Return fact",
+        )
+        response = client.post(
+            "/tasks", headers=headers, json={"action": "get", "task_id": graph_task["task_id"]}
+        ).json()
+        assert response["execution"]["task_agent"]["agent_id"] == graph["run"]["agent_id"]
+        assert response["execution"]["subagents"][0]["agent_id"] == child["agent_id"]
+        summary = next(
+            t
+            for t in client.get("/tasks", headers=headers).json()["tasks"]
+            if t["id"] == graph_task["task_id"]
+        )
+        assert summary["execution"] == {}

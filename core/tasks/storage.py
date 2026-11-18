@@ -108,6 +108,8 @@ def runview(db, row):
         "finished_at": iso(row["finished_at"]),
         "agent_id": row["agent_id"],
         "wait_reason": wait["condition"]["reason"] if wait else None,
+        "wait_kind": wait["condition"]["kind"] if wait else None,
+        "next_step": json.loads(row["progress_json"]).get("next_step", ""),
         "next_check_at": iso(row["next_check_at"]),
         "result": json.loads(row["result_json"]) if row["result_json"] else None,
         "error_code": json.loads(row["error_json"]).get("code") if row["error_json"] else None,
@@ -117,6 +119,9 @@ def runview(db, row):
 
 
 def event(db, task, kind, payload, run=None, wake=False):
+    task = owned(db, task["user_id"], task["task_id"])
+    if run:
+        run = db.execute("SELECT * FROM task_runs WHERE run_id=?", (run["run_id"],)).fetchone()
     key = uuid.uuid4().hex
     db.execute(
         (
@@ -154,6 +159,28 @@ def event(db, task, kind, payload, run=None, wake=False):
             "task_review to accept or reject. Obtain the user decision "
             "if acceptance.review is user."
         )
+    from core.storage.runtime_transactions import append_journal
+
+    append_journal(
+        db,
+        task["user_id"],
+        "task.event",
+        {
+            "task_id": task["task_id"],
+            "run_id": run["run_id"] if run else None,
+            "kind": kind,
+            "revision": task["revision"],
+            "data": payload,
+            "state": {
+                "lifecycle": task["lifecycle"],
+                "run_status": run["status"] if run else None,
+                "run_stage": run["stage"] if run else None,
+                "run_version": run["version"] if run else None,
+                "control_epoch": run["control_epoch"] if run else None,
+            },
+        },
+        key,
+    )
     outbox.append(db, task["user_id"], "task." + kind, data, key)
     if wake:
         from core.storage.runtime_transactions import enqueue
@@ -393,6 +420,9 @@ def mutate(db, uid, action, p, request):
                 f"SELECT * FROM task_runs WHERE task_id=? AND status IN {OPEN}", (item["task_id"],)
             ).fetchall()
             for r in rows:
+                from core.tasks.delegation import control_children
+
+                control_children(db, r["run_id"], action)
                 status = (
                     "cancelled"
                     if action == "cancel"
@@ -474,6 +504,7 @@ def mutate(db, uid, action, p, request):
             or run["status"] != "waiting"
         ):
             error("INVALID_STATE", "Run is not awaiting review")
+        db.execute("UPDATE tasks SET needs_attention=0 WHERE task_id=?", (task["task_id"],))
         if p["accepted"]:
             result = json.loads(run["result_json"])
             if json.loads(run["spec_snapshot_json"])["acceptance"]["require_delivery"]:
@@ -495,10 +526,26 @@ def mutate(db, uid, action, p, request):
     elif action == "message":
         if task["lifecycle"] == "closed":
             error("INVALID_STATE", "Task is closed")
+        if run and p.get("run_id") and p["run_id"] != run["run_id"]:
+            error("INVALID_ARGUMENTS", "Message refers to a different run")
+        if run and run["status"] not in {"queued", "running", "waiting", "paused"}:
+            if p.get("run_id"):
+                error("INVALID_STATE", "Execution has ended; send context to the next execution")
+            run = None
         event(db, task, "message", p, run)
+        if run and run["context_id"]:
+            # Persist steering without replacing an active Brain lease. Paused
+            # runs retain it in the inbox until their explicit resume.
+            from core.tasks.inbox import deliver
+
+            deliver(
+                db,
+                run["context_id"],
+                "message",
+                {"content": p["content"], "refs": p["refs"]},
+                "task-message:" + request,
+            )
         if run and run["status"] == "waiting":
-            if p.get("run_id") and p["run_id"] != run["run_id"]:
-                error("INVALID_ARGUMENTS", "Message refers to a different run")
             db.execute(
                 "UPDATE task_runs SET progress_json=? WHERE run_id=?",
                 (
@@ -524,20 +571,29 @@ def mutate(db, uid, action, p, request):
                     ),
                     (run["run_id"],),
                 )
+                db.execute("UPDATE tasks SET needs_attention=0 WHERE task_id=?", (task["task_id"],))
+                event(db, task, "wait_satisfied", {"kind": "user"}, run)
     return (task, "applied")
 
 
 def call(db, uid, operation, params):
     action = operation.removeprefix("task.")
     if action == "context":
-        row = db.execute(
-            (
-                "SELECT r.spec_snapshot_json,t.memory_json FROM task_runs r "
-                "JOIN tasks t USING(task_id) WHERE r.context_id=?"
-            ),
-            (uid,),
-        ).fetchone()
-        return {"spec": json.loads(row[0]), "memory": json.loads(row[1])} if row else None
+        from core.tasks.entities import binding, execution
+
+        actor = binding(db, uid)
+        run = execution(db, uid)
+        if not actor:
+            return None
+        task = owned(db, actor.user_id, actor.task_id)
+        return {
+            "spec": json.loads(run["spec_snapshot_json"]),
+            "memory": json.loads(task["memory_json"]),
+            "role": actor.role.value,
+            "parent_agent_id": actor.parent_agent_id,
+            "run_id": actor.run_id,
+            "task_id": actor.task_id,
+        }
     if action == "tick":
         return tick(db)
     if action == "guard":
@@ -635,8 +691,16 @@ def call(db, uid, operation, params):
             runs, cursor = page(runs, uid, p)
         if p["view"] == "events":
             events, cursor = page(events, uid, p)
+        from core.tasks.inspection import inspect_execution
+
+        inspection = (
+            {"execution": inspect_execution(db, t, r)}
+            if p.get("include_execution", True) and p["view"] in {"detail", "run"}
+            else {}
+        )
         return {
             "task": view(t),
+            **inspection,
             "spec": spec(t),
             "memory": json.loads(t["memory_json"]),
             "run": runview(db, r),
@@ -777,6 +841,19 @@ def tick(db):
                 ready = datetime.fromisoformat(wait["at"].replace("Z", "+00:00")).timestamp() <= now
             elif wait["kind"] == "event":
                 ready = r["next_check_at"] is not None and r["next_check_at"] <= now
+            elif wait["kind"] == "subagents":
+                ids = wait["agent_ids"]
+                states = db.execute(
+                    (
+                        "SELECT a.agent_id,a.status FROM subagents a JOIN "
+                        "task_delegations d USING(agent_id) WHERE d.run_id=?"
+                    ),
+                    (r["run_id"],),
+                ).fetchall()
+                current_states = {x["agent_id"]: x["status"] for x in states}
+                ready = all(
+                    current_states.get(i) in {"succeeded", "failed", "cancelled"} for i in ids
+                )
             elif wait["kind"] == "tool":
                 tool = db.execute(
                     "SELECT status FROM tool_invocations WHERE user_id=? AND invocation_id=?",
@@ -796,6 +873,7 @@ def tick(db):
                     ),
                     (r["run_id"],),
                 )
+                event(db, t, "wait_satisfied", {"kind": wait["kind"]}, r)
             continue
         if r["status"] == "queued":
             if value["executor"]["kind"] == "program":
@@ -887,6 +965,9 @@ def tick(db):
                         "UPDATE task_runs SET agent_id=?,context_id=? WHERE run_id=?",
                         (agent, context, r["run_id"]),
                     )
+                    from core.tasks.inbox import bind_pending
+
+                    bind_pending(db, t, r, context)
                 else:
                     resume(
                         db,
@@ -907,6 +988,7 @@ def tick(db):
                     ),
                     (now, now, r["run_id"]),
                 )
+                event(db, t, "run_started", {"resumed": bool(r["agent_id"])}, r)
         elif r["agent_id"] and now - (r["last_progress_at"] or r["started_at"] or now) > value[
             "policy"
         ].get("progress_timeout_seconds", 300):
@@ -1092,6 +1174,24 @@ def report(db, storage_id, p):
         "UPDATE task_runs SET progress_json=?,last_progress_at=?,version=version+1 WHERE run_id=?",
         (encode(args["checkpoint"]), time.time(), r["run_id"]),
     )
+    if (
+        decision == "complete"
+        and db.execute(
+            (
+                "SELECT 1 FROM task_delegations d JOIN subagents a "
+                "USING(agent_id) WHERE d.run_id=? AND a.status='running'"
+            ),
+            (r["run_id"],),
+        ).fetchone()
+    ):
+        error("INVALID_STATE", "Wait for owned subagents before completion")
+    if decision == "wait" and args["wait"]["kind"] == "subagents":
+        for child_id in args["wait"]["agent_ids"]:
+            if not db.execute(
+                "SELECT 1 FROM task_delegations WHERE run_id=? AND agent_id=?",
+                (r["run_id"], child_id),
+            ).fetchone():
+                error("FORBIDDEN", "Cannot wait for unrelated subagent")
     if decision == "complete":
         db.execute(
             (
@@ -1115,6 +1215,8 @@ def report(db, storage_id, p):
                 r["run_id"],
             ),
         )
+        if json.loads(r["spec_snapshot_json"])["acceptance"]["review"] == "user":
+            db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (t["task_id"],))
         event(
             db,
             t,
@@ -1140,6 +1242,7 @@ def report(db, storage_id, p):
             due = datetime.fromisoformat(when.replace("Z", "+00:00")).timestamp()
             db.execute("UPDATE task_runs SET next_check_at=? WHERE run_id=?", (due, r["run_id"]))
         if args["wait"]["kind"] == "user":
+            db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (t["task_id"],))
             event(
                 db,
                 t,
@@ -1236,20 +1339,45 @@ def request_delivery(db, task, run, result):
 
 
 def guard(db, uid, p):
-    r = db.execute(
-        "SELECT r.*,t.lifecycle FROM task_runs r JOIN tasks t USING(task_id) WHERE context_id=?",
-        (uid,),
-    ).fetchone()
-    if not r:
+    from core.tasks.entities import AgentRole, binding, execution
+
+    actor = binding(db, uid)
+    r = execution(db, uid)
+    if not actor:
         return None
-    if r["status"] != "running" or r["lifecycle"] != "active":
-        error("INVALID_STATE", "Task is stopped or waiting")
+    t = owned(db, actor.user_id, actor.task_id)
+    agent = db.execute(
+        "SELECT status FROM subagents WHERE agent_id=?", (actor.agent_id,)
+    ).fetchone()
+    allowed_states = {"running", "waiting"} if actor.role == AgentRole.SUBAGENT else {"running"}
+    if (
+        r["status"] not in allowed_states
+        or t["lifecycle"] != "active"
+        or agent["status"] != "running"
+    ):
+        error("INVALID_STATE", "Task execution is stopped")
+    if actor.role == AgentRole.SUBAGENT and (
+        (p["tool"].startswith("subagent_") and p["tool"] != "subagent_notify")
+        or p["tool"] == "task_report"
+    ):
+        error("FORBIDDEN", "Leaf subagents cannot delegate or report for the parent task")
     if p.get("expected_epoch") is not None and p["expected_epoch"] != r["control_epoch"]:
-        error("LEASE_LOST", "Task execution has been replaced")
-    value = json.loads(r["spec_snapshot_json"])
-    if not allowed(value["executor"]["tool_profile"], p["tool"]):
-        error("FORBIDDEN", "Tool is outside the read-only task profile")
-    return {"run_id": r["run_id"], "control_epoch": r["control_epoch"]}
+        error("LEASE_LOST", "Execution replaced")
+    profile = json.loads(r["spec_snapshot_json"])["executor"]["tool_profile"]
+    management = p["tool"] in {
+        "subagent_spawn",
+        "subagent_get",
+        "subagent_list",
+        "subagent_cancel",
+        "subagent_continue",
+    }
+    if not (
+        (actor.role == AgentRole.TASK_AGENT and management)
+        or (actor.role == AgentRole.SUBAGENT and p["tool"] == "subagent_notify")
+        or allowed(profile, p["tool"])
+    ):
+        error("FORBIDDEN", "Tool outside task profile")
+    return {"run_id": r["run_id"], "control_epoch": r["control_epoch"], "role": actor.role.value}
 
 
 def signal(db, uid, p):

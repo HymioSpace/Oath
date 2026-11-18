@@ -20,7 +20,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
         )
     store = Database(path)
     with store.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
         assert db.execute("SELECT user_id FROM users").fetchone()[0] == "owner"
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         tables = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'task%'")
@@ -28,7 +28,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
     store._owner.close()
     reopened = Database(path)
     with reopened.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 2
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
     reopened._owner.close()
 
 
@@ -88,3 +88,26 @@ def test_legacy_import_is_paused_and_replay_safe(tmp_path):
             == 1
         )
         assert db.execute("SELECT count(*) FROM task_runs").fetchone()[0] == 0
+
+
+def test_upgrade_task_v2_preserves_existing_task_run(tmp_path):
+    from tests._support.storage import Storage
+    from tests.test_tasks_e2e import create
+
+    path = tmp_path / "oath.sqlite3"
+    service = Storage(path)
+    task = create(service, "agent")["task"]
+    service.call("task.tick")
+    before = service.call("task.get", user_id="u1", task_id=task["task_id"], view="detail")
+    service._inner.database._owner.close()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE task_delegations")
+        db.execute("UPDATE schema_version SET version=2")
+    restored = Storage(path)
+    after = restored.call("task.get", user_id="u1", task_id=task["task_id"], view="detail")
+    assert after["run"]["run_id"] == before["run"]["run_id"]
+    assert after["run"]["agent_id"] == before["run"]["agent_id"]
+    assert after["run"]["status"] == "running"
+    with restored.transaction() as db:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
