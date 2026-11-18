@@ -161,6 +161,7 @@ def test_agent_has_isolated_context_and_waits_for_input(service):
     status = service.call("task.get", user_id="u1", task_id=tid, view="detail")
     assert status["run"]["run_id"] == rid
     assert status["task"]["needs_attention"] is False
+    assert status["run"]["next_step"] != "Use public filings"
     assert status["run"]["status"] == "queued"
     service.call("task.tick")
     assert (

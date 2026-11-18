@@ -546,18 +546,6 @@ def mutate(db, uid, action, p, request):
                 "task-message:" + request,
             )
         if run and run["status"] == "waiting":
-            db.execute(
-                "UPDATE task_runs SET progress_json=? WHERE run_id=?",
-                (
-                    encode(
-                        {
-                            "progress": json.loads(run["progress_json"]).get("progress", ""),
-                            "next_step": p["content"],
-                        }
-                    ),
-                    run["run_id"],
-                ),
-            )
             wait = json.loads(run["wait_json"])
             if (
                 wait["condition"]["kind"] == "user"
