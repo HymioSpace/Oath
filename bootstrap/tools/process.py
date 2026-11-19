@@ -103,6 +103,19 @@ class ToolService:
                 )
                 if not parent or parent["tool"] not in {"bash", "cli"}:
                     raise ValueError("Unknown CLI parent")
+                arguments = dict(arguments)
+                if not arguments.get("description"):
+                    parent_arguments = parent.get("arguments")
+                    parent_description = (
+                        parent_arguments.get("description")
+                        if isinstance(parent_arguments, dict)
+                        else ""
+                    )
+                    arguments["description"] = (
+                        parent_description
+                        if isinstance(parent_description, str) and parent_description.strip()
+                        else name.replace("_", " ")
+                    )
                 child = (
                     "cli-"
                     + hashlib.sha256((claims["parent"] + ":" + key).encode()).hexdigest()[:40]

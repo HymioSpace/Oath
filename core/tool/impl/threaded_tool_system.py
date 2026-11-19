@@ -318,7 +318,17 @@ class ThreadedToolSystem(ToolSystem):
             if verdict not in {"allow", "ask", "deny"}:
                 raise ValueError("未知权限判定")
             if verdict != "deny":
-                validate(call["arguments"], registered.definition.input_schema)
+                arguments = call["arguments"]
+                description = arguments.get("description")
+                if (
+                    not isinstance(description, str)
+                    or not 1 <= len(description.strip()) <= 160
+                ):
+                    raise ValueError("工具调用必须包含 description")
+                execution_arguments = {
+                    key: value for key, value in arguments.items() if key != "description"
+                }
+                validate(execution_arguments, registered.tool.definition.input_schema)
             admission = {
                 "task_binding": task_binding,
                 "verdict": verdict,
@@ -674,11 +684,16 @@ class ThreadedToolSystem(ToolSystem):
                         "control_epoch"
                     ),
                 )
+                execution_arguments = {
+                    key: value
+                    for key, value in call["arguments"].items()
+                    if key != "description"
+                }
                 result = registered.tool.execute(
                     ToolInvocation(
                         user,
                         invocation_id,
-                        copy.deepcopy(call["arguments"]),
+                        copy.deepcopy(execution_arguments),
                         time.monotonic()
                         + self._deadlines.remaining(
                             (user, invocation_id, "execution"),

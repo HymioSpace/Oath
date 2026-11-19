@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Final
 
@@ -20,6 +21,39 @@ from core.protocol.interface import Tool
 #: 默认单次执行超时。给业务工具留出跑一次外部调用的余量，又不至于让一个挂死的
 #: 工具占着执行位不放手。具体值由装配期按工具覆盖。
 DEFAULT_TIMEOUT_SECONDS: Final = 30.0
+CALL_DESCRIPTION: Final = "description"
+CALL_DESCRIPTION_PROMPT: Final = (
+    "A short user-visible sentence describing what this call is trying to do now. "
+    "Describe the intent, not the tool name."
+)
+
+
+def _with_call_description(definition: ToolDefinition) -> ToolDefinition:
+    """Expose one common required label on every model-facing tool schema."""
+
+    schema = deepcopy(definition.input_schema)
+    properties = dict(schema.get("properties") or {})
+    existing = properties.get(CALL_DESCRIPTION)
+    label = dict(existing) if isinstance(existing, dict) else {}
+    label.update(
+        {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160,
+            "description": CALL_DESCRIPTION_PROMPT,
+        }
+    )
+    properties[CALL_DESCRIPTION] = label
+    schema["properties"] = properties
+    required = list(schema.get("required") or [])
+    if CALL_DESCRIPTION not in required:
+        required.append(CALL_DESCRIPTION)
+    schema["required"] = required
+    return ToolDefinition(
+        name=definition.name,
+        description=definition.description,
+        input_schema=schema,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +133,11 @@ class ToolRegistry:
         timeout = self._default_timeout if timeout_seconds is None else timeout_seconds
         if timeout <= 0:
             raise ToolRegistrationError(f"工具 {definition.name} 的超时必须为正: {timeout!r}")
-        entry = RegisteredTool(definition=definition, tool=tool, timeout_seconds=timeout)
+        entry = RegisteredTool(
+            definition=_with_call_description(definition),
+            tool=tool,
+            timeout_seconds=timeout,
+        )
         with self._lock:
             if definition.name in self._entries:
                 raise ToolRegistrationError(f"工具名重复注册: {definition.name!r}")

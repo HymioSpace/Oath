@@ -1,5 +1,8 @@
 from pathlib import Path
 
+import pytest
+from jsonschema import ValidationError, validate
+
 from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult, User
 from core.protocol.interface import Tool
 from core.skill.system import SkillSystem
@@ -34,12 +37,17 @@ def test_tools_can_be_scoped_to_client_channels():
     registry.register(ScopedTool())
     registry.register(OpenTool())
 
-    assert registry.definitions(channel="ios") == (
-        OpenTool().definition,
-        ScopedTool().definition,
-    )
-    assert registry.definitions(channel="web") == (OpenTool().definition,)
-    assert registry.definitions() == (OpenTool().definition, ScopedTool().definition)
+    ios = registry.definitions(channel="ios")
+    web = registry.definitions(channel="web")
+    every = registry.definitions()
+    assert [definition.name for definition in ios] == ["open", "scoped"]
+    assert [definition.name for definition in web] == ["open"]
+    assert [definition.name for definition in every] == ["open", "scoped"]
+    for definition in every:
+        assert definition.input_schema["properties"]["description"]["minLength"] == 1
+        assert "description" in definition.input_schema["required"]
+        with pytest.raises(ValidationError):
+            validate({}, definition.input_schema)
 
 
 def test_skill_index_search_and_read_follow_the_same_channel_scope(tmp_path):

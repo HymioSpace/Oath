@@ -45,11 +45,15 @@ class Parent(Tool):
 
 
 class Probe(Tool):
+    def __init__(self):
+        self.last_arguments = None
+
     @property
     def definition(self):
         return ToolDefinition("probe", "fixture", {"type": "object"})
 
     def execute(self, invocation):
+        self.last_arguments = invocation.arguments
         return ToolResult({"answer": 42})
 
 
@@ -67,7 +71,8 @@ def test_cli_children_use_tool_system_and_do_not_wake_per_command(service):
     stop = threading.Event()
     registry = ToolRegistry(default_timeout_seconds=10)
     registry.register(Parent(stop))
-    registry.register(Probe())
+    probe = Probe()
+    registry.register(probe)
     user = User("synthetic-cli")
     # Tool permissions normally wrap a PermissionPolicy; provide its interface.
     from core.protocol.interface.permission import PermissionPolicy
@@ -93,7 +98,17 @@ def test_cli_children_use_tool_system_and_do_not_wake_per_command(service):
         tools.submit_batch(
             user,
             "origin",
-            [ToolCallRequest("bash", {}, "parent", "parent", "origin", "run", "web")],
+            [
+                ToolCallRequest(
+                    "bash",
+                    {"description": "Run the parent shell"},
+                    "parent",
+                    "parent",
+                    "origin",
+                    "run",
+                    "web",
+                )
+            ],
         )
         wait_for(lambda: tools.status(user, "parent").status == "running")
         token = cli_token(config, user, parent="parent", channel="web")
@@ -102,6 +117,7 @@ def test_cli_children_use_tool_system_and_do_not_wake_per_command(service):
         )
         child = result["invocation_id"]
         wait_for(lambda: tools.status(user, child).status == "succeeded")
+        assert probe.last_arguments == {}
         assert api.call("tools.cli_status", credential=token, invocation_id=child)["result"][
             "content"
         ] == {"answer": 42}
