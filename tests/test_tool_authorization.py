@@ -109,7 +109,7 @@ def test_approval_binds_digest_and_run_grant_reuses_exact_action(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run", "target": "mac"},
+                    {"action": "run", "target": "mac", "description": "Run the probe"},
                     "first-call",
                     invocation_id="first-call",
                     run_id="run",
@@ -155,7 +155,7 @@ def test_approval_binds_digest_and_run_grant_reuses_exact_action(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run", "target": "mac"},
+                    {"action": "run", "target": "mac", "description": "Run the probe again"},
                     "second-call",
                     invocation_id="second-call",
                     run_id="run",
@@ -196,7 +196,7 @@ def test_expired_approval_becomes_a_terminal_permission_expiry(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run"},
+                    {"action": "run", "description": "Run the expiring probe"},
                     "expiry-call",
                     invocation_id="expiry-call",
                     run_id="expiry-run",
@@ -249,7 +249,7 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run"},
+                    {"action": "run", "description": "Run the late-approval probe"},
                     "late-call",
                     invocation_id="late-call",
                     run_id="late-run",
@@ -322,7 +322,7 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run"},
+                    {"action": "run", "description": "Retry the approved probe"},
                     "retry-call",
                     invocation_id="retry-call",
                     run_id="late-run",
@@ -343,7 +343,7 @@ def test_late_approval_notifies_agent_and_grants_one_safe_retry(service):
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "run"},
+                    {"action": "run", "description": "Run a second retry request"},
                     "second-retry-call",
                     invocation_id="second-retry-call",
                     run_id="late-run",
@@ -405,7 +405,7 @@ def test_policy_managed_exact_rules_are_not_duplicated_in_runtime_grants(service
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "same"},
+                    {"action": "same", "description": "Run the managed probe"},
                     "managed-first",
                     invocation_id="managed-first",
                     run_id="managed-run",
@@ -434,7 +434,7 @@ def test_policy_managed_exact_rules_are_not_duplicated_in_runtime_grants(service
             [
                 ToolCallRequest(
                     "probe",
-                    {"action": "same"},
+                    {"action": "same", "description": "Run the managed probe again"},
                     "managed-second",
                     invocation_id="managed-second",
                     run_id="managed-run",
