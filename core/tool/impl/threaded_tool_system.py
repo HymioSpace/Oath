@@ -287,6 +287,9 @@ class ThreadedToolSystem(ToolSystem):
     def _classify(self, user: User, invocation_id: str) -> None:
         try:
             call = self.store.entries(user, "calls", [invocation_id])[invocation_id]
+            task_binding = self.store.storage.call(
+                "task.guard", user_id=user.storage_id, tool=call["tool"]
+            )
             registered = self._registry.get(call["tool"])
             if registered is None:
                 raise ValueError("工具未注册")
@@ -327,6 +330,7 @@ class ThreadedToolSystem(ToolSystem):
                 }
                 validate(execution_arguments, registered.tool.definition.input_schema)
             admission = {
+                "task_binding": task_binding,
                 "verdict": verdict,
                 "timeout": registered.timeout_seconds,
                 "definition": registered.definition.to_dict(),
@@ -672,6 +676,14 @@ class ThreadedToolSystem(ToolSystem):
                     or registered.definition.to_dict() != call["admission"]["definition"]
                 ):
                     raise ValueError("原工具定义已改变，未执行")
+                self.store.storage.call(
+                    "task.guard",
+                    user_id=user.storage_id,
+                    tool=call["tool"],
+                    expected_epoch=(call["admission"].get("task_binding") or {}).get(
+                        "control_epoch"
+                    ),
+                )
                 execution_arguments = {
                     key: value
                     for key, value in call["arguments"].items()

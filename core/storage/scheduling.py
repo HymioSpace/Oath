@@ -83,11 +83,31 @@ def claim_brain(db, owner, ttl, *, allow_subagents=True):
         "AND (l.expires IS NULL OR l.expires<=?) "
         "AND NOT EXISTS(SELECT 1 FROM subagents a WHERE a.storage_id=s.user_id "
         "AND (a.status!='running' OR a.deadline<=? OR ?=0)) "
-        "ORDER BY s.ready_at LIMIT 1",
+        "AND NOT EXISTS(SELECT 1 FROM task_runs r JOIN tasks t ON t.task_id=r.task_id "
+        "WHERE r.context_id=s.user_id AND (r.status!='running' OR t.lifecycle!='active')) "
+        "AND NOT EXISTS(SELECT 1 FROM task_delegations d JOIN subagents a USING(agent_id) "
+        "JOIN task_runs r ON r.run_id=d.run_id JOIN tasks t ON t.task_id=d.task_id "
+        "WHERE a.storage_id=s.user_id AND (r.status NOT IN ('running','waiting') "
+        "OR t.lifecycle!='active' OR d.state!='active')) "
+        "ORDER BY s.ready_at LIMIT 128",
         (now, now, now, int(allow_subagents)),
     ).fetchall()
     for row in rows:
         user_id = row["user_id"]
+        from core.tasks.budget import admit_step
+        from core.tasks.entities import execution
+
+        task_run = execution(db, user_id)
+        if task_run and task_run["status"] not in {"running", "waiting"}:
+            continue
+        if task_run:
+            task = db.execute(
+                "SELECT lifecycle FROM tasks WHERE task_id=?", (task_run["task_id"],)
+            ).fetchone()
+            if task["lifecycle"] != "active":
+                continue
+        if not admit_step(db, user_id):
+            continue
         fence = acquire(db, user_id, "brain", owner, ttl)
         if fence:
             ready = db.execute(
@@ -102,6 +122,12 @@ def claim_brain(db, owner, ttl, *, allow_subagents=True):
 
 def finish_brain(db, user_id, fence, retry=False):
     check(db, user_id, fence, required=True)
+    from core.tasks.budget import finish_step
+
+    lease = db.execute(
+        "SELECT touched FROM leases WHERE user_id=? AND lane='brain'", (user_id,)
+    ).fetchone()
+    finish_step(db, user_id, time.time() - lease["touched"] if lease else 0)
     db.execute("UPDATE scheduling SET completed=claimed WHERE user_id=?", (user_id,))
     if retry:
         wake(db, user_id, delay=1)

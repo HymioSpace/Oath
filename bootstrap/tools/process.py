@@ -20,6 +20,8 @@ from core.shell.cli_tool import CliTool
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.storage.adapters import DurableEventSink, StoredDetails, StoredQueue, StoredTraces
 from core.subagents.tools import tools as subagent_tools
+from core.tasks.fetch import TaskFetchTool
+from core.tasks.tools import tools as task_tools
 from core.tool.impl import ThreadedToolSystem
 from core.tool.registry import ToolRegistry
 
@@ -147,6 +149,43 @@ class ToolService:
                 if target and target.agent_id
                 else self.tools.definitions(channel=p.get("channel", "unknown"))
             )
+            if (
+                target
+                and target.agent_id
+                and hasattr(self.tools, "store")
+                and hasattr(self.tools.store, "storage")
+            ):
+                from core.tasks.profiles import allowed
+
+                binding = self.tools.store.storage.call("task.context", user_id=target.storage_id)
+                if binding:
+                    role = binding["role"]
+                    management = {
+                        "subagent_spawn",
+                        "subagent_list",
+                        "subagent_get",
+                        "subagent_cancel",
+                        "subagent_continue",
+                    }
+                    definitions = tuple(
+                        d
+                        for d in definitions
+                        if (
+                            (role == "task_agent" and d.name in management)
+                            or (role == "subagent" and d.name == "subagent_notify")
+                            or (
+                                allowed(binding["spec"]["executor"]["tool_profile"], d.name)
+                                and d.name not in management
+                                and not (role == "subagent" and d.name == "task_report")
+                            )
+                        )
+                    )
+                else:
+                    definitions = tuple(
+                        d
+                        for d in definitions
+                        if not d.name.startswith("subagent_") or d.name == "subagent_notify"
+                    )
             return [d.to_dict() for d in definitions]
         user = User.from_storage_id(p["user_id"])
         if operation == "tools.submit":
@@ -196,7 +235,8 @@ def run(config):
     registry = ToolRegistry(default_timeout_seconds=config.agent.tool_timeout_seconds)
     details = StoredDetails(storage)
     registry.register(DetailReadTool(details))
-    for tool in subagent_tools(storage):
+    registry.register(TaskFetchTool())
+    for tool in (*subagent_tools(storage), *task_tools(storage)):
         registry.register(tool)
     skills = SkillSystem(
         (config.agent.skill_dir, *extensions.skill_dirs), scan_dirs=config.agent.skill_scan_dirs

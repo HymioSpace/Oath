@@ -32,6 +32,11 @@ _SPECS = {
         ["agent_id"],
         ["agent_id"],
     ),
+    "continue": (
+        "Send new bounded instructions to an owned subagent and continue from its saved context.",
+        ["agent_id", "content"],
+        ["agent_id", "content", "success_criteria", "max_steps", "timeout_seconds"],
+    ),
     "notify": (
         "Send a significant intermediate finding to the parent while continuing your own work.",
         ["content"],
@@ -43,7 +48,7 @@ _SPECS = {
 class SubagentTool(Tool):
     def __init__(self, storage, action):
         self.storage, self.action = storage, action
-        self.allow_subagent = action == "notify"
+        self.allow_subagent = True
         description, required, fields = _SPECS[action]
         self._definition = ToolDefinition(
             "subagent_" + action,
@@ -67,6 +72,8 @@ class SubagentTool(Tool):
                 parameters["request_id"] = invocation.invocation_id
             if self.action == "notify":
                 parameters["note_id"] = invocation.invocation_id
+            if self.action == "continue":
+                parameters["message_id"] = invocation.invocation_id
             return ToolResult(
                 self.storage.call(
                     "subagent." + self.action, user_id=invocation.user.storage_id, **parameters

@@ -4,8 +4,13 @@ from bootstrap.common.authentication import service_token
 from bootstrap.common.rpc import serve_rpc
 from core.storage.database import Database
 from core.storage.service import StorageService
+from core.tasks.storage import SPECS
 
-OPERATIONS = {
+OPERATIONS = {"task." + action for action in SPECS} | {
+    "task.signal",
+    "task.context",
+    "task.guard",
+    "task.tick", "task.delivery.claim", "task.delivery.ack",
     "subagent.spawn",
     "subagent.list",
     "subagent.get",

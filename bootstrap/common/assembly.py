@@ -26,17 +26,28 @@ def build_context(config, storage, queue, tools, fence=None):
         skill_dirs=config.agent.skill_dirs,
     )
     agent_config = config.agent
+    from core.tasks.prompts import INTERACTION, LEAF, TASK_AGENT
+
+    role_prompt = INTERACTION
     if fence and User.from_storage_id(fence["user_id"]).agent_id:
         child_user = User.from_storage_id(fence["user_id"])
+        role_prompt = LEAF
         child = storage.call(
             "subagent.get", user_id=child_user.user_id, agent_id=child_user.agent_id
         )
+        task_binding = storage.call("task.context", user_id=child_user.storage_id)
+        if task_binding:
+            agent_config = replace(agent_config, context_provider_url="")
+            role_prompt = TASK_AGENT if task_binding["role"] == "task_agent" else LEAF
         agent_config = replace(
             agent_config,
             max_run_steps=child["max_steps"],
             max_tool_only_steps=child["max_steps"] + 1,
             max_run_seconds=max(1, child["deadline"] - child["created_at"]),
         )
+    agent_config = replace(
+        agent_config, system_prompt=agent_config.system_prompt + "\n" + role_prompt
+    )
     journal = StoredJournal(storage)
     return AgentContext(
         journal=journal,

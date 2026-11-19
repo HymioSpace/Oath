@@ -44,6 +44,10 @@ def get(db, user_id, agent_id):
 
 
 def notify(db, row, type_, payload, key):
+    from core.tasks.delegation import notify_parent
+
+    if notify_parent(db, row, type_, payload, key):
+        return
     if not row["notify_parent"]:
         return
     from core.storage.runtime_transactions import enqueue
@@ -125,7 +129,12 @@ def spawn(db, owner, p):
         return result
     if (
         db.execute(
-            "SELECT COUNT(*) FROM subagents WHERE user_id=? AND status='running'", (owner,)
+            (
+                "SELECT COUNT(*) FROM subagents a WHERE user_id=? AND "
+                "status='running' AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE "
+                "r.context_id=a.storage_id AND r.status!='running')"
+            ),
+            (owner,),
         ).fetchone()[0]
         >= 8
     ):
@@ -225,7 +234,11 @@ def resume(db, uid, p):
         raise ValueError("Cancelled subagent context cannot be resumed")
     if row["status"] != "running" and (
         db.execute(
-            "SELECT COUNT(*) FROM subagents WHERE user_id=? AND status='running'",
+            (
+                "SELECT COUNT(*) FROM subagents a WHERE user_id=? AND "
+                "status='running' AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE "
+                "r.context_id=a.storage_id AND r.status!='running')"
+            ),
             (uid,),
         ).fetchone()[0]
         >= 8
@@ -371,7 +384,9 @@ def call(db, uid, operation, p):
         )
         return {"delivered": True}
     if user.agent_id:
-        raise ValueError("Subagents cannot manage delegated executions")
+        from core.tasks.delegation import scoped_call
+
+        return scoped_call(db, uid, operation, p)
     if operation == "subagent.activity":
         return activity(db, uid, p)
     if operation == "subagent.spawn":
@@ -414,6 +429,9 @@ def project(db, uid, changes, state=None):
     row = lookup(db, uid)
     if not row or row["status"] not in ACTIVE:
         return
+    task = db.execute("SELECT status FROM task_runs WHERE context_id=?", (uid,)).fetchone()
+    if task and task["status"] in {"waiting", "paused", "cancelled", "succeeded"}:
+        return
     if changes.get("meta", {}).get("tool_wake_pause"):
         finish(db, row, "failed", "Tool continuation budget exhausted")
         return
@@ -443,7 +461,10 @@ def project(db, uid, changes, state=None):
 
 def expire(db):
     for row in db.execute(
-        "SELECT * FROM subagents WHERE status='running' AND deadline<=?", (time.time(),)
+        "SELECT a.* FROM subagents a WHERE status='running' AND deadline<=? "
+        "AND NOT EXISTS(SELECT 1 FROM task_runs r WHERE r.context_id=a.storage_id "
+        "AND r.status IN ('waiting','paused','queued'))",
+        (time.time(),),
     ).fetchall():
         finish(db, row, "failed", "Execution deadline exceeded")
         db.execute(
