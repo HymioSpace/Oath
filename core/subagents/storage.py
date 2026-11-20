@@ -68,13 +68,7 @@ def notify(db, row, type_, payload, key):
     )
 
 
-def finish(db, row, status, result):
-    if row["status"] not in ACTIVE:
-        return
-    db.execute(
-        "UPDATE subagents SET status=?,result=?,finished_at=? WHERE agent_id=?",
-        (status, result[:16000], time.time(), row["agent_id"]),
-    )
+def _stop_runtime(db, row):
     # Tools not yet started observe the same durable cancellation marker as run.cancel.
     snapshot = db.execute(
         "SELECT version,state_json FROM users WHERE user_id=?", (row["storage_id"],)
@@ -100,13 +94,38 @@ def finish(db, row, status, result):
         )
     db.execute("DELETE FROM inbox_events WHERE user_id=?", (row["storage_id"],))
     db.execute("UPDATE scheduling SET completed=requested WHERE user_id=?", (row["storage_id"],))
+
+
+def finish(db, row, status, result):
+    if row["status"] not in ACTIVE:
+        return
+    db.execute(
+        "UPDATE subagents SET status=?,result=?,finished_at=? WHERE agent_id=?",
+        (status, result[:16000], time.time(), row["agent_id"]),
+    )
+    _stop_runtime(db, row)
+    turn = db.execute(
+        "SELECT turn_id FROM subagent_turns WHERE agent_id=? ORDER BY created_at DESC LIMIT 1",
+        (row["agent_id"],),
+    ).fetchone()
+    turn_id = turn["turn_id"] if turn else ""
     notify(
         db,
         row,
         "subagent.completed",
         {"status": status, "result": result[:16000], "turn_id": turn_id},
-        "subagent:" + row["agent_id"] + ":completed" + suffix,
+        "subagent:" + row["agent_id"] + ":completed" + (":" + turn_id if turn_id else ""),
     )
+
+
+def pause(db, row, result="Paused by the owning task"):
+    if row["status"] not in ACTIVE:
+        return
+    db.execute(
+        "UPDATE subagents SET status='paused',result=?,finished_at=NULL WHERE agent_id=?",
+        (result[:16000], row["agent_id"]),
+    )
+    _stop_runtime(db, row)
 
 
 def spawn(db, owner, p):

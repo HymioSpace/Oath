@@ -20,7 +20,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
         )
     store = Database(path)
     with store.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         assert db.execute("SELECT user_id FROM users").fetchone()[0] == "owner"
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         tables = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'task%'")
@@ -28,7 +28,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
     store._owner.close()
     reopened = Database(path)
     with reopened.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
     reopened._owner.close()
 
 
@@ -109,7 +109,7 @@ def test_upgrade_task_v2_preserves_existing_task_run(tmp_path):
     assert after["run"]["agent_id"] == before["run"]["agent_id"]
     assert after["run"]["status"] == "running"
     with restored.transaction() as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
@@ -129,7 +129,7 @@ def test_upgrade_task_v4_adds_team_messages_and_workflow_nodes(tmp_path):
     detail = restored.call("task.get", user_id="u1", task_id=task["task_id"], view="detail")
     assert detail["task"]["task_id"] == task["task_id"]
     with restored.transaction() as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         tables = {
             row[0]
             for row in db.execute(
@@ -139,4 +139,125 @@ def test_upgrade_task_v4_adds_team_messages_and_workflow_nodes(tmp_path):
         assert {"task_team_messages", "task_workflow_nodes"} <= tables
         columns = {row[1] for row in db.execute("PRAGMA table_info(task_delegations)")}
         assert {"role", "workflow_node_id"} <= columns
+        workflow_sql = db.execute(
+            "SELECT sql FROM sqlite_master WHERE name='task_workflow_nodes'"
+        ).fetchone()[0]
+        assert "'paused'" in workflow_sql
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_upgrade_v5_repairs_legacy_budget_pause_workflow_nodes(tmp_path):
+    from tests._support.storage import Storage
+    from tests.test_task_modes import create_mode, running_actor
+
+    path = tmp_path / "oath.sqlite3"
+    service = Storage(path)
+    task = create_mode(service, "dynamic_workflow", "legacy_pause_migration")
+    actor, run_id = running_actor(service, task["task_id"])
+    defined = service.call(
+        "workflow.define",
+        user_id=actor,
+        request_id="define_legacy_pause",
+        nodes=[
+            {
+                "id": "work",
+                "title": "执行中节点",
+                "objective": "完成工作",
+                "success_criteria": "工作完成",
+            }
+        ],
+    )
+    agent_id = defined["nodes"][0]["agent_id"]
+    paused = service.call(
+        "task.pause",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=task["revision"],
+        reason="预算暂停",
+        request_id="legacy_pause",
+    )
+    service._inner.database._owner.close()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE task_workflow_nodes SET status='pending',started_at=NULL,finished_at=NULL "
+            "WHERE run_id=?",
+            (run_id,),
+        )
+        db.execute(
+            "UPDATE subagents SET status='failed',result='Owning task pause' WHERE agent_id=?",
+            (agent_id,),
+        )
+        db.execute("UPDATE schema_version SET version=5")
+
+    restored = Storage(path)
+    detail = restored.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    node = detail["execution"]["workflow"]["nodes"][0]
+    agent = next(
+        child
+        for child in detail["execution"]["subagents"]
+        if child["agent_id"] == agent_id
+    )
+    assert paused["run"]["status"] == "paused"
+    assert node["status"] == "paused"
+    assert node["started_at"] is not None
+    assert agent["status"] == "paused"
+    with restored.transaction() as db:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_upgrade_v5_repairs_legacy_cancelled_workflow_nodes(tmp_path):
+    from tests._support.storage import Storage
+    from tests.test_task_modes import create_mode, running_actor
+
+    path = tmp_path / "oath.sqlite3"
+    service = Storage(path)
+    task = create_mode(service, "dynamic_workflow", "legacy_cancel_migration")
+    actor, run_id = running_actor(service, task["task_id"])
+    service.call(
+        "workflow.define",
+        user_id=actor,
+        request_id="define_legacy_cancel",
+        nodes=[
+            {
+                "id": "work",
+                "title": "已取消节点",
+                "objective": "完成工作",
+                "success_criteria": "工作完成",
+            }
+        ],
+    )
+    paused = service.call(
+        "task.pause",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=task["revision"],
+        reason="暂停",
+        request_id="legacy_cancel_pause",
+    )
+    service.call(
+        "task.cancel",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=paused["task"]["revision"],
+        reason="取消",
+        request_id="legacy_cancel",
+    )
+    service._inner.database._owner.close()
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE task_workflow_nodes SET status='pending',finished_at=NULL WHERE run_id=?",
+            (run_id,),
+        )
+        db.execute("UPDATE schema_version SET version=5")
+
+    restored = Storage(path)
+    detail = restored.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    assert detail["execution"]["workflow"]["nodes"][0]["status"] == "cancelled"
+    with restored.transaction() as db:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 6
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

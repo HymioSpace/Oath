@@ -112,7 +112,7 @@ def test_pause_resume_cancel_cascades_and_steering_is_durable(service, tmp_path)
         request_id="pause",
     )
     assert (
-        service.call("subagent.get", user_id="u1", agent_id=child["agent_id"])["status"] == "failed"
+        service.call("subagent.get", user_id="u1", agent_id=child["agent_id"])["status"] == "paused"
     )
     service.call(
         "task.message",

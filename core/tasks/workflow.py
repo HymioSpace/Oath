@@ -9,7 +9,7 @@ from core.storage.database import encode
 from core.tasks.entities import AgentRole, binding, execution
 from core.tasks.modes import execution_mode
 
-NODE_STATUSES = {"pending", "running", "succeeded", "failed", "cancelled", "blocked"}
+NODE_STATUSES = {"pending", "running", "paused", "succeeded", "failed", "cancelled", "blocked"}
 TERMINAL = {"succeeded", "failed", "cancelled", "blocked"}
 MAX_NODES = 20
 MAX_ACTIVE = 8
@@ -239,6 +239,8 @@ def workflow_status(db, run_id):
     counts = {row["status"]: row["n"] for row in rows}
     if counts.get("failed") or counts.get("blocked") or counts.get("cancelled"):
         state = "failed"
+    elif counts.get("paused"):
+        state = "paused"
     elif counts.get("running"):
         state = "running"
     elif counts and counts.get("succeeded") == sum(counts.values()):
@@ -292,7 +294,14 @@ def advance(db, task, run, wake=True):
         ).fetchone()
         if not child:
             continue
-        if node["status"] in {"pending", "running"} and child["status"] in {
+        if node["status"] in {"running", "paused"} and child["status"] == "paused":
+            db.execute(
+                "UPDATE task_workflow_nodes SET status='paused',result_json=NULL,"
+                "error_json=NULL,finished_at=NULL WHERE run_id=? AND node_id=?",
+                (run["run_id"], node["node_id"]),
+            )
+            changed = True
+        elif node["status"] in {"pending", "running"} and child["status"] in {
             "succeeded",
             "failed",
             "cancelled",
@@ -322,7 +331,7 @@ def advance(db, task, run, wake=True):
     ).fetchall()
     states = {node["node_id"]: node["status"] for node in nodes}
     for node in nodes:
-        if node["status"] != "pending":
+        if node["status"] not in {"pending", "paused"}:
             continue
         deps = json.loads(node["depends_on_json"])
         if any(states[item] in {"failed", "cancelled", "blocked"} for item in deps):
@@ -359,19 +368,22 @@ def advance(db, task, run, wake=True):
     for node in nodes:
         if active >= MAX_ACTIVE:
             break
-        if node["status"] != "pending":
+        if node["status"] not in {"pending", "paused"}:
             continue
         deps = json.loads(node["depends_on_json"])
         if not all(states[item] == "succeeded" for item in deps):
             continue
         try:
             dependency_outputs = _dependency_outputs(db, run["run_id"], deps)
+            turn_id = "workflow:" + run["run_id"] + ":" + node["node_id"]
+            if node["started_at"] is not None:
+                turn_id += ":resume:" + str(run["control_epoch"])
             resume(
                 db,
                 task["user_id"],
                 {
                     "agent_id": node["agent_id"],
-                    "message_id": "workflow:" + run["run_id"] + ":" + node["node_id"],
+                    "message_id": turn_id,
                     "content": (
                         "Execute this ready workflow node. Use the dependency outputs below as "
                         "input; do not search for them elsewhere.\n\n"
@@ -384,6 +396,10 @@ def advance(db, task, run, wake=True):
             )
         except ValueError:
             break
+        db.execute(
+            "UPDATE task_delegations SET state='active' WHERE agent_id=?",
+            (node["agent_id"],),
+        )
         db.execute(
             "UPDATE task_workflow_nodes SET status='running',started_at=COALESCE(started_at,?) "
             "WHERE run_id=? AND node_id=?",

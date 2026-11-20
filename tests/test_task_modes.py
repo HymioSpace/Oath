@@ -5,6 +5,7 @@ import json
 import pytest
 
 from core.subagents.storage import finish
+from core.tasks.budget import admit_step
 from tests.test_tasks_e2e import specification
 
 
@@ -249,6 +250,178 @@ def test_dynamic_workflow_runs_only_ready_dag_nodes_and_joins_before_completion(
         node["status"] == "succeeded"
         for node in final["execution"]["workflow"]["nodes"]
     )
+
+
+def test_budget_pause_resumes_the_same_running_workflow_node(service):
+    task = create_mode(service, "dynamic_workflow", "workflow_budget")
+    actor, run_id = running_actor(service, task["task_id"])
+    defined = service.call(
+        "workflow.define",
+        user_id=actor,
+        request_id="define_budget",
+        nodes=[
+            {
+                "id": "a",
+                "title": "资料 A",
+                "objective": "完成 A",
+                "success_criteria": "A 完成",
+            },
+            {
+                "id": "b",
+                "title": "资料 B",
+                "objective": "完成 B",
+                "success_criteria": "B 完成",
+            },
+            {
+                "id": "c",
+                "title": "依赖复核",
+                "objective": "使用 A 和 B 完成复核",
+                "success_criteria": "复核完成",
+                "depends_on": ["a", "b"],
+            },
+        ],
+    )
+    children = {node["id"]: node["agent_id"] for node in defined["nodes"]}
+    with service.transaction() as db:
+        for node_id in ("a", "b"):
+            child = db.execute(
+                "SELECT * FROM subagents WHERE agent_id=?", (children[node_id],)
+            ).fetchone()
+            finish(db, child, "succeeded", node_id + " completed")
+    service.call("task.tick")
+    running = service.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    states = {
+        node["id"]: node["status"]
+        for node in running["execution"]["workflow"]["nodes"]
+    }
+    assert states == {"a": "succeeded", "b": "succeeded", "c": "running"}
+
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE run_id=?", (run_id,)).fetchone()
+        usage = json.loads(run["usage_json"])
+        usage["steps"] = json.loads(run["spec_snapshot_json"])["policy"]["run_budget"][
+            "max_steps"
+        ]
+        db.execute(
+            "UPDATE task_runs SET usage_json=? WHERE run_id=?",
+            (json.dumps(usage), run_id),
+        )
+        assert admit_step(db, run["context_id"]) is False
+
+    paused = service.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    states = {
+        node["id"]: node["status"]
+        for node in paused["execution"]["workflow"]["nodes"]
+    }
+    assert paused["run"]["status"] == "paused"
+    assert states == {"a": "succeeded", "b": "succeeded", "c": "paused"}
+    c_agent = next(
+        child
+        for child in paused["execution"]["subagents"]
+        if child["agent_id"] == children["c"]
+    )
+    assert c_agent["status"] == "paused"
+    with service.transaction() as db:
+        assert (
+            db.execute(
+                "SELECT state FROM task_delegations WHERE agent_id=?",
+                (children["c"],),
+            ).fetchone()[0]
+            == "paused"
+        )
+
+    service.call(
+        "task.adjust_budget",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=task["revision"],
+        reason="继续完成依赖复核",
+        request_id="workflow-budget-adjust",
+        run_budget={
+            "max_steps": 60,
+            "max_tokens": 50000,
+            "max_active_seconds": 1800,
+            "max_cost_microusd": None,
+        },
+    )
+    service.call("task.tick")
+    resumed = service.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    states = {
+        node["id"]: node["status"]
+        for node in resumed["execution"]["workflow"]["nodes"]
+    }
+    c_agent = next(
+        child
+        for child in resumed["execution"]["subagents"]
+        if child["agent_id"] == children["c"]
+    )
+    assert resumed["run"]["run_id"] == run_id
+    assert resumed["run"]["status"] == "waiting"
+    assert states == {"a": "succeeded", "b": "succeeded", "c": "running"}
+    assert c_agent["status"] == "running"
+    with service.transaction() as db:
+        assert (
+            db.execute(
+                "SELECT state FROM task_delegations WHERE agent_id=?",
+                (children["c"],),
+            ).fetchone()[0]
+            == "active"
+        )
+
+
+def test_cancelling_a_paused_workflow_marks_unfinished_nodes_cancelled(service):
+    task = create_mode(service, "dynamic_workflow", "workflow_cancel_paused")
+    actor, _ = running_actor(service, task["task_id"])
+    defined = service.call(
+        "workflow.define",
+        user_id=actor,
+        request_id="define_cancel_paused",
+        nodes=[
+            {
+                "id": "work",
+                "title": "执行中节点",
+                "objective": "完成工作",
+                "success_criteria": "工作完成",
+            }
+        ],
+    )
+    paused = service.call(
+        "task.pause",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=task["revision"],
+        reason="暂停任务",
+        request_id="cancel_paused_pause",
+    )
+    before = service.call(
+        "task.get", user_id="u1", task_id=task["task_id"], view="detail"
+    )
+    assert before["execution"]["workflow"]["nodes"][0]["status"] == "paused"
+    service.call(
+        "task.cancel",
+        user_id="u1",
+        task_id=task["task_id"],
+        expected_revision=paused["task"]["revision"],
+        reason="取消任务",
+        request_id="cancel_paused_cancel",
+    )
+    after = service.call("task.get", user_id="u1", task_id=task["task_id"], view="detail")
+    node = after["execution"]["workflow"]["nodes"][0]
+    assert node["status"] == "cancelled"
+    with service.transaction() as db:
+        assert (
+            db.execute(
+                "SELECT status FROM subagents WHERE agent_id=?",
+                (defined["nodes"][0]["agent_id"],),
+            ).fetchone()[0]
+            == "cancelled"
+        )
 
 
 def test_dynamic_workflow_rejects_cycles_before_spawning_agents(service):

@@ -103,7 +103,7 @@ def notify_parent(db, row, type_, payload, key):
 
 
 def control_children(db, run_id, action):
-    from core.subagents.storage import finish, resume
+    from core.subagents.storage import finish, pause, resume
 
     rows = db.execute(
         (
@@ -125,6 +125,12 @@ def control_children(db, run_id, action):
                     child["agent_id"],
                 ),
             )
+            if child["role"] == "workflow_node":
+                db.execute(
+                    "UPDATE task_workflow_nodes SET status='cancelled',finished_at=? "
+                    "WHERE agent_id=? AND status NOT IN ('succeeded','cancelled')",
+                    (time.time(), child["agent_id"]),
+                )
             continue
         if action == "resume" and child["delegation_state"] == "paused":
             db.execute(
@@ -147,9 +153,10 @@ def control_children(db, run_id, action):
                 "UPDATE task_delegations SET state=? WHERE agent_id=?",
                 ("paused" if action == "pause" else "closed", child["agent_id"]),
             )
-            finish(
-                db, child, "failed" if action == "pause" else "cancelled", "Owning task " + action
-            )
+            if action == "pause":
+                pause(db, child)
+            else:
+                finish(db, child, "cancelled", "Owning task cancel")
         elif action in {"pause", "cancel"} and child["status"] in {"waiting", "paused"}:
             db.execute(
                 "UPDATE task_delegations SET state=? WHERE agent_id=?",
@@ -163,9 +170,9 @@ def control_children(db, run_id, action):
                 )
         if action == "pause" and child["role"] == "workflow_node":
             db.execute(
-                "UPDATE task_workflow_nodes SET status='pending',result_json=NULL,"
-                "error_json=NULL,started_at=NULL,finished_at=NULL "
-                "WHERE agent_id=? AND status!='succeeded'",
+                "UPDATE task_workflow_nodes SET status='paused',result_json=NULL,"
+                "error_json=NULL,finished_at=NULL "
+                "WHERE agent_id=? AND status='running'",
                 (child["agent_id"],),
             )
         elif action == "cancel" and child["role"] == "workflow_node":
