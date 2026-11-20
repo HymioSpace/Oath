@@ -55,6 +55,18 @@ def test_the_nested_provider_is_read(tmp_path: Path) -> None:
     assert config.agent.provider.credential == "provider/model"
 
 
+def test_compaction_model_can_be_configured_separately(tmp_path: Path) -> None:
+    config = load_config(
+        _write(
+            tmp_path,
+            '[agent]\ncompress_model = "compact-model"\n'
+            'selectable_models = ["compact-model"]\n\n'
+            + MINIMAL,
+        )
+    )
+    assert config.agent.compress_model == "compact-model"
+
+
 # --------------------------------------------------------------------------
 # agent / services / supervisor / secrets 四段各自独立
 # --------------------------------------------------------------------------
