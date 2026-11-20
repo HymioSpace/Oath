@@ -150,18 +150,7 @@ def control_children(db, run_id, action):
             finish(
                 db, child, "failed" if action == "pause" else "cancelled", "Owning task " + action
             )
-        elif action in {"pause", "cancel"} and child["status"] == "waiting":
-            db.execute(
-                "UPDATE task_delegations SET state=? WHERE agent_id=?",
-                ("paused" if action == "pause" else "closed", child["agent_id"]),
-            )
-            if action == "cancel":
-                db.execute(
-                    "UPDATE subagents SET status='cancelled',result=?,finished_at=? "
-                    "WHERE agent_id=?",
-                    ("Owning task cancelled", time.time(), child["agent_id"]),
-                )
-        elif action in {"pause", "cancel"} and child["status"] == "paused":
+        elif action in {"pause", "cancel"} and child["status"] in {"waiting", "paused"}:
             db.execute(
                 "UPDATE task_delegations SET state=? WHERE agent_id=?",
                 ("paused" if action == "pause" else "closed", child["agent_id"]),
