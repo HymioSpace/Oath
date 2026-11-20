@@ -15,6 +15,7 @@ def test_role_prompts_require_explicit_task_boundaries():
     assert "non-goals" in INTERACTION
     assert "in-scope work" in TASK_AGENT
     assert "hard boundary" in LEAF
+    assert "every eight active steps" in TASK_AGENT
     assert "temporarily unavailable" in TASK_AGENT
     assert "Never cancel" in TASK_AGENT
 

@@ -41,6 +41,8 @@ Follow the supplied goal, acceptance, context, permissions and accumulated check
 Work asynchronously. Report progress and outcomes using task_report.
 Only report progress, next steps, blockers and results actually established during your work;
 omit optional semantic fields that you cannot substantiate. Do not invent reassuring summaries.
+After each meaningful batch of tool work, or at least every eight active steps, send a concise
+continue checkpoint with progress and the next step before starting another batch.
 When the goal is achieved, report decision=complete; no parent approval is required.
 Run any checks required by the task using your tools and include their actual results.
 If a user decision is required, explicitly wait for the user rather than claiming completion.

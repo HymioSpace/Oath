@@ -193,6 +193,12 @@ def test_dynamic_workflow_runs_only_ready_dag_nodes_and_joins_before_completion(
     assert states["collect"] == states["compare"] == "succeeded"
     assert states["review"] == "running"
     assert states["report"] == "pending"
+    review_input = service.call(
+        "buffer.peek", user_id="u1:" + children["review"], kind="user"
+    )
+    review_payload = json.dumps(review_input, ensure_ascii=False)
+    assert "collect completed" in review_payload
+    assert "compare completed" in review_payload
 
     with service.transaction() as db:
         row = db.execute(

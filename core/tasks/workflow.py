@@ -254,6 +254,29 @@ def has_nodes(db, run_id):
     )
 
 
+def _dependency_outputs(db, run_id, dependency_ids):
+    outputs = []
+    total_chars = 0
+    for dependency_id in dependency_ids:
+        row = db.execute(
+            "SELECT title,result_json FROM task_workflow_nodes WHERE run_id=? AND node_id=?",
+            (run_id, dependency_id),
+        ).fetchone()
+        if not row or not row["result_json"]:
+            raise ValueError(f"Dependency result is missing for node {dependency_id}")
+        result = json.loads(row["result_json"])
+        summary = result.get("summary") if isinstance(result, dict) else ""
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError(f"Dependency result is empty for node {dependency_id}")
+        available = max(0, 24000 - total_chars)
+        if available == 0:
+            break
+        bounded = summary.strip()[: min(8000, available)]
+        outputs.append(f"## {dependency_id}: {row['title']}\n{bounded}")
+        total_chars += len(bounded)
+    return "\n\n".join(outputs) or "No dependency outputs."
+
+
 def advance(db, task, run, wake=True):
     """Reconcile child outcomes, release ready nodes and wake the leader at the join."""
     nodes = db.execute(
@@ -342,14 +365,20 @@ def advance(db, task, run, wake=True):
         if not all(states[item] == "succeeded" for item in deps):
             continue
         try:
+            dependency_outputs = _dependency_outputs(db, run["run_id"], deps)
             resume(
                 db,
                 task["user_id"],
                 {
                     "agent_id": node["agent_id"],
                     "message_id": "workflow:" + run["run_id"] + ":" + node["node_id"],
-                    "content": "Execute this ready workflow node. Dependencies are complete.\n"
-                    + node["objective"],
+                    "content": (
+                        "Execute this ready workflow node. Use the dependency outputs below as "
+                        "input; do not search for them elsewhere.\n\n"
+                        + dependency_outputs
+                        + "\n\n## Assigned node\n"
+                        + node["objective"]
+                    ),
                     "success_criteria": node["success_criteria"],
                 },
             )
