@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import copy
+import time
 from typing import Any
 from xml.sax.saxutils import escape, quoteattr
 
 from core.context.events import event_xml
+from core.context.user_context import current as current_user_context
+from core.context.user_context import table_of
 from core.journal.runtime_store import State
 from core.protocol.datatype.inbound import Inbound
 from core.utils.encoding import canonical_json
@@ -19,6 +22,10 @@ def _result_text(payload: State) -> str:
 
 def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -> list[State]:
     messages: list[State] = copy.deepcopy(state["conversation"].get("messages", []))
+    user_context = current_user_context(table_of(state), now=time.time())
+    client_timezone = user_context.get("time_zone")
+    if not isinstance(client_timezone, str):
+        client_timezone = ""
     selected = {
         e["item"]["payload"]["invocation_id"]: (key, e["item"]["payload"])
         for key, e in entries
@@ -85,7 +92,13 @@ def build_messages(state: State, entries: list[tuple[str, Any]], step_id: str) -
     for key, entry in entries:
         item = Inbound.from_dict(entry["item"])
         if entry["queue"] != "tool" or item.source == "subagent.start":
-            events.append(event_xml(item, entry.get("buffered_at")))
+            events.append(
+                event_xml(
+                    item,
+                    entry.get("buffered_at"),
+                    client_timezone=client_timezone,
+                )
+            )
             if item.source == "user.message":
                 refs = item.payload.get("image_refs", [])
                 if (

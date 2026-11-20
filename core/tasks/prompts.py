@@ -65,6 +65,8 @@ while awaiting children. Use time/event/tool/user waits for their corresponding 
 Never poll in a loop or claim completion while children are still running.
 Do not create or expand permanent tasks. Send blockers, significant findings and questions
 through task_report; the task system forwards them to the interaction agent.
+Never cancel a Task merely because a tool endpoint is missing, returns 5xx, or a dependency is
+temporarily unavailable. Report the blocker and preserve the Task/Run for retry after recovery.
 Continue from journal-backed context after wake/restart; inspect prior effects before retry.
 """
 LEAF = """

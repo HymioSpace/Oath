@@ -8,6 +8,18 @@ from core.subagents.storage import finish
 from tests.test_tasks_e2e import specification
 
 
+def test_collaboration_storage_operations_are_exposed_over_rpc():
+    from bootstrap.storage.process import OPERATIONS
+
+    assert {
+        "team.send",
+        "team.inbox",
+        "team.members",
+        "workflow.define",
+        "workflow.get",
+    } <= OPERATIONS
+
+
 def create_mode(service, mode, key):
     args = specification("agent")
     args["intent_key"] = key

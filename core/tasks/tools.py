@@ -14,7 +14,7 @@ DESCRIPTIONS = {
         "trigger, executor and budget. Reuse intent_key; fixed "
         "reminders use program notify and must not allocate a TaskAgent or subagent. "
         "Agent work defaults to parallel_subagents. Use agent_team only when teammates "
-        "must communicate during the work. Use dynamic_workflow when the main Agent must "
+        "must communicate during the work. Use dynamic_workflow when the TaskAgent must "
         "define dependencies between bounded Agent nodes before execution. "
         "Returns immediately."
     ),

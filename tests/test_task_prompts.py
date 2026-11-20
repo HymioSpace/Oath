@@ -15,6 +15,8 @@ def test_role_prompts_require_explicit_task_boundaries():
     assert "non-goals" in INTERACTION
     assert "in-scope work" in TASK_AGENT
     assert "hard boundary" in LEAF
+    assert "temporarily unavailable" in TASK_AGENT
+    assert "Never cancel" in TASK_AGENT
 
 
 def test_delegation_tool_descriptions_require_inputs_scope_and_output():
