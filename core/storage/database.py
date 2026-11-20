@@ -33,7 +33,7 @@ class Database:
             self._owner.close()
             raise RuntimeError("A Storage service already owns this SQLite database") from None
         with self.transaction() as db:
-            from core.tasks.migrations import execute_script, migrate
+            from core.tasks.migrations import SCHEMA_VERSION, execute_script, migrate
 
             exists = db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
@@ -46,7 +46,9 @@ class Database:
                 db.execute(
                     "ALTER TABLE subagents ADD COLUMN notify_parent INTEGER NOT NULL DEFAULT 1"
                 )
-            if [r[0] for r in db.execute("SELECT version FROM schema_version")] != [4]:
+            if [
+                r[0] for r in db.execute("SELECT version FROM schema_version")
+            ] != [SCHEMA_VERSION]:
                 raise RuntimeError("Unsupported database schema")
         from core.storage import conversation_history
         from core.storage.request_archives import compact_existing

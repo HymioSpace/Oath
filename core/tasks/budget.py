@@ -71,6 +71,15 @@ def admit_step(db, context_id):
             (encode({"code": "BUDGET_EXHAUSTED"}), run["run_id"]),
         )
         db.execute("UPDATE tasks SET needs_attention=1 WHERE task_id=?", (run["task_id"],))
+        if run["agent_id"]:
+            db.execute(
+                "UPDATE subagents SET status='paused',result=? "
+                "WHERE agent_id=? AND status='running'",
+                ("Paused: run budget exhausted", run["agent_id"]),
+            )
+        from core.tasks.delegation import control_children
+
+        control_children(db, run["run_id"], "pause")
         from core.tasks.storage import event
 
         event(db, task, "budget_exhausted", {"code": "BUDGET_EXHAUSTED"}, run, wake=True)

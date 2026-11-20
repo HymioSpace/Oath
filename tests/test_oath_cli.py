@@ -87,3 +87,15 @@ def test_device_transport_rejects_cleartext_and_embedded_credentials(monkeypatch
         monkeypatch.setenv("OATH_CLI_SERVER", url)
         with pytest.raises(ValueError):
             cli.call("/cli/tools")
+
+
+def test_positional_subcommand_reports_actionable_usage():
+    cli = load_client()
+    with pytest.raises(cli.UsageError, match=r"help connections"):
+        cli.main(["connections", "list"])
+
+
+def test_missing_option_value_is_a_usage_error():
+    cli = load_client()
+    with pytest.raises(cli.UsageError, match="--json requires a value"):
+        cli.main(["connections", "--json"])

@@ -504,6 +504,102 @@ def test_task_model_step_budget_cannot_reset_through_continuation(service):
         ]["status"]
         == "paused"
     )
+    detail = service.call(
+        "task.get", user_id="u1", task_id=made["task"]["task_id"], view="detail"
+    )
+    assert detail["execution"]["task_agent"]["execution_status"] == "paused"
+    assert detail["execution"]["task_agent"]["status"] == "paused"
+
+
+def test_cancelling_budget_paused_task_settles_its_task_agent(service):
+    made = create(service, "agent")
+    task_id = made["task"]["task_id"]
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        db.execute(
+            "UPDATE task_runs SET status='paused',resume_status='running',"
+            "error_json=? WHERE run_id=?",
+            ('{"code":"BUDGET_EXHAUSTED"}', run["run_id"]),
+        )
+        db.execute(
+            "UPDATE subagents SET status='paused',result='Paused: owning task run is paused' "
+            "WHERE agent_id=?",
+            (run["agent_id"],),
+        )
+    service.call(
+        "task.cancel",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User cancelled",
+        request_id="cancel-paused",
+    )
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        agent = db.execute(
+            "SELECT status FROM subagents WHERE agent_id=?", (run["agent_id"],)
+        ).fetchone()
+    assert run["status"] == "cancelled"
+    assert agent["status"] == "cancelled"
+
+
+def test_budget_can_be_adjusted_to_resume_the_same_run(service):
+    made = create(service, "agent")
+    task_id = made["task"]["task_id"]
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        db.execute(
+            "UPDATE task_runs SET status='paused',resume_status='running',error_json=?,"
+            "usage_json=? WHERE run_id=?",
+            (
+                '{"code":"BUDGET_EXHAUSTED"}',
+                '{"steps":30,"tokens":20000,"active_seconds":900,"cost_microusd":0}',
+                run["run_id"],
+            ),
+        )
+        db.execute(
+            "UPDATE subagents SET status='paused',result='Paused: run budget exhausted' "
+            "WHERE agent_id=?",
+            (run["agent_id"],),
+        )
+    adjusted = service.call(
+        "task.adjust_budget",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User increased the run budget",
+        request_id="budget-adjust",
+        run_budget={
+            "max_steps": 60,
+            "max_tokens": 50000,
+            "max_active_seconds": 1800,
+            "max_cost_microusd": None,
+        },
+    )
+    assert adjusted["run"]["run_id"] == run["run_id"]
+    assert adjusted["run"]["status"] == "queued"
+    assert adjusted["run"]["error_code"] is None
+    replay = service.call(
+        "task.adjust_budget",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User increased the run budget",
+        request_id="budget-adjust",
+        run_budget={
+            "max_steps": 60,
+            "max_tokens": 50000,
+            "max_active_seconds": 1800,
+            "max_cost_microusd": None,
+        },
+    )
+    assert replay["replayed"] is True
+    service.call("task.tick")
+    resumed = service.call("task.get", user_id="u1", task_id=task_id, view="detail")
+    assert resumed["run"]["status"] == "running"
+    assert resumed["run"]["run_id"] == run["run_id"]
 
 
 def test_no_progress_is_reported_once_without_model_polling(service):
@@ -516,6 +612,7 @@ def test_no_progress_is_reported_once_without_model_polling(service):
             "UPDATE task_runs SET started_at=?,last_progress_at=?",
             (time.time() - 600, time.time() - 600),
         )
+        db.execute("UPDATE scheduling SET ready_at=?", (time.time() - 600,))
     service.call("task.tick")
     service.call("task.tick")
     with service.transaction() as db:
@@ -523,6 +620,62 @@ def test_no_progress_is_reported_once_without_model_polling(service):
         assert (
             db.execute("SELECT count(*) FROM task_events WHERE type='blocked'").fetchone()[0] == 1
         )
+
+
+def test_recent_model_activity_prevents_false_no_progress_pause(service):
+    import time
+    from datetime import UTC, datetime
+
+    create(service, "agent")
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs").fetchone()
+        seq = db.execute(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM conversation_events WHERE user_id=?",
+            (run["context_id"],),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO conversation_events VALUES(?,?,?,?,?,?)",
+            (
+                run["context_id"],
+                seq,
+                "assistant.message",
+                "recent-step",
+                "{}",
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        db.execute(
+            "UPDATE task_runs SET started_at=?,last_progress_at=?",
+            (time.time() - 600, time.time() - 600),
+        )
+    service.call("task.tick")
+    with service.transaction() as db:
+        assert db.execute("SELECT status FROM task_runs").fetchone()[0] == "running"
+        assert (
+            db.execute("SELECT count(*) FROM task_events WHERE type='blocked'").fetchone()[0]
+            == 0
+        )
+
+
+def test_ready_unclaimed_model_step_prevents_false_no_progress_pause(service):
+    import time
+
+    create(service, "agent")
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs").fetchone()
+        db.execute(
+            "UPDATE task_runs SET started_at=?,last_progress_at=?",
+            (time.time() - 600, time.time() - 600),
+        )
+        db.execute(
+            "UPDATE scheduling SET requested=completed+1,ready_at=? WHERE user_id=?",
+            (time.time(), run["context_id"]),
+        )
+    service.call("task.tick")
+    with service.transaction() as db:
+        assert db.execute("SELECT status FROM task_runs").fetchone()[0] == "running"
 
 
 def test_pagination_cursor_is_bound_to_owner_and_query(service):

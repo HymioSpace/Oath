@@ -8,8 +8,13 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class UsageError(ValueError):
+    pass
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -57,6 +62,13 @@ def print_json(value):
     print(json.dumps(value, ensure_ascii=False))
 
 
+def take(args, flag):
+    try:
+        return next(args)
+    except StopIteration:
+        raise UsageError(f"{flag} requires a value") from None
+
+
 def main(argv):
     if argv == ["--version"]:
         print(hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
@@ -77,22 +89,34 @@ def main(argv):
         if arg == "--async":
             detached = True
         elif arg == "--request-id":
-            request_id = next(args)
+            request_id = take(args, "--request-id")
         elif arg == "--wait":
-            wait = min(60, max(0, float(next(args))))
+            try:
+                wait = min(60, max(0, float(take(args, "--wait"))))
+            except ValueError:
+                raise UsageError("--wait requires a number of seconds") from None
         elif arg == "--json":
-            raw = next(args)
-            arguments.update(json.load(sys.stdin) if raw == "-" else json.loads(raw))
+            raw = take(args, "--json")
+            try:
+                value = json.load(sys.stdin) if raw == "-" else json.loads(raw)
+                if not isinstance(value, dict):
+                    raise UsageError("--json must contain an object")
+                arguments.update(value)
+            except json.JSONDecodeError:
+                raise UsageError("--json must contain valid JSON") from None
         elif arg.startswith("--"):
             key, sep, value = arg[2:].partition("=")
             if not sep:
-                value = next(args)
+                value = take(args, "--" + key)
             try:
                 arguments[key.replace("-", "_")] = json.loads(value)
             except ValueError:
                 arguments[key.replace("-", "_")] = value
         else:
-            raise ValueError("Use --json or named --argument values")
+            raise UsageError(
+                f"Unexpected positional argument after '{name}'. "
+                f"Use --json or named --argument values; run `oath-cli help {name}`."
+            )
     result = call(
         "/cli/invoke",
         {"name": name, "arguments": arguments, "request_id": request_id, "async": detached},
@@ -121,6 +145,21 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except (KeyboardInterrupt, BrokenPipeError):
         raise SystemExit(130) from None
+    except UsageError as exc:
+        print("CLI usage error: " + str(exc), file=sys.stderr)
+        raise SystemExit(2) from None
+    except HTTPError as exc:
+        if exc.code == 404:
+            message = "CLI command not found; run `oath-cli help`."
+        elif exc.code in {401, 403}:
+            message = "CLI authentication failed."
+        else:
+            message = f"CLI HTTP error {exc.code}."
+        print(message, file=sys.stderr)
+        raise SystemExit(2) from None
+    except URLError:
+        print("CLI network error.", file=sys.stderr)
+        raise SystemExit(2) from None
     except Exception as exc:
         # Do not print credentials, request headers or arbitrary HTTP response bodies.
         print("CLI request failed: " + type(exc).__name__, file=sys.stderr)

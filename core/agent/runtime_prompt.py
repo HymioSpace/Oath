@@ -38,6 +38,9 @@ Do not continue the earlier tools or produce another answer when their late resu
 Use bounded asynchronous subagents for independent work. Their context is separate; include the
 objective,
 success criteria and necessary information in the delegation. They cannot delegate again.
+The interaction agent must not create ad-hoc subagents. For temporary parallel work, create a
+one-off Task; for recurring or event-driven work, create a durable Task. Only a TaskAgent may
+create Subagents, and every Subagent is bound to that Task's TaskRun and visible in its panel.
 subagent.progress reports an intermediate finding; subagent.completed reports termination and
 its outcome.
 Stop retrying when a dependency is unavailable. Report the blocker and wait for a meaningful

@@ -1,8 +1,10 @@
 """Delegation state transitions; called inside the Storage transaction."""
 
 import json
+import re
 import time
 import uuid
+from datetime import datetime
 
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.user import User
@@ -24,8 +26,11 @@ def get(db, user_id, agent_id):
         raise ValueError("Subagent not found")
     value = dict(row)
     value.pop("storage_id")
+    for key in ("title", "objective", "success_criteria", "result"):
+        if isinstance(value.get(key), str):
+            value[key] = _visible_text(value[key])
     value["notes"] = [
-        dict(n)
+        {**dict(n), "content": _visible_text(n["content"])}
         for n in db.execute(
             "SELECT note_id,content,created_at FROM subagent_notes "
             "WHERE agent_id=? ORDER BY created_at",
@@ -33,7 +38,11 @@ def get(db, user_id, agent_id):
         )
     ]
     value["turns"] = [
-        dict(turn)
+        {
+            **dict(turn),
+            "content": _visible_text(turn["content"]),
+            "success_criteria": _visible_text(turn["success_criteria"]),
+        }
         for turn in db.execute(
             "SELECT turn_id,content,success_criteria,created_at FROM subagent_turns "
             "WHERE agent_id=? ORDER BY created_at",
@@ -68,13 +77,7 @@ def notify(db, row, type_, payload, key):
     )
 
 
-def finish(db, row, status, result):
-    if row["status"] not in ACTIVE:
-        return
-    db.execute(
-        "UPDATE subagents SET status=?,result=?,finished_at=? WHERE agent_id=?",
-        (status, result[:16000], time.time(), row["agent_id"]),
-    )
+def _stop_runtime(db, row):
     # Tools not yet started observe the same durable cancellation marker as run.cancel.
     snapshot = db.execute(
         "SELECT version,state_json FROM users WHERE user_id=?", (row["storage_id"],)
@@ -100,13 +103,38 @@ def finish(db, row, status, result):
         )
     db.execute("DELETE FROM inbox_events WHERE user_id=?", (row["storage_id"],))
     db.execute("UPDATE scheduling SET completed=requested WHERE user_id=?", (row["storage_id"],))
+
+
+def finish(db, row, status, result):
+    if row["status"] not in ACTIVE:
+        return
+    db.execute(
+        "UPDATE subagents SET status=?,result=?,finished_at=? WHERE agent_id=?",
+        (status, result[:16000], time.time(), row["agent_id"]),
+    )
+    _stop_runtime(db, row)
+    turn = db.execute(
+        "SELECT turn_id FROM subagent_turns WHERE agent_id=? ORDER BY created_at DESC LIMIT 1",
+        (row["agent_id"],),
+    ).fetchone()
+    turn_id = turn["turn_id"] if turn else ""
     notify(
         db,
         row,
         "subagent.completed",
         {"status": status, "result": result[:16000], "turn_id": turn_id},
-        "subagent:" + row["agent_id"] + ":completed" + suffix,
+        "subagent:" + row["agent_id"] + ":completed" + (":" + turn_id if turn_id else ""),
     )
+
+
+def pause(db, row, result="Paused by the owning task"):
+    if row["status"] not in ACTIVE:
+        return
+    db.execute(
+        "UPDATE subagents SET status='paused',result=?,finished_at=NULL WHERE agent_id=?",
+        (result[:16000], row["agent_id"]),
+    )
+    _stop_runtime(db, row)
 
 
 def spawn(db, owner, p):
@@ -117,12 +145,15 @@ def spawn(db, owner, p):
         raise ValueError("request_id, title, objective and success_criteria are required")
     if any(len(p[k]) > 20000 for k in required):
         raise ValueError("Delegation description too long")
+    visible = {key: _visible_text(p[key]) for key in required}
     known = db.execute(
         "SELECT agent_id FROM subagents WHERE user_id=? AND request_id=?", (owner, p["request_id"])
     ).fetchone()
     if known:
         result = get(db, owner, known[0])
-        if any(result[k] != p[k] for k in ("title", "objective", "success_criteria")):
+        if any(
+            result[k] != visible[k] for k in ("title", "objective", "success_criteria")
+        ):
             raise ValueError("Delegation idempotency conflict")
         if result["notify_parent"] != p.get("notify_parent", True):
             raise ValueError("Delegation idempotency conflict")
@@ -160,9 +191,9 @@ def spawn(db, owner, p):
             owner,
             target,
             p["request_id"],
-            p["title"],
-            p["objective"],
-            p["success_criteria"],
+            visible["title"],
+            visible["objective"],
+            visible["success_criteria"],
             p.get("model", ""),
             "waiting" if defer_start else "running",
             max_steps,
@@ -193,9 +224,9 @@ def spawn(db, owner, p):
             "subagent.start",
             {
                 "content": "Delegated objective: "
-                + p["objective"]
+                + visible["objective"]
                 + "\nSuccess criteria: "
-                + p["success_criteria"]
+                + visible["success_criteria"]
             },
             "subagent:" + agent_id + ":start",
         )
@@ -315,29 +346,75 @@ def activity(db, uid, p):
     rows = sorted(rows, key=lambda r: r["seq"])
     entries = []
     traces = {}
+    calls_by_invocation = {}
     for event in rows:
         data = json.loads(event["payload_json"])
         step = data.get("step_id", "")
         if data.get("trace_id"):
             traces[step] = data["trace_id"]
         calls = data.get("tool_calls", [])
+        calls = calls if isinstance(calls, list) else []
+        structured_calls = []
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name") or call.get("tool") or ""
+            arguments = call.get("arguments")
+            description = (
+                arguments.get("description", "")
+                if isinstance(arguments, dict)
+                else ""
+            )
+            structured = {
+                "name": str(name),
+                "description": _visible_text(str(description)),
+                "invocation_id": f"{step}-{index}" if step else "",
+            }
+            structured_calls.append(structured)
+            if step:
+                calls_by_invocation[f"{step}-{index}"] = structured
         content = data.get("content", "")
+        visible_content = (
+            _visible_text(content)[:16000]
+            if event["type"] == "assistant.message" and isinstance(content, str)
+            else ""
+        )
+        if event["type"] == "permission.requested":
+            visible_content = _visible_text(
+                str(data.get("title") or data.get("summary") or "")
+            )[:16000]
         entries.append(
             {
                 "id": event["seq"],
                 "kind": event["type"],
-                "created_at": event["created_at"],
+                "created_at": _unix_seconds(event["created_at"]),
+                "created_at_iso": event["created_at"],
                 "step_id": step,
                 "status": data.get("status", data.get("outcome", "")),
-                "tool": data.get("tool", ""),
-                "tools": [c.get("tool", "") for c in calls if isinstance(c, dict)],
-                "content": content[:2000] if isinstance(content, str) else "",
+                "tool": str(data.get("tool") or ""),
+                "tool_description": "",
+                "tools": [
+                    str(c.get("name") or c.get("tool") or "")
+                    for c in calls
+                    if isinstance(c, dict)
+                ],
+                "tool_calls": structured_calls,
+                "content": visible_content,
+                "content_truncated": (
+                    len(content) > len(visible_content)
+                    if event["type"] == "assistant.message" and isinstance(content, str)
+                    else False
+                ),
                 "trace_id": data.get("trace_id", ""),
                 "invocation_id": data.get("invocation_id", ""),
             }
         )
     for entry in entries:
         entry["trace_id"] = entry["trace_id"] or traces.get(entry["step_id"], "")
+        call = calls_by_invocation.get(entry["invocation_id"])
+        if call:
+            entry["tool"] = call["name"]
+            entry["tool_description"] = call["description"]
     return {
         "agent_id": agent["agent_id"],
         "status": agent["status"],
@@ -345,6 +422,32 @@ def activity(db, uid, p):
         "entries": entries,
         "next_cursor": rows[-1]["seq"] if rows else after or 0,
     }
+
+
+def _unix_seconds(value):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return round(float(value), 6)
+    if isinstance(value, str):
+        try:
+            return round(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp(), 6)
+        except ValueError:
+            return 0
+    return 0
+
+
+def _visible_text(value):
+    """Decode common JSON string escapes outside fenced code blocks."""
+    if not isinstance(value, str) or "\\" not in value:
+        return value
+    parts = re.split(r"(```.*?```)", value, flags=re.DOTALL)
+    for index, part in enumerate(parts):
+        if part.startswith("```"):
+            continue
+        part = part.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+        parts[index] = part.replace("\\t", "\t").replace('\\"', '"')
+    return "".join(parts)
 
 
 def call(db, uid, operation, p):

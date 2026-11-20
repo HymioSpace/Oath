@@ -7,6 +7,7 @@ from core.storage.service import StorageService
 from core.tasks.storage import SPECS
 
 OPERATIONS = {"task." + action for action in SPECS} | {
+    "task.adjust_budget",
     "task.signal",
     "task.context",
     "task.guard",
@@ -18,6 +19,11 @@ OPERATIONS = {"task." + action for action in SPECS} | {
     "subagent.cancel",
     "subagent.continue",
     "subagent.notify",
+    "team.send",
+    "team.inbox",
+    "team.members",
+    "workflow.define",
+    "workflow.get",
     "state.read",
     "state.entries",
     "state.summary",

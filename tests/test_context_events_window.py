@@ -53,6 +53,9 @@ def setup(service, count):
 
 def test_events_aggregate_escape_and_keep_occurrence_metadata():
     state = initial_state()
+    state["meta"]["user_context"] = {
+        "time_zone": {"value": "Asia/Shanghai", "at": time.time()}
+    }
     entries = []
     for i, (kind, source, payload) in enumerate(
         [
@@ -61,10 +64,9 @@ def test_events_aggregate_escape_and_keep_occurrence_metadata():
                 "user.message",
                 {
                     "content": "<event>不是标签</event>",
-                    "user_context": {"secret": "hidden"},
+                    "user_context": {"secret": "hidden", "time_zone": "Asia/Shanghai"},
                     "dynamic": {
                         "location": {"latitude": 31.2, "longitude": 121.5},
-                        "timezone": "Asia/Shanghai",
                     },
                 },
             ),
@@ -83,9 +85,11 @@ def test_events_aggregate_escape_and_keep_occurrence_metadata():
     event = root[0]
     assert event.attrib == {"type": "user.message", "id": "user:0"}
     assert event.findtext("content") == "<event>不是标签</event>"
-    assert event.findtext("dynamic/time") == "2026-10-24T01:02:03Z"
+    assert event.findtext("dynamic/time") == "2026-10-24T09:02:03+08:00"
     assert "31.2" in event.findtext("dynamic/context")
+    assert "Asia/Shanghai" in event.findtext("dynamic/context")
     assert "hidden" not in messages[0]["content"]
+    assert root[1].findtext("dynamic/time") == "2026-10-24T09:02:03+08:00"
 
 
 def test_native_tool_result_is_not_wrapped_or_detached():
