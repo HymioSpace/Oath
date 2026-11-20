@@ -1,6 +1,6 @@
 import unittest
 
-from biz.trace.api import query_trace
+from biz.trace.api import list_traces, query_trace
 from core.protocol.datatype.trace import Span, SpanEvent
 from core.protocol.datatype.user import User
 from core.tool.impl.threaded_tool_system import ThreadedToolSystem
@@ -27,7 +27,7 @@ class RecordingTraces(SyntheticTraces):
 
 
 class TraceSummaryTests(unittest.TestCase):
-    def test_summary_keeps_event_metadata_without_payload_attributes(self):
+    def test_summary_keeps_bounded_event_payload_and_metadata(self):
         trace_id = "a" * 32
         span = Span(
             trace_id=trace_id,
@@ -50,8 +50,161 @@ class TraceSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary["view"], "summary")
         self.assertEqual(summary["spans"][0]["events"][0]["name"], "gen_ai.request")
-        self.assertEqual(summary["spans"][0]["events"][0]["attributes"], {})
+        self.assertTrue(
+            summary["spans"][0]["events"][0]["attributes"]["large_request"].endswith("…")
+        )
+        self.assertTrue(summary["spans"][0]["events"][0]["attributes"]["summary"])
         self.assertTrue(full["spans"][0]["events"][0]["attributes"]["large_request"])
+
+    def test_summary_explains_model_request_and_response(self):
+        trace_id = "1" * 32
+        request = (
+            '{"messages":[{"role":"system","content":"Be concise"},'
+            '{"role":"user","content":"Explain the failing build"}]}'
+        )
+        response = '{"content":"The dependency step timed out","tool_calls":[]}'
+        span = Span(
+            trace_id=trace_id,
+            span_id="2" * 16,
+            name="chat synthetic-model",
+            start_unix_nano=1_000_000_000,
+            end_unix_nano=2_000_000_000,
+            events=(
+                SpanEvent("gen_ai.request", 1_100_000_000, {"body": request}),
+                SpanEvent("gen_ai.response", 1_900_000_000, {"body": response}),
+            ),
+        )
+        result = query_trace(
+            SyntheticTraces((span,)), User("alice"), trace_id, summary=True
+        )
+        request_body = result["spans"][0]["events"][0]["attributes"]["body"]
+        response_body = result["spans"][0]["events"][1]["attributes"]["body"]
+        self.assertIn("Explain the failing build", request_body)
+        self.assertIn('"message_count":2', request_body)
+        self.assertIn("dependency step timed out", response_body)
+
+    def test_trace_list_uses_first_input_as_title_and_keeps_start_time(self):
+        trace_id = "3" * 32
+        span = Span(
+            trace_id=trace_id,
+            span_id="4" * 16,
+            name="chat synthetic-model",
+            start_unix_nano=1_700_000_000_000_000_000,
+            end_unix_nano=1_700_000_001_000_000_000,
+            events=(
+                SpanEvent(
+                    "oath.input.user",
+                    1_700_000_000_100_000_000,
+                    {"body": '{"content":"分析最新基线快照为什么变慢"}'},
+                ),
+            ),
+        )
+        result = list_traces(SyntheticTraces((span,)), User("alice"), limit=30, offset=0)
+        item = result["trace_ids"][0]
+        self.assertEqual(item["title"], "分析最新基线快照为什么变慢")
+        self.assertEqual(item["started_at"], 1_700_000_000.0)
+
+    def test_trace_title_truncates_and_uses_earliest_input_time(self):
+        trace_id = "5" * 32
+        span = Span(
+            trace_id=trace_id,
+            span_id="6" * 16,
+            name="chat synthetic-model",
+            start_unix_nano=1_700_000_010_000_000_000,
+            end_unix_nano=1_700_000_011_000_000_000,
+            events=(
+                SpanEvent(
+                    "oath.input.user",
+                    1_700_000_000_000_000_000,
+                    {"body": '{"content":"' + "分析任务边界" * 20 + '"}'},
+                ),
+            ),
+        )
+        item = list_traces(
+            SyntheticTraces((span,)), User("alice"), limit=30, offset=0
+        )["trace_ids"][0]
+        self.assertTrue(item["title"].endswith("…"))
+        self.assertLessEqual(len(item["title"]), 72)
+        self.assertEqual(item["started_at"], 1_700_000_000.0)
+
+    def test_trace_title_falls_back_to_user_request_prompt(self):
+        trace_id = "7" * 32
+        span = Span(
+            trace_id=trace_id,
+            span_id="8" * 16,
+            name="chat synthetic-model",
+            start_unix_nano=1_700_000_000_000_000_000,
+            end_unix_nano=1_700_000_001_000_000_000,
+            events=(
+                SpanEvent(
+                    "gen_ai.request",
+                    1_700_000_000_100_000_000,
+                    {
+                        "body": (
+                            '{"messages":[{"role":"system","content":"Be concise"},'
+                            '{"role":"user","content":"检查部署后的任务状态"}]}'
+                        )
+                    },
+                ),
+            ),
+        )
+        item = list_traces(
+            SyntheticTraces((span,)), User("alice"), limit=30, offset=0
+        )["trace_ids"][0]
+        self.assertEqual(item["title"], "检查部署后的任务状态")
+
+    def test_trace_title_reads_real_inbound_payload_shape(self):
+        trace_id = "9" * 32
+        span = Span(
+            trace_id=trace_id,
+            span_id="a" * 16,
+            name="invoke_agent",
+            start_unix_nano=1_700_000_000_000_000_000,
+            end_unix_nano=1_700_000_001_000_000_000,
+            events=(
+                SpanEvent(
+                    "oath.input.user",
+                    1_700_000_000_100_000_000,
+                    {
+                        "body": (
+                            '{"kind":"user","source":"user.message",'
+                            '"payload":{"content":"长期追踪 multi-agent 前沿进展"},'
+                            '"telemetry":{}}'
+                        )
+                    },
+                ),
+            ),
+        )
+        item = list_traces(
+            SyntheticTraces((span,)), User("alice"), limit=30, offset=0
+        )["trace_ids"][0]
+        self.assertEqual(item["title"], "长期追踪 multi-agent 前沿进展")
+
+    def test_system_trace_uses_task_event_label_not_raw_payload(self):
+        trace_id = "b" * 32
+        span = Span(
+            trace_id=trace_id,
+            span_id="c" * 16,
+            name="invoke_agent",
+            start_unix_nano=1_700_000_000_000_000_000,
+            end_unix_nano=1_700_000_001_000_000_000,
+            events=(
+                SpanEvent(
+                    "oath.input.system",
+                    1_700_000_000_100_000_000,
+                    {
+                        "body": (
+                            '{"kind":"system","payload":{"event_type":"app.task.completed",'
+                            '"execution":{"events":[{"payload":"large internal state"}]}}}'
+                        )
+                    },
+                ),
+            ),
+        )
+        item = list_traces(
+            SyntheticTraces((span,)), User("alice"), limit=30, offset=0
+        )["trace_ids"][0]
+        self.assertEqual(item["title"], "后台任务已完成")
 
     def test_tool_request_and_result_payloads_are_user_trace_events(self):
         trace_id = "c" * 32
