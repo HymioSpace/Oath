@@ -10,9 +10,10 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
         user_id="u1",
         request_id="activity",
         title="Research",
-        objective="Compare options",
+        objective="Compare options\\n**Required**",
         success_criteria="Report",
     )
+    assert child["objective"] == "Compare options\n**Required**"
     uid = "u1:" + child["agent_id"]
     long_content = "Reading sources\n" + ("source detail " * 400)
     with service.transaction() as db:
@@ -26,6 +27,7 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
             {
                 "step_id": "s1",
                 "content": long_content,
+                "description": "Inspect sources\\nThen compare",
                 "tool_calls": [
                     {
                         "id": "call-1",

@@ -1,6 +1,7 @@
 """Delegation state transitions; called inside the Storage transaction."""
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime
@@ -25,8 +26,11 @@ def get(db, user_id, agent_id):
         raise ValueError("Subagent not found")
     value = dict(row)
     value.pop("storage_id")
+    for key in ("title", "objective", "success_criteria", "result"):
+        if isinstance(value.get(key), str):
+            value[key] = _visible_text(value[key])
     value["notes"] = [
-        dict(n)
+        {**dict(n), "content": _visible_text(n["content"])}
         for n in db.execute(
             "SELECT note_id,content,created_at FROM subagent_notes "
             "WHERE agent_id=? ORDER BY created_at",
@@ -34,7 +38,11 @@ def get(db, user_id, agent_id):
         )
     ]
     value["turns"] = [
-        dict(turn)
+        {
+            **dict(turn),
+            "content": _visible_text(turn["content"]),
+            "success_criteria": _visible_text(turn["success_criteria"]),
+        }
         for turn in db.execute(
             "SELECT turn_id,content,success_criteria,created_at FROM subagent_turns "
             "WHERE agent_id=? ORDER BY created_at",
@@ -137,12 +145,15 @@ def spawn(db, owner, p):
         raise ValueError("request_id, title, objective and success_criteria are required")
     if any(len(p[k]) > 20000 for k in required):
         raise ValueError("Delegation description too long")
+    visible = {key: _visible_text(p[key]) for key in required}
     known = db.execute(
         "SELECT agent_id FROM subagents WHERE user_id=? AND request_id=?", (owner, p["request_id"])
     ).fetchone()
     if known:
         result = get(db, owner, known[0])
-        if any(result[k] != p[k] for k in ("title", "objective", "success_criteria")):
+        if any(
+            result[k] != visible[k] for k in ("title", "objective", "success_criteria")
+        ):
             raise ValueError("Delegation idempotency conflict")
         if result["notify_parent"] != p.get("notify_parent", True):
             raise ValueError("Delegation idempotency conflict")
@@ -180,9 +191,9 @@ def spawn(db, owner, p):
             owner,
             target,
             p["request_id"],
-            p["title"],
-            p["objective"],
-            p["success_criteria"],
+            visible["title"],
+            visible["objective"],
+            visible["success_criteria"],
             p.get("model", ""),
             "waiting" if defer_start else "running",
             max_steps,
@@ -213,9 +224,9 @@ def spawn(db, owner, p):
             "subagent.start",
             {
                 "content": "Delegated objective: "
-                + p["objective"]
+                + visible["objective"]
                 + "\nSuccess criteria: "
-                + p["success_criteria"]
+                + visible["success_criteria"]
             },
             "subagent:" + agent_id + ":start",
         )
@@ -356,7 +367,7 @@ def activity(db, uid, p):
             )
             structured = {
                 "name": str(name),
-                "description": str(description),
+                "description": _visible_text(str(description)),
                 "invocation_id": f"{step}-{index}" if step else "",
             }
             structured_calls.append(structured)
@@ -364,12 +375,14 @@ def activity(db, uid, p):
                 calls_by_invocation[f"{step}-{index}"] = structured
         content = data.get("content", "")
         visible_content = (
-            content[:16000]
+            _visible_text(content)[:16000]
             if event["type"] == "assistant.message" and isinstance(content, str)
             else ""
         )
         if event["type"] == "permission.requested":
-            visible_content = str(data.get("title") or data.get("summary") or "")[:16000]
+            visible_content = _visible_text(
+                str(data.get("title") or data.get("summary") or "")
+            )[:16000]
         entries.append(
             {
                 "id": event["seq"],
@@ -422,6 +435,19 @@ def _unix_seconds(value):
         except ValueError:
             return 0
     return 0
+
+
+def _visible_text(value):
+    """Decode common JSON string escapes outside fenced code blocks."""
+    if not isinstance(value, str) or "\\" not in value:
+        return value
+    parts = re.split(r"(```.*?```)", value, flags=re.DOTALL)
+    for index, part in enumerate(parts):
+        if part.startswith("```"):
+            continue
+        part = part.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+        parts[index] = part.replace("\\t", "\t").replace('\\"', '"')
+    return "".join(parts)
 
 
 def call(db, uid, operation, p):
