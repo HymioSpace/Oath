@@ -14,6 +14,7 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
         success_criteria="Report",
     )
     uid = "u1:" + child["agent_id"]
+    long_content = "Reading sources\n" + ("source detail " * 400)
     with service.transaction() as db:
         outbox.append(
             db, uid, "step.status", {"step_id": "s1", "trace_id": "t1", "status": "running"}
@@ -24,7 +25,7 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
             "assistant.message",
             {
                 "step_id": "s1",
-                "content": "Reading sources",
+                "content": long_content,
                 "tool_calls": [
                     {
                         "id": "call-1",
@@ -51,6 +52,8 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
     assert "private" not in str(result) and "hidden" not in str(result)
     assert result["entries"][1]["tools"] == ["browser"]
     assert result["entries"][1]["tool_calls"][0]["description"] == "Inspect the source page"
+    assert result["entries"][1]["content"] == long_content
+    assert result["entries"][1]["content_truncated"] is False
     assert result["entries"][2]["tool"] == "browser"
     assert result["entries"][2]["tool_description"] == "Inspect the source page"
     assert (

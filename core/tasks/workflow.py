@@ -56,10 +56,7 @@ def define(db, uid, p, request_id):
             {
                 "request_id": f"wf:{run['run_id']}:{node['id']}",
                 "title": node["title"],
-                "objective": node["objective"]
-                + "\nDependencies: "
-                + json.dumps(node["depends_on"], ensure_ascii=False)
-                + "\nReturn a bounded result for this workflow node.",
+                "objective": node["objective"],
                 "success_criteria": node["success_criteria"],
                 "max_steps": max(1, min(100, int(budget["max_steps"]))),
                 "timeout_seconds": max(10, min(3600, int(budget["max_active_seconds"] or 900))),

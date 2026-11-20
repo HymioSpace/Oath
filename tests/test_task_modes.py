@@ -283,6 +283,19 @@ def test_budget_pause_resumes_the_same_running_workflow_node(service):
     )
     children = {node["id"]: node["agent_id"] for node in defined["nodes"]}
     with service.transaction() as db:
+        objectives = {
+            row["agent_id"]: row["objective"]
+            for row in db.execute(
+                "SELECT agent_id,objective FROM subagents WHERE agent_id IN (?,?,?)",
+                tuple(children.values()),
+            )
+        }
+    assert objectives == {
+        children["a"]: "完成 A",
+        children["b"]: "完成 B",
+        children["c"]: "使用 A 和 B 完成复核",
+    }
+    with service.transaction() as db:
         for node_id in ("a", "b"):
             child = db.execute(
                 "SELECT * FROM subagents WHERE agent_id=?", (children[node_id],)

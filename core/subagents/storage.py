@@ -363,12 +363,12 @@ def activity(db, uid, p):
                 calls_by_invocation[f"{step}-{index}"] = structured
         content = data.get("content", "")
         visible_content = (
-            content[:1200]
+            content[:16000]
             if event["type"] == "assistant.message" and isinstance(content, str)
             else ""
         )
         if event["type"] == "permission.requested":
-            visible_content = str(data.get("title") or data.get("summary") or "")[:1200]
+            visible_content = str(data.get("title") or data.get("summary") or "")[:16000]
         entries.append(
             {
                 "id": event["seq"],
@@ -385,6 +385,11 @@ def activity(db, uid, p):
                 ],
                 "tool_calls": structured_calls,
                 "content": visible_content,
+                "content_truncated": (
+                    len(content) > len(visible_content)
+                    if event["type"] == "assistant.message" and isinstance(content, str)
+                    else False
+                ),
                 "trace_id": data.get("trace_id", ""),
                 "invocation_id": data.get("invocation_id", ""),
             }
