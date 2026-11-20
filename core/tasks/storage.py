@@ -128,6 +128,41 @@ def runview(db, row):
     }
 
 
+def _has_recent_agent_activity(db, run, now, timeout):
+    if db.execute(
+        (
+            "SELECT 1 FROM tool_invocations WHERE user_id=? AND status "
+            "IN ('running','queued','waiting_approval') LIMIT 1"
+        ),
+        (run["context_id"],),
+    ).fetchone():
+        return True
+    latest = db.execute(
+        "SELECT created_at FROM conversation_events WHERE user_id=? ORDER BY seq DESC LIMIT 1",
+        (run["context_id"],),
+    ).fetchone()
+    latest_at = 0.0
+    if latest and latest[0]:
+        try:
+            latest_at = datetime.fromisoformat(latest[0].replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            latest_at = 0.0
+    if now - max(run["last_progress_at"] or 0, run["started_at"] or 0, latest_at) <= timeout:
+        return True
+    queue = db.execute(
+        "SELECT requested,claimed,ready_at FROM scheduling WHERE user_id=?",
+        (run["context_id"],),
+    ).fetchone()
+    if queue and queue["requested"] > queue["claimed"] and queue["ready_at"] > now - 90:
+        return True
+    return bool(
+        db.execute(
+            "SELECT 1 FROM leases WHERE user_id=? AND lane='brain' AND expires>? LIMIT 1",
+            (run["context_id"], now),
+        ).fetchone()
+    )
+
+
 def event(db, task, kind, payload, run=None, wake=False):
     task = owned(db, task["user_id"], task["task_id"])
     if run:
@@ -1102,9 +1137,9 @@ def tick(db):
                     (now, now, r["run_id"]),
                 )
                 event(db, t, "run_started", {"resumed": bool(r["agent_id"])}, r)
-        elif r["agent_id"] and now - (r["last_progress_at"] or r["started_at"] or now) > value[
-            "policy"
-        ].get("progress_timeout_seconds", 300):
+        elif r["agent_id"] and not _has_recent_agent_activity(
+            db, r, now, value["policy"].get("progress_timeout_seconds", 300)
+        ):
             outstanding = db.execute(
                 (
                     "SELECT 1 FROM tool_invocations WHERE user_id=? AND status "

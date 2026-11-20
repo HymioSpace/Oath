@@ -3,6 +3,7 @@
 import json
 import time
 import uuid
+from datetime import datetime
 
 from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.user import User
@@ -373,7 +374,8 @@ def activity(db, uid, p):
             {
                 "id": event["seq"],
                 "kind": event["type"],
-                "created_at": event["created_at"],
+                "created_at": _unix_seconds(event["created_at"]),
+                "created_at_iso": event["created_at"],
                 "step_id": step,
                 "status": data.get("status", data.get("outcome", "")),
                 "tool": str(data.get("tool") or ""),
@@ -407,6 +409,19 @@ def activity(db, uid, p):
         "entries": entries,
         "next_cursor": rows[-1]["seq"] if rows else after or 0,
     }
+
+
+def _unix_seconds(value):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return round(float(value), 6)
+    if isinstance(value, str):
+        try:
+            return round(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp(), 6)
+        except ValueError:
+            return 0
+    return 0
 
 
 def call(db, uid, operation, p):

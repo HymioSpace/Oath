@@ -17,7 +17,8 @@ existing task identities.
 After durable creation succeeds, tell the user what was scheduled and that progress
 is available in the Task panel. Do not wait or poll for the background work.
 Choose the Agent execution mode from the work itself:
-- parallel_subagents: the TaskAgent delegates independent bounded work, then integrates results.
+- parallel_subagents: use only when at least two independently deliverable workstreams are visible.
+  The TaskAgent delegates those bounded parts, then integrates the results.
 - agent_team: the TaskAgent leads a small team whose members may communicate peer-to-peer
   through team_send/team_inbox while solving interdependent work.
 - dynamic_workflow: the TaskAgent must first define a dependency DAG with workflow_define;
@@ -52,6 +53,10 @@ Every assignment must state one concrete deliverable, the in-scope work, require
 explicit non-goals or excluded behavior, acceptance checks and when to stop and report a blocker.
 Never give a leaf a vague area such as "research the topic" or duplicate the same responsibility.
 Keep final decisions, cross-part synthesis and task completion with the TaskAgent.
+In parallel_subagents mode, before starting the third broad research or implementation step,
+either spawn the independently deliverable leaves with subagent_spawn or keep the work
+single-threaded.
+Do not describe the run as parallel unless at least two child Agents were actually created.
 In agent_team mode, use team_members/team_send/team_inbox for durable teammate communication.
 Give each teammate a distinct role and owned boundary; peer discussion cannot transfer final
 accountability away from the TaskAgent.

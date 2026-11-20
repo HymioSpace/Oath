@@ -612,6 +612,7 @@ def test_no_progress_is_reported_once_without_model_polling(service):
             "UPDATE task_runs SET started_at=?,last_progress_at=?",
             (time.time() - 600, time.time() - 600),
         )
+        db.execute("UPDATE scheduling SET ready_at=?", (time.time() - 600,))
     service.call("task.tick")
     service.call("task.tick")
     with service.transaction() as db:
@@ -619,6 +620,62 @@ def test_no_progress_is_reported_once_without_model_polling(service):
         assert (
             db.execute("SELECT count(*) FROM task_events WHERE type='blocked'").fetchone()[0] == 1
         )
+
+
+def test_recent_model_activity_prevents_false_no_progress_pause(service):
+    import time
+    from datetime import UTC, datetime
+
+    create(service, "agent")
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs").fetchone()
+        seq = db.execute(
+            "SELECT COALESCE(MAX(seq),0)+1 FROM conversation_events WHERE user_id=?",
+            (run["context_id"],),
+        ).fetchone()[0]
+        db.execute(
+            "INSERT INTO conversation_events VALUES(?,?,?,?,?,?)",
+            (
+                run["context_id"],
+                seq,
+                "assistant.message",
+                "recent-step",
+                "{}",
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+        db.execute(
+            "UPDATE task_runs SET started_at=?,last_progress_at=?",
+            (time.time() - 600, time.time() - 600),
+        )
+    service.call("task.tick")
+    with service.transaction() as db:
+        assert db.execute("SELECT status FROM task_runs").fetchone()[0] == "running"
+        assert (
+            db.execute("SELECT count(*) FROM task_events WHERE type='blocked'").fetchone()[0]
+            == 0
+        )
+
+
+def test_ready_unclaimed_model_step_prevents_false_no_progress_pause(service):
+    import time
+
+    create(service, "agent")
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs").fetchone()
+        db.execute(
+            "UPDATE task_runs SET started_at=?,last_progress_at=?",
+            (time.time() - 600, time.time() - 600),
+        )
+        db.execute(
+            "UPDATE scheduling SET requested=completed+1,ready_at=? WHERE user_id=?",
+            (time.time(), run["context_id"]),
+        )
+    service.call("task.tick")
+    with service.transaction() as db:
+        assert db.execute("SELECT status FROM task_runs").fetchone()[0] == "running"
 
 
 def test_pagination_cursor_is_bound_to_owner_and_query(service):

@@ -49,6 +49,8 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
     result = service.call("subagent.activity", user_id="u1", agent_id=child["agent_id"])
     assert len(result["entries"]) == 3
     assert result["entries"][1]["trace_id"] == "t1"
+    assert result["entries"][1]["created_at"] > 0
+    assert result["entries"][1]["created_at_iso"].endswith("Z")
     assert "private" not in str(result) and "hidden" not in str(result)
     assert result["entries"][1]["tools"] == ["browser"]
     assert result["entries"][1]["tool_calls"][0]["description"] == "Inspect the source page"
