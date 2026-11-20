@@ -7,6 +7,7 @@ from core.storage.service import StorageService
 from core.tasks.storage import SPECS
 
 OPERATIONS = {"task." + action for action in SPECS} | {
+    "task.adjust_budget",
     "task.signal",
     "task.context",
     "task.guard",

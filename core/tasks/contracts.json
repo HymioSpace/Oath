@@ -32,7 +32,8 @@
       "criteria": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 4000
+        "maxLength": 4000,
+        "description": "Observable checks that prove the coherent outcome is complete; avoid vague subjective criteria."
       }
     },
     "required": [
@@ -449,7 +450,8 @@
       "objective": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 8000
+        "maxLength": 8000,
+        "description": "One coherent outcome. State required inputs, in-scope work, dependencies, exclusions or non-goals, and the stop/blocker condition. Do not bundle unrelated requests."
       },
       "completion": {
         "type": "string",
@@ -516,7 +518,8 @@
       "objective": {
         "type": "string",
         "minLength": 1,
-        "maxLength": 8000
+        "maxLength": 8000,
+        "description": "One coherent outcome. State required inputs, in-scope work, dependencies, exclusions or non-goals, and the stop/blocker condition. Do not bundle unrelated requests."
       },
       "completion": {
         "type": "string",
@@ -740,6 +743,36 @@
       "apply_to",
       "reason",
       "patch"
+    ],
+    "additionalProperties": false
+  },
+  "AdjustBudget": {
+    "type": "object",
+    "properties": {
+      "task_id": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_-]+$"
+      },
+      "expected_revision": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "reason": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1000
+      },
+      "run_budget": {
+        "$ref": "#/$defs/Budget"
+      }
+    },
+    "required": [
+      "task_id",
+      "expected_revision",
+      "reason",
+      "run_budget"
     ],
     "additionalProperties": false
   },

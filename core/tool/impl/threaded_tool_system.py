@@ -36,7 +36,7 @@ from core.protocol.datatype.tool import (
     ToolResult,
     is_valid_invocation_id,
 )
-from core.protocol.datatype.trace import Span, SpanKind, SpanStatus
+from core.protocol.datatype.trace import Span, SpanEvent, SpanKind, SpanStatus
 from core.protocol.datatype.user import User
 from core.protocol.error import ToolExecutionError, ToolRequestError
 from core.protocol.interface import AgentEventSink, EventQueue, PermissionPolicy, ToolSystem
@@ -46,12 +46,15 @@ from core.tool.lifecycle import terminal as _terminal
 from core.tool.permission import PermissionManager
 from core.tool.registry import ToolRegistry
 from core.trace.attributes import (
+    BODY,
     OATH_CHANNEL,
     OATH_STEP_ID,
     OATH_TOOL_DURATION_MS,
     OATH_TOOL_NAME,
     OATH_TOOL_OUTCOME,
     OATH_TOOL_QUEUE_MS,
+    TOOL_REQUEST_EVENT,
+    TOOL_RESPONSE_EVENT,
 )
 from core.utils.deadlines import Deadlines
 from core.utils.encoding import JsonObject, canonical_json, utc_now_iso
@@ -633,6 +636,9 @@ class ThreadedToolSystem(ToolSystem):
         out: list[Inbound] = []
         observed: dict[str, Any] = {}
         started_ns = time.time_ns()
+        trace_arguments: JsonObject = {}
+        trace_content: object = None
+        trace_error: str | None = None
         try:
 
             def start(state: State) -> State | None:
@@ -661,6 +667,8 @@ class ThreadedToolSystem(ToolSystem):
                     channel=step.get("channel", "unknown"),
                     queue_ms=_elapsed_ms(call.get("submitted_dt")),
                 )
+                nonlocal trace_arguments
+                trace_arguments = copy.deepcopy(call.get("arguments") or {})
                 return cast(State, call)
 
             call = self.store.transact(user, "tool.started", start)
@@ -755,6 +763,8 @@ class ThreadedToolSystem(ToolSystem):
                         )
                     else:
                         outcome = "succeeded"
+                        nonlocal trace_content
+                        trace_content = content
                         self._collect(
                             out, state, current, "succeeded", content=content, detail=detail
                         )
@@ -767,6 +777,7 @@ class ThreadedToolSystem(ToolSystem):
                 error_kind = "tool_error" if isinstance(exc, ToolExecutionError) else "unexpected"
 
                 outcome = "failed"
+                trace_error = error
 
                 def failed(state: State, error: str = error, kind: str = error_kind) -> None:
                     self._collect(
@@ -788,6 +799,9 @@ class ThreadedToolSystem(ToolSystem):
                     outcome,
                     started_ns,
                     observed,
+                    trace_arguments,
+                    trace_content,
+                    trace_error,
                 )
                 TOOL_DURATION.labels(call["tool"], outcome).observe(
                     max(0, (time.time_ns() - started_ns) / 1_000_000_000)
@@ -808,11 +822,20 @@ class ThreadedToolSystem(ToolSystem):
         outcome: str,
         started_ns: int,
         observed: dict[str, Any],
+        arguments: JsonObject,
+        content: object,
+        error: str | None,
     ) -> None:
         trace_id = observed.get("trace_id")
         if not isinstance(trace_id, str) or len(trace_id) != 32:
             return
         step_id = str(observed.get("step_id", ""))
+        ended_ns = time.time_ns()
+        response = (
+            {"content": content}
+            if outcome == "succeeded"
+            else {"outcome": outcome, "error": error or outcome}
+        )
         try:
             self._traces.append(
                 user,
@@ -823,16 +846,28 @@ class ThreadedToolSystem(ToolSystem):
                     name=f"execute_tool {tool}",
                     kind=SpanKind.INTERNAL,
                     start_unix_nano=started_ns,
-                    end_unix_nano=time.time_ns(),
+                    end_unix_nano=ended_ns,
                     status=SpanStatus.OK if outcome == "succeeded" else SpanStatus.ERROR,
                     attributes={
                         OATH_STEP_ID: step_id,
                         OATH_CHANNEL: observed.get("channel", "unknown"),
                         OATH_TOOL_NAME: tool,
                         OATH_TOOL_OUTCOME: outcome,
-                        OATH_TOOL_DURATION_MS: round((time.time_ns() - started_ns) / 1_000_000, 3),
+                        OATH_TOOL_DURATION_MS: round((ended_ns - started_ns) / 1_000_000, 3),
                         OATH_TOOL_QUEUE_MS: observed.get("queue_ms"),
                     },
+                    events=(
+                        SpanEvent(
+                            TOOL_REQUEST_EVENT,
+                            started_ns,
+                            {BODY: canonical_json(arguments)},
+                        ),
+                        SpanEvent(
+                            TOOL_RESPONSE_EVENT,
+                            ended_ns,
+                            {BODY: canonical_json(response)},
+                        ),
+                    ),
                 ),
             )
         except Exception:

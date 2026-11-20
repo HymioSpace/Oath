@@ -47,6 +47,8 @@ OATH_TOOL_NAME: Final = "oath.tool.name"
 OATH_TOOL_OUTCOME: Final = "oath.tool.outcome"
 OATH_TOOL_DURATION_MS: Final = "oath.tool.duration_ms"
 OATH_TOOL_QUEUE_MS: Final = "oath.tool.queue_ms"
+TOOL_REQUEST_EVENT: Final = "oath.tool.request"
+TOOL_RESPONSE_EVENT: Final = "oath.tool.response"
 
 # -- 事件 ---------------------------------------------------------------------
 
@@ -109,6 +111,8 @@ __all__ = [
     "OATH_TOOL_NAME",
     "OATH_TOOL_OUTCOME",
     "OATH_TOOL_QUEUE_MS",
+    "TOOL_REQUEST_EVENT",
+    "TOOL_RESPONSE_EVENT",
     "REQUEST_EVENT",
     "RESPONSE_EVENT",
     "STAGE_COMPLETED",

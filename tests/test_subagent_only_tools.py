@@ -1,7 +1,8 @@
 from core.protocol.datatype import ToolDefinition, ToolResult
 from core.protocol.interface import Tool
-from core.tasks.collaboration_tools import tools as collaboration_tools
 from core.subagents.tools import SubagentTool
+from core.tasks.collaboration_tools import tools as collaboration_tools
+from core.tasks.tools import TaskTool
 from core.tool.registry import ToolRegistry
 
 
@@ -46,3 +47,15 @@ def test_team_and_workflow_tools_are_delegated_only():
         "workflow_status",
     }
     assert all(tool.subagent_only and tool.allow_subagent for tool in values)
+
+
+def test_budget_adjustment_is_available_to_the_interaction_agent():
+    tool = TaskTool(None, "adjust_budget")
+    registry = ToolRegistry(default_timeout_seconds=30)
+    registry.register(tool)
+
+    assert not tool.subagent_only
+    assert not tool.allow_subagent
+    assert [item.name for item in registry.definitions(channel="ios")] == [
+        "task_adjust_budget"
+    ]

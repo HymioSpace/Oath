@@ -28,6 +28,7 @@ SPECS = {
     "pause": "Control",
     "resume": "Control",
     "cancel": "Control",
+    "adjust_budget": "AdjustBudget",
     "retry": "Retry",
     "report": "Report",
 }
@@ -313,7 +314,62 @@ def mutate(db, uid, action, p, request):
     if task["revision"] != p["expected_revision"]:
         error("REVISION_CONFLICT", "Read the current task before changing it", task["revision"])
     run = current(db, task["task_id"])
-    if action == "update":
+    if action == "adjust_budget":
+        if task["lifecycle"] != "active":
+            error("INVALID_STATE", "Task must be active to adjust its run budget")
+        if not run or run["status"] != "paused":
+            error("INVALID_STATE", "Only a paused run can receive a budget adjustment")
+        current_error = json.loads(run["error_json"]) if run["error_json"] else {}
+        if current_error.get("code") != "BUDGET_EXHAUSTED":
+            error("INVALID_STATE", "The current run did not stop for budget")
+        proposed = p.get("run_budget")
+        required = {"max_steps", "max_tokens", "max_active_seconds", "max_cost_microusd"}
+        if not isinstance(proposed, dict) or set(proposed) != required:
+            error("INVALID_ARGUMENTS", "run_budget fields are incomplete")
+        for key in ("max_steps", "max_tokens", "max_active_seconds"):
+            if type(proposed[key]) is not int or proposed[key] < 1:
+                error("INVALID_ARGUMENTS", f"{key} must be a positive integer")
+        if proposed["max_cost_microusd"] is not None:
+            error("INVALID_ARGUMENTS", "Monetary caps require a configured pricing adapter")
+        usage = json.loads(run["usage_json"])
+        for key in ("max_steps", "max_tokens", "max_active_seconds"):
+            used_key = "steps" if key == "max_steps" else key.removeprefix("max_")
+            used = usage.get(used_key, 0)
+            if proposed[key] <= used:
+                error(
+                    "INVALID_ARGUMENTS",
+                    f"{key} must exceed the current usage ({used})",
+                )
+        value = spec(task)
+        value["policy"]["run_budget"] = proposed
+        check_spec(value)
+        snapshot = json.loads(run["spec_snapshot_json"])
+        snapshot["policy"]["run_budget"] = proposed
+        db.execute(
+            "UPDATE tasks SET policy_json=?,revision=revision+1,needs_attention=0,"
+            "updated_at=? WHERE task_id=?",
+            (encode(value["policy"]), now, task["task_id"]),
+        )
+        db.execute(
+            "UPDATE task_runs SET task_revision=task_revision+1,spec_snapshot_json=?,"
+            "status='queued',resume_status=NULL,error_json=NULL,control_epoch=control_epoch+1,"
+            "version=version+1,last_progress_at=? WHERE run_id=?",
+            (encode(snapshot), now, run["run_id"]),
+        )
+        task = owned(db, uid, task["task_id"])
+        event(
+            db,
+            task,
+            "budget_adjusted",
+            {
+                "run_id": run["run_id"],
+                "run_budget": proposed,
+                "reason": p["reason"],
+            },
+            run,
+            wake=True,
+        )
+    elif action == "update":
         if task["lifecycle"] == "closed":
             error("INVALID_STATE", "Task is closed")
         value = {**spec(task), **p["patch"]}

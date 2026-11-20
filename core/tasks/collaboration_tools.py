@@ -59,8 +59,10 @@ class CollaborationTool(Tool):
         if self.action == "workflow_define":
             return ToolDefinition(
                 "workflow_define",
-                "Define the dynamic workflow DAG once. Nodes are bound Subagents; a node starts "
-                "only after all dependencies succeed. The TaskAgent is woken after the join.",
+                "Define the dynamic workflow DAG once. Nodes are bound Subagents and must each "
+                "state one concrete deliverable, in-scope work, exclusions/non-goals and "
+                "verifiable success criteria in objective/success_criteria. A node starts only "
+                "after all dependencies succeed. The TaskAgent is woken after the join.",
                 {
                     "type": "object",
                     "properties": {
@@ -80,11 +82,19 @@ class CollaborationTool(Tool):
                                         "type": "string",
                                         "minLength": 1,
                                         "maxLength": 8000,
+                                        "description": (
+                                            "One bounded deliverable with source inputs, "
+                                            "in-scope work, exclusions and non-goals."
+                                        ),
                                     },
                                     "success_criteria": {
                                         "type": "string",
                                         "minLength": 1,
                                         "maxLength": 8000,
+                                        "description": (
+                                            "Observable checks that prove this node's "
+                                            "bounded output is complete."
+                                        ),
                                     },
                                     "depends_on": {
                                         "type": "array",

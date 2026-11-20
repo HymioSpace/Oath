@@ -8,7 +8,9 @@ from core.tasks.storage import SPECS
 
 DESCRIPTIONS = {
     "create": (
-        "Create accepted background work with goal, context, "
+        "Create one coherent background outcome with explicit inputs, in-scope work, "
+        "dependencies, exclusions/non-goals and a stop/blocker condition. Do not bundle "
+        "unrelated requests into one Task. Supply goal, context, "
         "trigger, executor and budget. Reuse intent_key; fixed "
         "reminders use program notify and must not allocate a TaskAgent or subagent. "
         "Agent work defaults to parallel_subagents. Use agent_team only when teammates "
@@ -46,6 +48,12 @@ DESCRIPTIONS = {
     "cancel": (
         "Close the task and stop future actions and owned subtasks. "
         "Cancellation cannot undo prior external actions."
+    ),
+    "adjust_budget": (
+        "Increase a paused run's step, token or active-time budget only after "
+        "the task stopped for BUDGET_EXHAUSTED. The new limits must exceed current "
+        "usage and the same Run continues from its checkpoint. Ask the user before "
+        "spending more unless the current request already authorizes it."
     ),
     "retry": (
         "Retry a failed execution only after checking known and "

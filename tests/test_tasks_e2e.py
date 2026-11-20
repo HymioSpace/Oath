@@ -544,6 +544,64 @@ def test_cancelling_budget_paused_task_settles_its_task_agent(service):
     assert agent["status"] == "cancelled"
 
 
+def test_budget_can_be_adjusted_to_resume_the_same_run(service):
+    made = create(service, "agent")
+    task_id = made["task"]["task_id"]
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        db.execute(
+            "UPDATE task_runs SET status='paused',resume_status='running',error_json=?,"
+            "usage_json=? WHERE run_id=?",
+            (
+                '{"code":"BUDGET_EXHAUSTED"}',
+                '{"steps":30,"tokens":20000,"active_seconds":900,"cost_microusd":0}',
+                run["run_id"],
+            ),
+        )
+        db.execute(
+            "UPDATE subagents SET status='paused',result='Paused: run budget exhausted' "
+            "WHERE agent_id=?",
+            (run["agent_id"],),
+        )
+    adjusted = service.call(
+        "task.adjust_budget",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User increased the run budget",
+        request_id="budget-adjust",
+        run_budget={
+            "max_steps": 60,
+            "max_tokens": 50000,
+            "max_active_seconds": 1800,
+            "max_cost_microusd": None,
+        },
+    )
+    assert adjusted["run"]["run_id"] == run["run_id"]
+    assert adjusted["run"]["status"] == "queued"
+    assert adjusted["run"]["error_code"] is None
+    replay = service.call(
+        "task.adjust_budget",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User increased the run budget",
+        request_id="budget-adjust",
+        run_budget={
+            "max_steps": 60,
+            "max_tokens": 50000,
+            "max_active_seconds": 1800,
+            "max_cost_microusd": None,
+        },
+    )
+    assert replay["replayed"] is True
+    service.call("task.tick")
+    resumed = service.call("task.get", user_id="u1", task_id=task_id, view="detail")
+    assert resumed["run"]["status"] == "running"
+    assert resumed["run"]["run_id"] == run["run_id"]
+
+
 def test_no_progress_is_reported_once_without_model_polling(service):
     import time
 
