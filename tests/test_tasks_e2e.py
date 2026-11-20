@@ -511,6 +511,39 @@ def test_task_model_step_budget_cannot_reset_through_continuation(service):
     assert detail["execution"]["task_agent"]["status"] == "paused"
 
 
+def test_cancelling_budget_paused_task_settles_its_task_agent(service):
+    made = create(service, "agent")
+    task_id = made["task"]["task_id"]
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        db.execute(
+            "UPDATE task_runs SET status='paused',resume_status='running',"
+            "error_json=? WHERE run_id=?",
+            ('{"code":"BUDGET_EXHAUSTED"}', run["run_id"]),
+        )
+        db.execute(
+            "UPDATE subagents SET status='paused',result='Paused: owning task run is paused' "
+            "WHERE agent_id=?",
+            (run["agent_id"],),
+        )
+    service.call(
+        "task.cancel",
+        user_id="u1",
+        task_id=task_id,
+        expected_revision=1,
+        reason="User cancelled",
+        request_id="cancel-paused",
+    )
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs WHERE task_id=?", (task_id,)).fetchone()
+        agent = db.execute(
+            "SELECT status FROM subagents WHERE agent_id=?", (run["agent_id"],)
+        ).fetchone()
+    assert run["status"] == "cancelled"
+    assert agent["status"] == "cancelled"
+
+
 def test_no_progress_is_reported_once_without_model_polling(service):
     import time
 

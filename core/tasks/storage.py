@@ -459,6 +459,12 @@ def mutate(db, uid, action, p, request):
                     ).fetchone()
                     if child["status"] == "running" and action != "resume":
                         finish(db, child, "failed" if action == "pause" else "cancelled", action)
+                    elif child["status"] == "paused" and action == "cancel":
+                        db.execute(
+                            "UPDATE subagents SET status='cancelled',result=?,finished_at=? "
+                            "WHERE agent_id=?",
+                            ("Owning task cancelled", now, child["agent_id"]),
+                        )
                 if action != "resume":
                     db.execute(
                         (
@@ -714,6 +720,19 @@ def tick(db):
         "WHERE status='running' AND EXISTS("
         "SELECT 1 FROM task_delegations d JOIN task_runs r USING(run_id) "
         "WHERE d.agent_id=subagents.agent_id AND r.status='paused')"
+    )
+    db.execute(
+        "UPDATE subagents SET status='cancelled',result='Owning task run cancelled',"
+        "finished_at=COALESCE(finished_at,?) WHERE status IN ('running','paused') AND EXISTS("
+        "SELECT 1 FROM task_runs r WHERE r.agent_id=subagents.agent_id AND r.status='cancelled')",
+        (now,),
+    )
+    db.execute(
+        "UPDATE subagents SET status='cancelled',result='Owning task run cancelled',"
+        "finished_at=COALESCE(finished_at,?) WHERE status IN ('running','paused') AND EXISTS("
+        "SELECT 1 FROM task_delegations d JOIN task_runs r USING(run_id) "
+        "WHERE d.agent_id=subagents.agent_id AND r.status='cancelled')",
+        (now,),
     )
     # Older v4 executions could finish their TaskRun while leaving its dedicated
     # agent active. Settle those owners using the persisted result, without
