@@ -161,7 +161,7 @@ def test_hymio_reads_controls_and_delivers_oath_tasks(service, tmp_path):
         assert completed["runs"][0]["notification_status"] == "pending"
         assert completed["runs"][0]["progress"] == ""
         assert "phase" not in completed["runs"][0]
-        assert "needs_attention" not in completed
+        assert completed["needs_attention"] is False
         asyncio.run(bridge.deliver(uid))
         notified = client.post(
             "/tasks", headers=headers, json={"action": "get", "task_id": graph_task["task_id"]}

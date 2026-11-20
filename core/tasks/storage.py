@@ -13,6 +13,7 @@ from core.protocol.datatype.inbound import Inbound
 from core.protocol.datatype.user import User
 from core.storage import outbox
 from core.storage.database import encode
+from core.tasks.modes import execution_mode, normalize_executor
 from core.tasks.pagination import page
 from core.tasks.profiles import allowed
 from core.tasks.schedule import next_due
@@ -82,7 +83,17 @@ def iso(value):
 
 def view(row):
     return {
-        **{k: row[k] for k in ("task_id", "revision", "lifecycle", "close_reason", "title")},
+        **{
+            k: row[k]
+            for k in (
+                "task_id",
+                "revision",
+                "lifecycle",
+                "close_reason",
+                "title",
+            )
+        },
+        "created_at": iso(row["created_at"]),
         "needs_attention": bool(row["needs_attention"]),
         "next_due_at": iso(row["next_due_at"]),
         "updated_at": iso(row["updated_at"]),
@@ -183,6 +194,7 @@ def event(db, task, kind, payload, run=None, wake=False):
 
 
 def check_spec(value):
+    value["executor"] = normalize_executor(value["executor"])
     validate("Spec", value)
     trigger = value["trigger"]
     if trigger.get("timezone"):
@@ -199,6 +211,7 @@ def check_spec(value):
         error("INVALID_ARGUMENTS", "Unknown tool profile")
     if value["executor"]["kind"] == "agent" and value["executor"]["model_profile"] != "default":
         error("INVALID_ARGUMENTS", "Only default model profile is configured")
+    execution_mode(value["executor"])
     if (
         value["policy"]["run_budget"]["max_cost_microusd"] is not None
         or value["policy"]["task_budget"]["limits"]["max_cost_microusd"] is not None
@@ -250,6 +263,7 @@ def mutate(db, uid, action, p, request):
     now = time.time()
     if action == "create":
         value = {k: p[k] for k in FIELDS}
+        value["executor"] = normalize_executor(value["executor"])
         check_spec(value)
         known = db.execute(
             "SELECT * FROM tasks WHERE user_id=? AND intent_key=?", (uid, p["intent_key"])
@@ -303,6 +317,7 @@ def mutate(db, uid, action, p, request):
         if task["lifecycle"] == "closed":
             error("INVALID_STATE", "Task is closed")
         value = {**spec(task), **p["patch"]}
+        value["executor"] = normalize_executor(value["executor"])
         check_spec(value)
         if (
             p["apply_to"] == "current_and_future"
@@ -541,6 +556,7 @@ def call(db, uid, operation, params):
             "parent_agent_id": actor.parent_agent_id,
             "run_id": actor.run_id,
             "task_id": actor.task_id,
+            "execution_mode": execution_mode(json.loads(run["spec_snapshot_json"])["executor"]),
         }
     if action == "tick":
         return tick(db)
@@ -686,6 +702,19 @@ def call(db, uid, operation, params):
 def tick(db):
     now = time.time()
     count = 0
+    # A paused owning execution must not leave its TaskAgent or bound children
+    # advertising themselves as running. Resume restores these agent rows.
+    db.execute(
+        "UPDATE subagents SET status='paused',result='Paused: owning task run is paused' "
+        "WHERE status='running' AND EXISTS("
+        "SELECT 1 FROM task_runs r WHERE r.agent_id=subagents.agent_id AND r.status='paused')"
+    )
+    db.execute(
+        "UPDATE subagents SET status='paused',result='Paused: owning task run is paused' "
+        "WHERE status='running' AND EXISTS("
+        "SELECT 1 FROM task_delegations d JOIN task_runs r USING(run_id) "
+        "WHERE d.agent_id=subagents.agent_id AND r.status='paused')"
+    )
     # Older v4 executions could finish their TaskRun while leaving its dedicated
     # agent active. Settle those owners using the persisted result, without
     # replaying the task or its notification.
@@ -778,6 +807,11 @@ def tick(db):
             continue
         if r["status"] == "waiting":
             wait = json.loads(r["wait_json"])["condition"]
+            if wait["kind"] == "workflow":
+                from core.tasks.workflow import advance
+
+                advance(db, t, r)
+                continue
             ready = False
             if wait["kind"] == "delivery":
                 d = db.execute(
@@ -839,6 +873,38 @@ def tick(db):
                 event(db, t, "wait_satisfied", {"kind": wait["kind"]}, r)
             continue
         if r["status"] == "queued":
+            if execution_mode(value["executor"]) == "dynamic_workflow":
+                from core.tasks.workflow import advance, has_nodes
+
+                if has_nodes(db, r["run_id"]):
+                    counts = {
+                        row["status"]: row["n"]
+                        for row in db.execute(
+                            "SELECT status,COUNT(*) AS n FROM task_workflow_nodes "
+                            "WHERE run_id=? GROUP BY status",
+                            (r["run_id"],),
+                        )
+                    }
+                    if counts.get("succeeded") != sum(counts.values()):
+                        wait = {
+                            "wait_id": uuid.uuid4().hex,
+                            "condition": {
+                                "kind": "workflow",
+                                "reason": "Executing workflow dependencies",
+                            },
+                            "signal_floor": r["signal_floor"],
+                            "next_check_at": None,
+                        }
+                        db.execute(
+                            "UPDATE task_runs SET status='waiting',wait_json=?,"
+                            "version=version+1 WHERE run_id=?",
+                            (encode(wait), r["run_id"]),
+                        )
+                        current = db.execute(
+                            "SELECT * FROM task_runs WHERE run_id=?", (r["run_id"],)
+                        ).fetchone()
+                        advance(db, t, current)
+                        continue
             if value["executor"]["kind"] == "program":
                 did = uuid.uuid4().hex
                 db.execute(
@@ -932,16 +998,25 @@ def tick(db):
 
                     bind_pending(db, t, r, context)
                 else:
+                    continuation = (
+                        "Continue using requirements: "
+                        + r["spec_snapshot_json"]
+                        + "\nCheckpoint: "
+                        + r["progress_json"]
+                    )
+                    if execution_mode(value["executor"]) == "dynamic_workflow":
+                        from core.tasks.workflow import list_nodes
+
+                        continuation += "\nWorkflow node results:\n" + encode(
+                            list_nodes(db, r["run_id"])
+                        )
                     resume(
                         db,
                         t["user_id"],
                         {
                             "agent_id": r["agent_id"],
                             "message_id": uuid.uuid4().hex,
-                            "content": "Continue using requirements: "
-                            + r["spec_snapshot_json"]
-                            + "\nCheckpoint: "
-                            + r["progress_json"],
+                            "content": continuation,
                         },
                     )
                 db.execute(
@@ -1020,9 +1095,7 @@ def finish_agent(db, run, result):
         return
     from core.subagents.storage import finish
 
-    actor = db.execute(
-        "SELECT * FROM subagents WHERE agent_id=?", (run["agent_id"],)
-    ).fetchone()
+    actor = db.execute("SELECT * FROM subagents WHERE agent_id=?", (run["agent_id"],)).fetchone()
     if actor and actor["status"] == "running":
         finish(db, actor, "succeeded", result["summary"])
 
@@ -1194,6 +1267,15 @@ def report(db, storage_id, p):
             ).fetchone():
                 error("FORBIDDEN", "Cannot wait for unrelated subagent")
     if decision == "complete":
+        from core.tasks.workflow import has_nodes
+
+        if has_nodes(db, r["run_id"]):
+            incomplete = db.execute(
+                "SELECT COUNT(*) FROM task_workflow_nodes WHERE run_id=? AND status!='succeeded'",
+                (r["run_id"],),
+            ).fetchone()[0]
+            if incomplete:
+                error("INVALID_STATE", "Workflow nodes must all succeed before completion")
         complete_agent(db, t, r, args["result"])
     elif decision == "wait":
         question = uuid.uuid4().hex
@@ -1331,8 +1413,17 @@ def guard(db, uid, p):
         "subagent_cancel",
         "subagent_continue",
     }
+    mode = execution_mode(json.loads(r["spec_snapshot_json"])["executor"])
+    team = p["tool"] in {"team_send", "team_inbox", "team_members"}
+    workflow = p["tool"] in {"workflow_define", "workflow_status"}
     if not (
-        (actor.role == AgentRole.TASK_AGENT and management)
+        (
+            actor.role == AgentRole.TASK_AGENT
+            and mode in {"parallel_subagents", "agent_team"}
+            and management
+        )
+        or (mode == "agent_team" and team)
+        or (actor.role == AgentRole.TASK_AGENT and mode == "dynamic_workflow" and workflow)
         or (actor.role == AgentRole.SUBAGENT and p["tool"] == "subagent_notify")
         or allowed(profile, p["tool"])
     ):

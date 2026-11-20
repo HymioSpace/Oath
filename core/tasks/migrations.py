@@ -17,14 +17,19 @@ def execute_script(db, script):
 
 def migrate(db):
     version = [row[0] for row in db.execute("SELECT version FROM schema_version")]
+    if version == [5]:
+        return
     if version == [4]:
+        upgrade_collaboration(db)
         return
     if version == [3]:
         upgrade_completion(db)
+        upgrade_collaboration(db)
         return
     if version == [2]:
         upgrade_delegation(db)
         upgrade_completion(db)
+        upgrade_collaboration(db)
         return
     if version != [1]:
         raise RuntimeError("Unsupported database schema")
@@ -38,6 +43,7 @@ def migrate(db):
     db.execute("DROP TABLE schema_version_v1")
     upgrade_delegation(db)
     upgrade_completion(db)
+    upgrade_collaboration(db)
 
 
 def upgrade_delegation(db):
@@ -86,3 +92,58 @@ def upgrade_completion(db):
         "'$.run.stage','$.task.next_review_at')"
     )
     db.execute("UPDATE schema_version SET version=4 WHERE id=1")
+
+
+def upgrade_collaboration(db):
+    columns = {row[1] for row in db.execute("PRAGMA table_info(task_delegations)")}
+    if "role" not in columns:
+        db.execute("ALTER TABLE task_delegations ADD COLUMN role TEXT NOT NULL DEFAULT 'subagent'")
+    if "workflow_node_id" not in columns:
+        db.execute("ALTER TABLE task_delegations ADD COLUMN workflow_node_id TEXT")
+    execute_script(
+        db,
+        """
+CREATE TABLE IF NOT EXISTS task_team_messages (
+ message_id TEXT NOT NULL,
+ user_id TEXT NOT NULL,
+ task_id TEXT NOT NULL,
+ run_id TEXT NOT NULL,
+ sender_agent_id TEXT NOT NULL REFERENCES subagents(agent_id),
+ recipient_agent_id TEXT NOT NULL REFERENCES subagents(agent_id),
+ content TEXT NOT NULL,
+ created_at REAL NOT NULL,
+ PRIMARY KEY(user_id,message_id),
+ FOREIGN KEY(user_id,task_id,run_id) REFERENCES task_runs(user_id,task_id,run_id)
+);
+CREATE INDEX IF NOT EXISTS task_team_messages_run
+ ON task_team_messages(run_id,created_at,message_id);
+CREATE INDEX IF NOT EXISTS task_team_messages_recipient
+ ON task_team_messages(recipient_agent_id,created_at);
+
+CREATE TABLE IF NOT EXISTS task_workflow_nodes (
+ run_id TEXT NOT NULL,
+ user_id TEXT NOT NULL,
+ task_id TEXT NOT NULL,
+ node_id TEXT NOT NULL,
+ position INTEGER NOT NULL,
+ title TEXT NOT NULL,
+ objective TEXT NOT NULL,
+ success_criteria TEXT NOT NULL,
+ depends_on_json TEXT NOT NULL CHECK(json_valid(depends_on_json)),
+ agent_id TEXT REFERENCES subagents(agent_id),
+ status TEXT NOT NULL CHECK(status IN
+  ('pending','running','succeeded','failed','cancelled','blocked')),
+ result_json TEXT CHECK(result_json IS NULL OR json_valid(result_json)),
+ error_json TEXT CHECK(error_json IS NULL OR json_valid(error_json)),
+ created_at REAL NOT NULL,
+ started_at REAL,
+ finished_at REAL,
+ PRIMARY KEY(run_id,node_id),
+ FOREIGN KEY(user_id,task_id,run_id) REFERENCES task_runs(user_id,task_id,run_id)
+);
+CREATE INDEX IF NOT EXISTS task_workflow_nodes_order
+ ON task_workflow_nodes(run_id,position);
+CREATE INDEX IF NOT EXISTS task_workflow_nodes_agent ON task_workflow_nodes(agent_id);
+""",
+    )
+    db.execute("UPDATE schema_version SET version=5 WHERE id=1")

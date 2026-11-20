@@ -273,6 +273,14 @@
           "kind": {
             "const": "agent"
           },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "parallel_subagents",
+                "agent_team",
+                "dynamic_workflow"
+              ]
+            },
           "tool_profile": {
             "type": "string",
             "minLength": 1,
@@ -1919,6 +1927,10 @@
         ]
       },
       "updated_at": {
+        "type": "string",
+        "format": "date-time"
+      },
+      "created_at": {
         "type": "string",
         "format": "date-time"
       },

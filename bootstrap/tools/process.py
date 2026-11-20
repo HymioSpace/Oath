@@ -20,6 +20,7 @@ from core.shell.cli_tool import CliTool
 from core.skill import SKILL, SkillSystem, SkillTool
 from core.storage.adapters import DurableEventSink, StoredDetails, StoredQueue, StoredTraces
 from core.subagents.tools import tools as subagent_tools
+from core.tasks.collaboration_tools import tools as collaboration_tools
 from core.tasks.fetch import TaskFetchTool
 from core.tasks.tools import tools as task_tools
 from core.tool.impl import ThreadedToolSystem
@@ -160,6 +161,7 @@ class ToolService:
                 binding = self.tools.store.storage.call("task.context", user_id=target.storage_id)
                 if binding:
                     role = binding["role"]
+                    mode = binding.get("execution_mode", "parallel_subagents")
                     management = {
                         "subagent_spawn",
                         "subagent_list",
@@ -167,15 +169,29 @@ class ToolService:
                         "subagent_cancel",
                         "subagent_continue",
                     }
+                    team = {"team_send", "team_inbox", "team_members"}
+                    workflow = {"workflow_define", "workflow_status"}
                     definitions = tuple(
                         d
                         for d in definitions
                         if (
-                            (role == "task_agent" and d.name in management)
+                            (
+                                role == "task_agent"
+                                and mode in {"parallel_subagents", "agent_team"}
+                                and d.name in management
+                            )
+                            or (mode == "agent_team" and d.name in team)
+                            or (
+                                role == "task_agent"
+                                and mode == "dynamic_workflow"
+                                and d.name in workflow
+                            )
                             or (role == "subagent" and d.name == "subagent_notify")
                             or (
                                 allowed(binding["spec"]["executor"]["tool_profile"], d.name)
                                 and d.name not in management
+                                and d.name not in team
+                                and d.name not in workflow
                                 and not (role == "subagent" and d.name == "task_report")
                             )
                         )
@@ -236,7 +252,11 @@ def run(config):
     details = StoredDetails(storage)
     registry.register(DetailReadTool(details))
     registry.register(TaskFetchTool())
-    for tool in (*subagent_tools(storage), *task_tools(storage)):
+    for tool in (
+        *subagent_tools(storage),
+        *task_tools(storage),
+        *collaboration_tools(storage),
+    ):
         registry.register(tool)
     skills = SkillSystem(
         (config.agent.skill_dir, *extensions.skill_dirs), scan_dirs=config.agent.skill_scan_dirs

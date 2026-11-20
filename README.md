@@ -192,9 +192,14 @@ The verifier receives a service-authenticated POST with `{"credential": "USER_AC
 
 Set `agent.selectable_models` to additional model IDs supported by the configured provider. A `user.message` may include `model`; Oath rejects IDs outside this allowlist plus the default provider model. The selected model is persisted per user and frozen in each step, including retries and tool continuations. Choices in `selectable_models` share the default provider. Configure `agent.model_providers.<choice>` for a separate API endpoint, model ID, Vault credential and parameters; see the commented DeepSeek example in `oath.example.toml`.
 
-### Bounded delegation
+### Durable tasks and Agent collaboration
 
-The main agent can spawn independent subagents, inspect their state and cancel them. Each has its own
-context, step budget and deadline. Children cannot delegate again. Intermediate findings and completion
-return as durable events, while the main agent remains available for new input.
-See [delegation and application events](spec/feature-subagents.md).
+The interaction Agent turns temporary parallel work and long-running tracking work into durable
+Tasks. Each TaskRun owns one TaskAgent; every Subagent is bound to that run, has its own context,
+step budget and deadline, and remains visible in the task execution graph. Agent execution modes
+are independent from schedule scope: fixed program/reminder, parallel Subagents, Agent Team with
+durable peer messages, and dynamic workflow with an explicit dependency DAG. Only the TaskAgent
+may delegate. Intermediate findings, peer communication, node results and completion return as
+durable events while the conversation remains available for new input.
+See [the task system](spec/feature-task-system.md) and
+[delegation and application events](spec/feature-subagents.md).

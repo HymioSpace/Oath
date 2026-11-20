@@ -504,6 +504,11 @@ def test_task_model_step_budget_cannot_reset_through_continuation(service):
         ]["status"]
         == "paused"
     )
+    detail = service.call(
+        "task.get", user_id="u1", task_id=made["task"]["task_id"], view="detail"
+    )
+    assert detail["execution"]["task_agent"]["execution_status"] == "paused"
+    assert detail["execution"]["task_agent"]["status"] == "paused"
 
 
 def test_no_progress_is_reported_once_without_model_polling(service):

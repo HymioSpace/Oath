@@ -18,13 +18,28 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
         outbox.append(
             db, uid, "step.status", {"step_id": "s1", "trace_id": "t1", "status": "running"}
         )
-        outbox.append(db, uid, "assistant.message", {"step_id": "s1", "content": "Reading sources"})
+        outbox.append(
+            db,
+            uid,
+            "assistant.message",
+            {
+                "step_id": "s1",
+                "content": "Reading sources",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "name": "browser",
+                        "arguments": {"description": "Inspect the source page"},
+                    }
+                ],
+            },
+        )
         outbox.append(
             db,
             uid,
             "tool.terminal",
             {
-                "tool": "browser",
+                "invocation_id": "s1-0",
                 "status": "succeeded",
                 "arguments": {"secret": "hidden"},
                 "result": "private",
@@ -34,6 +49,10 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
     assert len(result["entries"]) == 3
     assert result["entries"][1]["trace_id"] == "t1"
     assert "private" not in str(result) and "hidden" not in str(result)
+    assert result["entries"][1]["tools"] == ["browser"]
+    assert result["entries"][1]["tool_calls"][0]["description"] == "Inspect the source page"
+    assert result["entries"][2]["tool"] == "browser"
+    assert result["entries"][2]["tool_description"] == "Inspect the source page"
     assert (
         service.call(
             "subagent.activity",

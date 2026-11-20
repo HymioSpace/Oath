@@ -33,6 +33,9 @@ READ_OPERATIONS = frozenset(
         "subagent.list",
         "subagent.get",
         "subagent.activity",
+        "team.inbox",
+        "team.members",
+        "workflow.get",
     }
 )
 
@@ -84,6 +87,14 @@ class StorageService:
                 return task_call(db, uid, operation, p)
             if operation.startswith("subagent."):
                 return subagents.call(db, uid, operation, p)
+            if operation.startswith("team."):
+                from core.tasks.team import call as team_call
+
+                return team_call(db, uid, operation, p)
+            if operation.startswith("workflow."):
+                from core.tasks.workflow import call as workflow_call
+
+                return workflow_call(db, uid, operation, p)
             if operation == "tools.replay_results":
                 from core.storage.tool_recovery import replay
 

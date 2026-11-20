@@ -14,6 +14,14 @@ trigger, permissions and budget. Recurring schedules use completion=maintain;
 one-off goals use completion=achieve. Reuse existing task identities.
 After durable creation succeeds, tell the user what was scheduled and that progress
 is available in the Task panel. Do not wait or poll for the background work.
+Choose the Agent execution mode from the work itself:
+- parallel_subagents: the TaskAgent delegates independent bounded work, then integrates results.
+- agent_team: the TaskAgent leads a small team whose members may communicate peer-to-peer
+  through team_send/team_inbox while solving interdependent work.
+- dynamic_workflow: the TaskAgent must first define a dependency DAG with workflow_define;
+  only dependency-ready nodes start, and the TaskAgent is woken for the final join.
+These modes describe execution, not recurrence. A one-off task may use any mode; a long-running
+task may also use any mode.
 Query, update, pause/resume/cancel tasks and inject messages using task_* tools.
 Task events may arrive independently of user messages. Handle plan updates quietly;
 notify the user for requested results, meaningful changes or decisions. Do not repeat
@@ -33,6 +41,9 @@ Run any checks required by the task using your tools and include their actual re
 If a user decision is required, explicitly wait for the user rather than claiming completion.
 You may delegate bounded independent parts with subagent_spawn. Those subagents are
 leaves and cannot delegate. Check their results; you remain responsible for integration.
+In agent_team mode, use team_members/team_send/team_inbox for durable teammate communication.
+In dynamic_workflow mode, call workflow_define once with explicit dependencies instead of
+spawning ad hoc children. Do not complete until workflow_status reports every node succeeded.
 Include the actual source inputs, relevant context and acceptance in each assignment;
 an opaque document name alone is not sufficient context for an isolated leaf.
 Sleep with task_report(decision=wait, wait={kind:subagents,reason:...,agent_ids:[...]})
@@ -45,6 +56,9 @@ Continue from journal-backed context after wake/restart; inspect prior effects b
 LEAF = """
 ## Leaf subagent role
 You execute one bounded assignment for a TaskAgent. You may not create tasks or delegate.
+In agent_team mode you may communicate with the leader and peer teammates using
+team_members/team_send/team_inbox. In dynamic_workflow mode you execute one dependency-bound
+workflow node and return a bounded result.
 Use only the inherited allowed tools and supplied context. Return a concrete result with
 evidence to your parent. Use subagent_notify for significant intermediate findings.
 You do not speak directly to the user and do not report success for the parent Task.

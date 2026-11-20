@@ -20,7 +20,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
         )
     store = Database(path)
     with store.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
         assert db.execute("SELECT user_id FROM users").fetchone()[0] == "owner"
         assert db.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         tables = db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'task%'")
@@ -28,7 +28,7 @@ def test_upgrade_existing_database_preserves_user(tmp_path):
     store._owner.close()
     reopened = Database(path)
     with reopened.transaction(readonly=True) as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
     reopened._owner.close()
 
 
@@ -109,5 +109,34 @@ def test_upgrade_task_v2_preserves_existing_task_run(tmp_path):
     assert after["run"]["agent_id"] == before["run"]["agent_id"]
     assert after["run"]["status"] == "running"
     with restored.transaction() as db:
-        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 4
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        assert db.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_upgrade_task_v4_adds_team_messages_and_workflow_nodes(tmp_path):
+    from tests._support.storage import Storage
+    from tests.test_tasks_e2e import create
+
+    path = tmp_path / "oath.sqlite3"
+    service = Storage(path)
+    task = create(service, "agent")["task"]
+    service._inner.database._owner.close()
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE task_team_messages")
+        db.execute("DROP TABLE task_workflow_nodes")
+        db.execute("UPDATE schema_version SET version=4")
+    restored = Storage(path)
+    detail = restored.call("task.get", user_id="u1", task_id=task["task_id"], view="detail")
+    assert detail["task"]["task_id"] == task["task_id"]
+    with restored.transaction() as db:
+        assert db.execute("SELECT version FROM schema_version").fetchone()[0] == 5
+        tables = {
+            row[0]
+            for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'task_%'"
+            )
+        }
+        assert {"task_team_messages", "task_workflow_nodes"} <= tables
+        columns = {row[1] for row in db.execute("PRAGMA table_info(task_delegations)")}
+        assert {"role", "workflow_node_id"} <= columns
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []

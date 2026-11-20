@@ -315,13 +315,41 @@ def activity(db, uid, p):
     rows = sorted(rows, key=lambda r: r["seq"])
     entries = []
     traces = {}
+    calls_by_invocation = {}
     for event in rows:
         data = json.loads(event["payload_json"])
         step = data.get("step_id", "")
         if data.get("trace_id"):
             traces[step] = data["trace_id"]
         calls = data.get("tool_calls", [])
+        calls = calls if isinstance(calls, list) else []
+        structured_calls = []
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict):
+                continue
+            name = call.get("name") or call.get("tool") or ""
+            arguments = call.get("arguments")
+            description = (
+                arguments.get("description", "")
+                if isinstance(arguments, dict)
+                else ""
+            )
+            structured = {
+                "name": str(name),
+                "description": str(description),
+                "invocation_id": f"{step}-{index}" if step else "",
+            }
+            structured_calls.append(structured)
+            if step:
+                calls_by_invocation[f"{step}-{index}"] = structured
         content = data.get("content", "")
+        visible_content = (
+            content[:1200]
+            if event["type"] == "assistant.message" and isinstance(content, str)
+            else ""
+        )
+        if event["type"] == "permission.requested":
+            visible_content = str(data.get("title") or data.get("summary") or "")[:1200]
         entries.append(
             {
                 "id": event["seq"],
@@ -329,15 +357,25 @@ def activity(db, uid, p):
                 "created_at": event["created_at"],
                 "step_id": step,
                 "status": data.get("status", data.get("outcome", "")),
-                "tool": data.get("tool", ""),
-                "tools": [c.get("tool", "") for c in calls if isinstance(c, dict)],
-                "content": content[:2000] if isinstance(content, str) else "",
+                "tool": str(data.get("tool") or ""),
+                "tool_description": "",
+                "tools": [
+                    str(c.get("name") or c.get("tool") or "")
+                    for c in calls
+                    if isinstance(c, dict)
+                ],
+                "tool_calls": structured_calls,
+                "content": visible_content,
                 "trace_id": data.get("trace_id", ""),
                 "invocation_id": data.get("invocation_id", ""),
             }
         )
     for entry in entries:
         entry["trace_id"] = entry["trace_id"] or traces.get(entry["step_id"], "")
+        call = calls_by_invocation.get(entry["invocation_id"])
+        if call:
+            entry["tool"] = call["name"]
+            entry["tool_description"] = call["description"]
     return {
         "agent_id": agent["agent_id"],
         "status": agent["status"],

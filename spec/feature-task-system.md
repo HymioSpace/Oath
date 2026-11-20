@@ -325,8 +325,16 @@ CREATE INDEX task_delegations_run ON task_delegations(run_id);
 | task_pause/resume/cancel | task_id、expected_revision、reason；控制未来执行与所属协作者。 |
 | task_retry | failed_run_id、task_id、expected_revision、reason；确认先前效果后重试，保留历史。 |
 | task_report | 仅绑定该 Run 的 TaskAgent 可调用；decision=continue/wait/complete/blocked，checkpoint 可选；完成须带 result，等待须带 wait。 |
+| team_send / team_inbox / team_members | 仅在 `agent_team` 模式可用；Leader 与绑定 Teammate 可持久互发消息，消息按 TaskRun 隔离并记录发送者/接收者。 |
+| workflow_define / workflow_status | 仅在 `dynamic_workflow` 模式由 TaskAgent 调用；节点先绑定 Subagent，再按 DAG 依赖调度，全部成功后才唤醒 Leader 整合。 |
 
-TaskAgent 的 `subagent_spawn/list/get/continue/cancel` 仅管理所属叶子；叶子只可用 `subagent_notify` 回传实际发现，不能报告整个 Task 完成。检查在工具暴露、准入与执行时共同生效。
+Agent executor 显式区分 `parallel_subagents`、`agent_team` 和 `dynamic_workflow`；`program`
+表示固定动作执行，不启动 Agent。执行方式与一次性/周期性的时间维度正交，同一模式可以用于
+一次性或长期任务。TaskAgent 的 `subagent_spawn/list/get/continue/cancel` 仅管理所属叶子；
+Team 成员还可通过 Team 工具互相沟通，工作流节点成员只执行依赖绑定的节点。所有子 Agent
+均由 TaskAgent 创建并绑定 TaskRun，交互 Agent 不能创建脱离任务的临时 Subagent。
+叶子只可用 `subagent_notify` 回传实际发现，不能报告整个 Task 完成。检查在工具暴露、准入与
+执行时共同生效。
 
 完成报告示例（没有实际进展摘要或引用时不强迫编造）：
 
@@ -356,7 +364,10 @@ TaskAgent 的 `subagent_spawn/list/get/continue/cancel` 仅管理所属叶子；
 
 这些只是契约示例，不是实际任务数据。`continue` 必须有实际计划的 `checkpoint.next_step`，不能拿空报告作为心跳绕过停滞检查。
 
-`task_get` 的 `execution` 返回执行器、TaskAgent、叶子、真实检查点、等待、用量、计划和最近事件；默认每节点最多 40 条活动、最近 50 条事件，完整事件走分页接口。列表调用 `include_execution=false`，选中详情才加载活动图。未发生的数据不补出语义或时间。
+`task_get` 的 `execution` 返回执行模式、TaskAgent、绑定成员、真实检查点、等待、用量、计划、
+Team 消息、DAG 节点/边和最近事件；默认每节点最多 40 条活动、最近 50 条事件。任务一级只
+展示协作和用户可见结果，工具调用保留在 Agent 详情。列表调用 `include_execution=false`，
+选中详情才加载执行图。未发生的数据不补出语义或时间。
 
 HTTP：Oath `/tasks/{list,get,pause,resume,cancel}` 供 Hymio 访问，写入要求幂等键；主 Agent 工具走内部 Storage。Hymio `/tasks` 只支持列表、详情与暂停/恢复/取消，不开放主动创建 GUI。
 

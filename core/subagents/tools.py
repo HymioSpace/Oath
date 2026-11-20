@@ -49,6 +49,9 @@ class SubagentTool(Tool):
     def __init__(self, storage, action):
         self.storage, self.action = storage, action
         self.allow_subagent = True
+        # Subagents are execution details of a TaskAgent, never ad-hoc children of the
+        # interaction agent. Temporary parallel work must first become a Task.
+        self.subagent_only = True
         description, required, fields = _SPECS[action]
         self._definition = ToolDefinition(
             "subagent_" + action,
