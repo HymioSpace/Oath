@@ -54,7 +54,10 @@ def read(path: Path) -> Skill:
         raw_channels = metadata.get("channels")
     if raw_channels is not None and (
         not isinstance(raw_channels, list)
-        or any(not isinstance(channel, str) or not 0 < len(channel) <= 32 for channel in raw_channels)
+        or any(
+            not isinstance(channel, str) or not 0 < len(channel) <= 32
+            for channel in raw_channels
+        )
     ):
         raise SkillError(f"{path} 的 channels 必须是渠道名数组")
     return Skill(

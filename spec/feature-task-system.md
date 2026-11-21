@@ -39,6 +39,12 @@ flowchart TB
 
 三种 Agent 共用 Oath Core；差别是角色 prompt、上下文、工具和执行边界。身份保持根账户下的独立 ID，不通过嵌套字符串扩大权限。
 
+TaskAgent 的运行时 prompt 必须注入 `executor.mode`，不能只把模式保存在 Task JSON 中。
+`parallel_subagents` 要求实际创建至少两个边界独立的叶子 Agent；`agent_team` 要求实际 Teammate
+和持久 Team 通信；`dynamic_workflow` 要求先持久化 DAG。模式被选择后，TaskAgent 不能静默降级成
+串行执行；确有不满足条件的边界时必须报告 blocked 原因。该约束同时进入 system prompt 与首次
+assignment，确保恢复和新上下文仍保留相同执行定义。
+
 ## 2. 执行、等待、完成与通知
 
 ### 2.1 一次复杂任务
@@ -102,6 +108,8 @@ stateDiagram-v2
 - Task 保存目标、计划与跨周期笔记；Run 保存本次要求快照、Core 上下文、检查点和结果。
 - 交互 Agent 不把整个主会话复制给 TaskAgent。任务通过明确资料和引用建立初始上下文；委派叶子时也必须交给实际输入，不能只给一个不可读取的资料名。
 - TaskAgent 的真实输入、模型调用、工具与后续消息进入 Core journal。同次执行恢复原上下文；下一周期读取 Task 长期笔记，建立新上下文。
+- 周期任务的每个 Run 绑定一个 `due_at` occurrence，TaskAgent 只分析和报告该 occurrence 的证据与
+  结果；Previous task notes 是背景，不是待批量处理的积压结果，多个到期时间不能合并成一次回答。
 - `task_message` 是补充输入，不是“下一步”摘要。运行中不替换活动租约；暂停期间保存至恢复；尚未启动或上一期结束时，绑定下一次执行，用 `message_bound` 记录避免重复交接。
 - 永久调整目标、资料或计划使用 `task_update`。影响当前执行时采用暂停、等待工具结算、更新、恢复，避免旧动作继续按新要求执行。
 - Supervisor 当前的目标跟进是检查点、等待、超时、预算及消息机制；尚无独立模型自动理解长期目标并评判进展。需要语义调整时由 TaskAgent 或交互 Agent 处理。

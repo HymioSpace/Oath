@@ -3,11 +3,10 @@ from pathlib import Path
 import pytest
 from jsonschema import ValidationError, validate
 
-from core.protocol.datatype import ToolDefinition, ToolInvocation, ToolResult, User
+from core.protocol.datatype import ToolDefinition, ToolResult
 from core.protocol.interface import Tool
 from core.skill.system import SkillSystem
 from core.tool.registry import ToolRegistry
-
 
 SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
 

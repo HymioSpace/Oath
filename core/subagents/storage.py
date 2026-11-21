@@ -332,8 +332,8 @@ def activity(db, uid, p):
         raise ValueError("Subagent not found")
     row = agent
     limit, after = p.get("limit", 60), p.get("after")
-    if type(limit) is not int or not 1 <= limit <= 100:
-        raise ValueError("limit must be 1..100")
+    if type(limit) is not int or not 1 <= limit <= 200:
+        raise ValueError("limit must be 1..200")
     if after is not None and (type(after) is not int or after < 0):
         raise ValueError("Invalid activity cursor")
     rows = db.execute(

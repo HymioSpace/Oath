@@ -447,6 +447,31 @@ def test_recurring_task_remembers_result_and_schedules_another_run(service):
     assert detail["memory"]["summary"]
 
 
+def test_spawned_task_agent_definition_includes_mode_and_occurrence(service):
+    import time
+
+    args = specification("agent")
+    args["executor"]["mode"] = "parallel_subagents"
+    args["completion"] = "maintain"
+    args["trigger"] = {"mode": "daily", "time": "20:00", "timezone": "Asia/Shanghai"}
+    made = service.call("task.create", user_id="u1", request_id="mode-contract", **args)
+    with service.transaction() as db:
+        db.execute(
+            "UPDATE tasks SET next_due_at=? WHERE task_id=?",
+            (time.time() - 1, made["task"]["task_id"]),
+        )
+    service.call("task.tick")
+    with service.transaction() as db:
+        run = db.execute("SELECT * FROM task_runs").fetchone()
+        child = db.execute(
+            "SELECT * FROM subagents WHERE agent_id=?", (run["agent_id"],)
+        ).fetchone()
+    assert "Selected execution mode: parallel_subagents" in child["objective"]
+    assert "at least two" in child["objective"]
+    assert "leaf Agents with subagent_spawn" in child["objective"]
+    assert "Occurrence due at:" in child["objective"]
+
+
 def test_parent_resume_preserves_independently_paused_child(service):
     parent = create(service)["task"]
     args = specification()

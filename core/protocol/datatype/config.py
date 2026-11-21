@@ -49,6 +49,8 @@ class AgentConfig:
     provider: ModelProviderConfig = field(default_factory=ModelProviderConfig)
     selectable_models: tuple[str, ...] = ()
     model_providers: dict[str, ModelProviderConfig] = field(default_factory=dict)
+    #: Optional model used only for history compaction. Empty keeps the default provider.
+    compress_model: str = ""
     max_output_tokens: int = 2048
     temperature: float | None = None
 
@@ -149,6 +151,14 @@ class AgentConfig:
             raise ValueError("model_providers requires named, configured providers")
         if self.provider.model in self.model_providers:
             raise ValueError("model_providers must not replace the default provider")
+        if not isinstance(self.compress_model, str):
+            raise ValueError("compress_model must be text")
+        if self.compress_model and self.compress_model not in {
+            self.provider.model,
+            *self.selectable_models,
+            *self.model_providers,
+        }:
+            raise ValueError("compress_model must name a configured model")
         from core.context.policy import validate_windows
 
         validate_windows(self.model_context_windows)

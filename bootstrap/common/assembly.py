@@ -26,7 +26,7 @@ def build_context(config, storage, queue, tools, fence=None):
         skill_dirs=config.agent.skill_dirs,
     )
     agent_config = config.agent
-    from core.tasks.prompts import INTERACTION, LEAF, TASK_AGENT
+    from core.tasks.prompts import INTERACTION, LEAF, leaf_prompt, task_agent_prompt
 
     role_prompt = INTERACTION
     if fence and User.from_storage_id(fence["user_id"]).agent_id:
@@ -38,7 +38,11 @@ def build_context(config, storage, queue, tools, fence=None):
         task_binding = storage.call("task.context", user_id=child_user.storage_id)
         if task_binding:
             agent_config = replace(agent_config, context_provider_url="")
-            role_prompt = TASK_AGENT if task_binding["role"] == "task_agent" else LEAF
+            role_prompt = (
+                task_agent_prompt(task_binding)
+                if task_binding["role"] == "task_agent"
+                else leaf_prompt(task_binding)
+            )
         agent_config = replace(
             agent_config,
             max_run_steps=child["max_steps"],

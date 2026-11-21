@@ -77,7 +77,7 @@ def inspect_execution(db, task, run):
         if run["result_json"]:
             actor["result"] = json.loads(run["result_json"])["summary"]
         actor["activity"] = activity(
-            db, task["user_id"], {"agent_id": run["agent_id"], "limit": 40}
+            db, task["user_id"], {"agent_id": run["agent_id"], "limit": 200}
         )
         actor["communications"] = communications(run["agent_id"])
     children = []
@@ -99,7 +99,7 @@ def inspect_execution(db, task, run):
             ),
         )
         child["activity"] = activity(
-            db, task["user_id"], {"agent_id": row["agent_id"], "limit": 40}
+            db, task["user_id"], {"agent_id": row["agent_id"], "limit": 200}
         )
         child["communications"] = communications(row["agent_id"])
         children.append(child)

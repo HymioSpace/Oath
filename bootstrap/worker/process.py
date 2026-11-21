@@ -34,14 +34,15 @@ def run(config):
         config.secrets.secret_id_file,
     )
     provider = ConfiguredProvider(config.agent, secrets, resolver(config.agent))
+    compress_model = config.agent.compress_model or config.agent.provider.model
     compaction = CompactionCoordinator(
         RuntimeStore(storage, patch_commits=True),
         LlmCompactor(
             provider,
-            model=config.agent.provider.model,
+            model=compress_model,
             max_output_tokens=config.agent.compress_max_output_tokens,
             context_window=model_capacity(
-                config.agent.provider.model, config.agent.model_context_windows
+                compress_model, config.agent.model_context_windows
             ),
         ),
         config.agent,

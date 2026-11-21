@@ -30,6 +30,8 @@ compress_sync_at_ratio = 0.9
 # model_context_windows = { "private-model" = 256000 }
 # Optional model IDs using this same provider endpoint and credential.
 selectable_models = []
+# Optional separate model for history compaction. Empty uses the default provider model.
+# compress_model = "deepseek-flash"
 system_prompt = """
 # Assistant
 Help the user complete their request. Be concise, truthful and use the user's language.
