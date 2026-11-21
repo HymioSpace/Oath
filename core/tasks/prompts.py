@@ -89,3 +89,88 @@ into neighboring work, make the parent's final decision or silently fill missing
 boundary is insufficient or conflicts with the success criteria, stop and notify the parent.
 You do not speak directly to the user and do not report success for the parent Task.
 """
+
+
+_MODE_CONTRACTS = {
+    "parallel_subagents": """
+Selected execution mode: parallel_subagents.
+This is a hard execution contract, not a stylistic preference. Before broad independent work,
+identify at least two non-overlapping, independently verifiable deliverables. Create at least two
+leaf Agents with subagent_spawn, each with explicit inputs, in-scope work, exclusions, acceptance
+and a concrete result. Then wait for them and integrate their findings yourself.
+Do not replace delegation with a serial checklist or several headings in one Agent response.
+If the Task genuinely has fewer than two independent boundaries, report blocked with that concrete
+reason instead of silently executing the selected multi-Agent mode as one serial Agent.
+""".strip(),
+    "agent_team": """
+Selected execution mode: agent_team.
+This is a hard execution contract. Establish a small team with at least two bounded teammates before
+broad execution begins. Use team_members, team_send and team_inbox for durable peer communication.
+Each teammate owns a distinct boundary; the leader keeps final synthesis and accountability.
+Do not claim team execution unless the teammate Agents were actually created and used.
+""".strip(),
+    "dynamic_workflow": """
+Selected execution mode: dynamic_workflow.
+This is a hard execution contract. Before doing broad work, call workflow_define once to persist the
+DAG, node ownership and real dependency edges. Describe each node as a separately verifiable unit.
+Do not use ad hoc parallel children in place of the DAG, and do not complete until workflow_status
+reports every required node succeeded or a real blocker is reported.
+""".strip(),
+}
+
+
+def execution_mode_contract(mode):
+    """Return the mode requirement that must travel with a TaskAgent definition."""
+
+    return _MODE_CONTRACTS.get(
+        mode,
+        (
+            "Selected execution mode: one TaskAgent.\n"
+            "No child Agents are required unless the user later changes the Task definition."
+        ),
+    )
+
+
+def occurrence_contract(binding):
+    """Keep each recurring TaskRun scoped to its own scheduled occurrence."""
+
+    occurrence = binding.get("occurrence") or {}
+    trigger_mode = occurrence.get("trigger_mode", "")
+    completion = occurrence.get("completion", "")
+    if trigger_mode not in {"daily", "weekly"} and completion != "maintain":
+        return ""
+    due_at = occurrence.get("due_at") or "the current scheduled time"
+    return f"""
+This TaskRun represents exactly one occurrence, due at {due_at}.
+Analyze and report only evidence and outputs available for this occurrence. Finish this Run before a
+later occurrence creates a new Run. Previous task notes are bounded history, not a batch of pending
+results; do not merge multiple due times into one response or wait to process future occurrences in
+this Run. If older unprocessed results exist, identify them as backlog and handle only what the
+current Task definition explicitly asks for.
+""".strip()
+
+
+def task_agent_prompt(binding):
+    parts = [
+        TASK_AGENT,
+        "## Selected execution contract\n" + execution_mode_contract(binding.get("execution_mode")),
+        occurrence_contract(binding),
+    ]
+    return "\n\n".join(part for part in parts if part)
+
+
+def leaf_prompt(binding):
+    mode = binding.get("execution_mode", "")
+    if mode == "agent_team":
+        detail = (
+            "You are an Agent Team teammate. Use team_send/team_inbox only within your assigned "
+            "boundary and keep final synthesis with the leader."
+        )
+    elif mode == "dynamic_workflow":
+        detail = (
+            "You own one Dynamic Workflow node. Return the bounded output required by that node "
+            "and do not start dependent nodes yourself."
+        )
+    else:
+        detail = "You are one bounded leaf in a parallel TaskAgent assignment."
+    return LEAF + "\n\nSelected execution mode: " + mode + "\n" + detail

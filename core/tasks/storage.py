@@ -646,14 +646,20 @@ def call(db, uid, operation, params):
         if not actor:
             return None
         task = owned(db, actor.user_id, actor.task_id)
+        snapshot = json.loads(run["spec_snapshot_json"])
         return {
-            "spec": json.loads(run["spec_snapshot_json"]),
+            "spec": snapshot,
             "memory": json.loads(task["memory_json"]),
             "role": actor.role.value,
             "parent_agent_id": actor.parent_agent_id,
             "run_id": actor.run_id,
             "task_id": actor.task_id,
-            "execution_mode": execution_mode(json.loads(run["spec_snapshot_json"])["executor"]),
+            "execution_mode": execution_mode(snapshot["executor"]),
+            "occurrence": {
+                "due_at": iso(run["due_at"]),
+                "trigger_mode": snapshot["trigger"]["mode"],
+                "completion": snapshot["completion"],
+            },
         }
     if action == "tick":
         return tick(db)
@@ -1056,6 +1062,7 @@ def tick(db):
                 event(db, t, "delivery_requested", {"delivery_id": did}, r)
             else:
                 from core.subagents.storage import resume, spawn
+                from core.tasks.prompts import execution_mode_contract
 
                 active = db.execute(
                     (
@@ -1076,6 +1083,7 @@ def tick(db):
                     continue
 
                 if not r["agent_id"]:
+                    mode = execution_mode(value["executor"])
                     child = spawn(
                         db,
                         t["user_id"],
@@ -1083,6 +1091,10 @@ def tick(db):
                             "request_id": "task:" + r["run_id"],
                             "title": value["title"],
                             "objective": value["objective"]
+                            + "\n\nTask execution definition:\n"
+                            + execution_mode_contract(mode)
+                            + "\nOccurrence due at: "
+                            + (iso(r["due_at"]) or "now")
                             + "\nBackground: "
                             + encode(value["context"])
                             + "\nCurrent plan: "
