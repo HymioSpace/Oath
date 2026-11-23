@@ -71,3 +71,29 @@ def test_activity_uses_owned_durable_events_and_excludes_tool_bodies(service: St
     )
     with pytest.raises(ValueError):
         service.call("subagent.activity", user_id="u2", agent_id=child["agent_id"])
+
+
+def test_activity_returns_the_complete_bounded_history(service: Storage):
+    child = service.call(
+        "subagent.spawn",
+        user_id="u1",
+        request_id="full-history",
+        title="History",
+        objective="Return all checkpoints",
+        success_criteria="Every checkpoint is visible",
+    )
+    uid = "u1:" + child["agent_id"]
+    with service.transaction() as db:
+        for index in range(25):
+            outbox.append(
+                db,
+                uid,
+                "assistant.message",
+                {"step_id": f"s{index}", "content": f"checkpoint-{index}"},
+            )
+    result = service.call(
+        "subagent.activity", user_id="u1", agent_id=child["agent_id"], limit=200
+    )
+    assert len(result["entries"]) == 25
+    assert result["entries"][0]["content"] == "checkpoint-0"
+    assert result["entries"][-1]["content"] == "checkpoint-24"
